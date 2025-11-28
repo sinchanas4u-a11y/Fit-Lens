@@ -1,0 +1,252 @@
+.live-camera-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    max-width: 800px;
+    margin: 0 auto;
+    background: white;
+    color: black;
+}
+
+.setup-screen {
+    background: white;
+    padding: 40px;
+    border-radius: 15px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+    text-align: center;
+    color: black;
+}
+
+.setup-screen h2 {
+    color: black;
+}
+
+.setup-screen p {
+    color: #333;
+}
+
+.input-group {
+    margin: 20px 0;
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    align-items: center;
+}
+
+.input-group label {
+    color: black;
+}
+
+.input-group input {
+    padding: 10px;
+    font-size: 16px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    width: 100px;
+    color: black;
+    background: white;
+}
+
+.input-group select {
+    padding: 10px;
+    font-size: 16px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    color: black;
+    background: white;
+}
+
+.start-button {
+    background: #4CAF50;
+    color: white;
+    border: none;
+    padding: 12px 30px;
+    font-size: 18px;
+    border-radius: 25px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.start-button:hover {
+    background: #45a049;
+}
+
+.camera-view {
+    position: relative;
+    border-radius: 15px;
+    overflow: hidden;
+    border: 5px solid #ddd;
+    transition: border-color 0.3s;
+}
+
+.camera-view.red {
+    border-color: #ff4444;
+}
+
+.camera-view.amber {
+    border-color: #ffbb33;
+}
+
+.camera-view.green {
+    border-color: #00C851;
+}
+
+.overlay-header {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: rgba(255, 255, 255, 0.95);
+    color: black;
+    padding: 15px;
+    text-align: center;
+    z-index: 10;
+    border-bottom: 2px solid #ddd;
+}
+
+.overlay-header h3 {
+    margin: 0;
+    font-size: 18px;
+    color: black;
+    font-weight: bold;
+}
+
+.countdown {
+    font-size: 48px;
+    font-weight: bold;
+    color: #4CAF50;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    margin-top: 10px;
+}
+
+.overlay-footer {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: rgba(255, 255, 255, 0.95);
+    padding: 15px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 10;
+    border-top: 2px solid #ddd;
+}
+
+.step-indicator {
+    display: flex;
+    gap: 15px;
+}
+
+.step-indicator span {
+    color: #999;
+    font-weight: bold;
+}
+
+.step-indicator span.active {
+    color: #4CAF50;
+    text-decoration: underline;
+}
+
+.step-indicator span.completed {
+    color: #333;
+}
+
+.cancel-button {
+    background: #f44336;
+    border: none;
+    color: white;
+    padding: 8px 20px;
+    border-radius: 15px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.cancel-button:hover {
+    background: #d32f2f;
+}
+
+.reset-button {
+    background: #4CAF50;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 5px;
+    cursor: pointer;
+    margin-top: 15px;
+    font-size: 16px;
+}
+
+.reset-button:hover {
+    background: #45a049;
+}
+
+/* Results Styling */
+.live-camera-results {
+    background: white;
+    color: black;
+    padding: 20px;
+    border-radius: 10px;
+    width: 100%;
+}
+
+.live-camera-results h2,
+.live-camera-results h3,
+.live-camera-results h4 {
+    color: black;
+}
+
+.results-grid {
+    display: grid;
+    gap: 30px;
+    margin-bottom: 30px;
+}
+
+.view-result {
+    background: #f9f9f9;
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+}
+
+.images-row {
+    display: flex;
+    gap: 15px;
+    overflow-x: auto;
+    margin-bottom: 15px;
+    padding-bottom: 10px;
+}
+
+.image-container {
+    flex: 0 0 200px;
+}
+
+.image-container p {
+    margin: 0 0 5px 0;
+    font-weight: bold;
+    color: #666;
+    font-size: 0.9rem;
+}
+
+.image-container img {
+    width: 100%;
+    border-radius: 5px;
+    border: 1px solid #eee;
+}
+
+.measurements-list ul {
+    list-style: none;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px;
+}
+
+.measurements-list li {
+    background: white;
+    padding: 10px;
+    border-radius: 5px;
+    border: 1px solid #eee;
+    color: black;
+}
