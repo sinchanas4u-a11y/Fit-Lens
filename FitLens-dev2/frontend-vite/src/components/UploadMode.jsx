@@ -5,13 +5,13 @@ import './UploadMode.css';
 const UploadMode = () => {
   const [frontImage, setFrontImage] = useState(null);
   const [sideImage, setSideImage] = useState(null);
-  
+
   const [frontPreview, setFrontPreview] = useState(null);
   const [sidePreview, setSidePreview] = useState(null);
-  
+
   const [userHeight, setUserHeight] = useState('');
   const [heightUnit, setHeightUnit] = useState('cm');
-  
+
   const [processing, setProcessing] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
   const [results, setResults] = useState(null);
@@ -53,7 +53,7 @@ const UploadMode = () => {
       setError('Please upload a front view image');
       return;
     }
-    
+
     if (!userHeight) {
       setError('Please enter your height');
       return;
@@ -66,7 +66,7 @@ const UploadMode = () => {
 
     try {
       console.log('🚀 Starting image processing...');
-      
+
       // Step 1: Upload Photos
       setCurrentStep(1);
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -153,7 +153,18 @@ const UploadMode = () => {
   };
 
   const downloadJSON = () => {
-    const dataStr = JSON.stringify(results, null, 2);
+    // Sanitize results to remove confidence scores for export
+    const sanitizedResults = JSON.parse(JSON.stringify(results));
+    if (sanitizedResults.results) {
+      ['front', 'side'].forEach(view => {
+        if (sanitizedResults.results[view]?.measurements) {
+          Object.values(sanitizedResults.results[view].measurements).forEach(m => {
+            delete m.confidence;
+          });
+        }
+      });
+    }
+    const dataStr = JSON.stringify(sanitizedResults, null, 2);
     const dataBlob = new Blob([dataStr], { type: 'application/json' });
     const url = URL.createObjectURL(dataBlob);
     const link = document.createElement('a');
@@ -166,13 +177,13 @@ const UploadMode = () => {
   return (
     <div className="upload-mode">
       <h2>Body Measurement - Upload Mode</h2>
-      
+
       {/* Progress Steps */}
       {processing && (
         <div className="progress-steps">
           {steps.map((step, index) => (
-            <div 
-              key={index} 
+            <div
+              key={index}
               className={`step ${currentStep > index ? 'completed' : ''} ${currentStep === index + 1 ? 'active' : ''}`}
             >
               <div className="step-number">{index + 1}</div>
@@ -189,7 +200,7 @@ const UploadMode = () => {
             {/* Front Image */}
             <div className="upload-box">
               <h3>Front View *</h3>
-              <p style={{fontSize: '14px', color: '#666', marginBottom: '10px'}}>
+              <p style={{ fontSize: '14px', color: '#666', marginBottom: '10px' }}>
                 Stand straight, full body visible, arms slightly away from body
               </p>
               <input
@@ -208,7 +219,7 @@ const UploadMode = () => {
             {/* Side Image */}
             <div className="upload-box">
               <h3>Side View (Optional)</h3>
-              <p style={{fontSize: '14px', color: '#666', marginBottom: '10px'}}>
+              <p style={{ fontSize: '14px', color: '#666', marginBottom: '10px' }}>
                 Side profile, full body visible
               </p>
               <input
@@ -228,11 +239,11 @@ const UploadMode = () => {
           {/* User Height Input */}
           <div className="reference-inputs">
             <h3>Your Height *</h3>
-            <p style={{fontSize: '14px', color: '#666', marginBottom: '15px'}}>
+            <p style={{ fontSize: '14px', color: '#666', marginBottom: '15px' }}>
               Enter your actual height for accurate measurements
             </p>
             <div className="input-group">
-              <label style={{flex: 2}}>
+              <label style={{ flex: 2 }}>
                 Height:
                 <input
                   type="number"
@@ -241,16 +252,16 @@ const UploadMode = () => {
                   onChange={(e) => setUserHeight(e.target.value)}
                   placeholder="e.g., 170"
                   disabled={processing}
-                  style={{fontSize: '18px', padding: '12px'}}
+                  style={{ fontSize: '18px', padding: '12px' }}
                 />
               </label>
-              <label style={{flex: 1}}>
+              <label style={{ flex: 1 }}>
                 Unit:
                 <select
                   value={heightUnit}
                   onChange={(e) => setHeightUnit(e.target.value)}
                   disabled={processing}
-                  style={{fontSize: '16px', padding: '12px'}}
+                  style={{ fontSize: '16px', padding: '12px' }}
                 >
                   <option value="cm">cm</option>
                   <option value="inches">inches</option>
@@ -282,15 +293,15 @@ const UploadMode = () => {
       ) : (
         <div className="results-section">
           <h2>Measurement Results</h2>
-          
+
           {/* Debug: Show full response */}
-          <details style={{marginBottom: '20px', padding: '10px', background: '#f0f0f0', borderRadius: '5px'}}>
-            <summary style={{cursor: 'pointer', fontWeight: 'bold'}}>🔍 Debug: View Raw Response Data</summary>
-            <pre style={{overflow: 'auto', maxHeight: '300px', fontSize: '12px'}}>
+          <details style={{ marginBottom: '20px', padding: '10px', background: '#f0f0f0', borderRadius: '5px' }}>
+            <summary style={{ cursor: 'pointer', fontWeight: 'bold' }}>🔍 Debug: View Raw Response Data</summary>
+            <pre style={{ overflow: 'auto', maxHeight: '300px', fontSize: '12px' }}>
               {JSON.stringify(results, null, 2)}
             </pre>
           </details>
-          
+
           {/* Calibration Info */}
           <div className="calibration-info">
             <h3>Height-Based Calibration</h3>
@@ -298,7 +309,7 @@ const UploadMode = () => {
             <p><strong>Height in Image:</strong> {results.calibration.height_in_image_px.toFixed(2)} pixels</p>
             <p><strong>Scale Factor:</strong> {results.calibration.scale_factor.toFixed(4)} cm/px</p>
             <p className="formula">{results.calibration.formula}</p>
-            <p style={{fontSize: '14px', marginTop: '10px', fontStyle: 'italic'}}>
+            <p style={{ fontSize: '14px', marginTop: '10px', fontStyle: 'italic' }}>
               {results.calibration.description}
             </p>
           </div>
@@ -317,10 +328,10 @@ const UploadMode = () => {
           {results.results.front && results.results.front.success && (
             <div className="view-results">
               <h3>Front View Measurements</h3>
-              
+
               {/* Debug: Show raw data */}
               {console.log('📊 Front measurements:', results.results.front.measurements)}
-              
+
               {/* Visualizations */}
               <div className="visualizations">
                 <div className="vis-item">
@@ -336,7 +347,7 @@ const UploadMode = () => {
               {/* Measurements Table */}
               <div className="measurements-table">
                 <h4>Body Measurements ({results.results.front.measurements ? Object.keys(results.results.front.measurements).length : 0} measurements)</h4>
-                
+
                 {/* Debug: Check if measurements exist */}
                 {!results.results.front.measurements || Object.keys(results.results.front.measurements).length === 0 ? (
                   <div className="error-message">
@@ -346,17 +357,16 @@ const UploadMode = () => {
                 ) : (
                   <>
                     {/* Simple list view as fallback */}
-                    <div style={{marginBottom: '20px', padding: '15px', background: '#f9f9f9', borderRadius: '5px'}}>
+                    <div style={{ marginBottom: '20px', padding: '15px', background: '#f9f9f9', borderRadius: '5px' }}>
                       <h5>Measurements List:</h5>
                       {Object.entries(results.results.front.measurements).map(([name, data]) => (
-                        <div key={name} style={{padding: '8px', borderBottom: '1px solid #ddd'}}>
+                        <div key={name} style={{ padding: '8px', borderBottom: '1px solid #ddd' }}>
                           <strong>{name.replace(/_/g, ' ').toUpperCase()}:</strong>{' '}
-                          {data.value_cm} cm ({data.value_px.toFixed(2)} px) - 
-                          Confidence: {(data.confidence * 100).toFixed(0)}%
+                          {data.value_cm} cm ({data.value_px.toFixed(2)} px)
                         </div>
                       ))}
                     </div>
-                    
+
                     {/* Table view */}
                     <table>
                       <thead>
@@ -364,7 +374,6 @@ const UploadMode = () => {
                           <th>Measurement</th>
                           <th>Value (cm)</th>
                           <th>Value (px)</th>
-                          <th>Confidence</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -375,7 +384,6 @@ const UploadMode = () => {
                               <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
                               <td>{data.value_cm} cm</td>
                               <td>{data.value_px.toFixed(2)} px</td>
-                              <td>{(data.confidence * 100).toFixed(0)}%</td>
                             </tr>
                           );
                         })}
@@ -391,7 +399,7 @@ const UploadMode = () => {
           {results.results.side && results.results.side.success && (
             <div className="view-results">
               <h3>Side View Measurements</h3>
-              
+
               {/* Visualizations */}
               <div className="visualizations">
                 <div className="vis-item">
@@ -413,7 +421,6 @@ const UploadMode = () => {
                       <th>Measurement</th>
                       <th>Value (cm)</th>
                       <th>Value (px)</th>
-                      <th>Confidence</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -422,7 +429,6 @@ const UploadMode = () => {
                         <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
                         <td>{data.value_cm} cm</td>
                         <td>{data.value_px} px</td>
-                        <td>{(data.confidence * 100).toFixed(0)}%</td>
                       </tr>
                     ))}
                   </tbody>

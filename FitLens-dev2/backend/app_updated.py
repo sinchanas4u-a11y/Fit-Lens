@@ -15,6 +15,8 @@ import traceback
 import sys
 import os
 import time
+import json
+import datetime
 
 # Add parent directory to path to import modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,6 +25,55 @@ from reference_detector import ReferenceDetector
 from measurement_engine import MeasurementEngine
 from segmentation_model import SegmentationModel
 from landmark_detector import LandmarkDetector
+
+# Directory for storing measurement images
+IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measurement_images")
+os.makedirs(IMAGES_DIR, exist_ok=True)
+
+def save_measurement_image(image_data, view_name, source='upload'):
+    """
+    Save the measurement image to disk with metadata.
+    Args:
+        image_data: base64 string or numpy array
+        view_name: 'front', 'side', 'right', 'left', etc.
+        source: 'upload' or 'camera'
+    """
+    try:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"{timestamp}_{source}_{view_name}.png"
+        filepath = os.path.join(IMAGES_DIR, filename)
+        
+        # Determine image format and save
+        if isinstance(image_data, str):
+            # Base64 string
+            if ',' in image_data:
+                image_data = image_data.split(',')[1]
+            with open(filepath, "wb") as f:
+                f.write(base64.b64decode(image_data))
+        elif isinstance(image_data, np.ndarray):
+            # Numpy array
+            cv2.imwrite(filepath, image_data)
+        else:
+            print(f"Warning: Unsupported image format for saving: {type(image_data)}")
+            return
+
+        # Save metadata
+        metadata = {
+            "filename": filename,
+            "timestamp": timestamp,
+            "view": view_name,
+            "source": source
+        }
+        
+        metadata_path = os.path.join(IMAGES_DIR, "metadata.jsonl")
+        with open(metadata_path, "a") as f:
+            f.write(json.dumps(metadata) + "\n")
+            
+        print(f"Saved measurement image: {filename}")
+        
+    except Exception as e:
+        print(f"Error saving measurement image: {e}")
+        traceback.print_exc()
 
 app = Flask(__name__)
 CORS(app)
@@ -123,6 +174,9 @@ def handle_frame(data):
             # Capture!
             print(f"Capturing {view} view!")
             live_session.captured_images[view] = image_data # Store base64
+            
+            # Save captured image
+            save_measurement_image(image_data, view, source='camera')
             
             # Determine next view
             next_view = get_next_view(view)
@@ -376,6 +430,13 @@ def process_images():
         print(f"✓ Front image: {front_img.shape}")
         if side_img is not None:
             print(f"✓ Side image: {side_img.shape}")
+            
+        # Save uploaded images
+        if data.get('front_image'):
+            save_measurement_image(data.get('front_image'), 'front', source='upload')
+            
+        if data.get('side_image'):
+            save_measurement_image(data.get('side_image'), 'side', source='upload')
         
         # Get user's height
         user_height_cm = float(data.get('user_height', 0))
