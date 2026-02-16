@@ -1183,125 +1183,6 @@ def snap_point_to_edge(point, image, mask=None, search_radius=20, sample_count=8
         return point
 
 
-def detect_shared_shoulder_arm_points(landmarks):
-    """
-    Detect if shoulder and arm measurements share a common point.
-    
-    In proper measurement technique:
-    - Shoulder width: left_shoulder → right_shoulder
-    - Arm length: shoulder → wrist
-    
-    The shoulder endpoint of arm measurement should match one of the shoulder width endpoints.
-    
-    Args:
-        landmarks: List of landmark dictionaries
-        
-    Returns:
-        Dictionary mapping shared points between measurements
-    """
-    shoulder_landmark = None
-    arm_landmark = None
-    
-    for landmark in landmarks:
-        lm_type = landmark.get('type', '')
-        if lm_type == 'shoulder':
-            shoulder_landmark = landmark
-        elif lm_type == 'arm':
-            arm_landmark = landmark
-    
-    if not shoulder_landmark or not arm_landmark:
-        return None
-    
-    shoulder_points = shoulder_landmark.get('points', [])
-    arm_points = arm_landmark.get('points', [])
-    
-    if len(shoulder_points) != 2 or len(arm_points) != 2:
-        return None
-    
-    # Check if arm starting point matches either shoulder endpoint
-    # Increased tolerance from 5px to 10px to account for sub-pixel rounding and coordinate precision
-    # Frontend snaps within 25px, stores with 2 decimal precision
-    tolerance = 10  # Relaxed tolerance for robustness against rounding errors
-    
-    arm_start = arm_points[0]
-    arm_end = arm_points[1]
-    shoulder_left = shoulder_points[0]
-    shoulder_right = shoulder_points[1]
-    
-    # Enhanced debug logging - show all coordinates
-    print(f"\n    === SHOULDER-ARM COORDINATE MATCHING ===")
-    print(f"    Shoulder Left:  ({shoulder_left['x']:.2f}, {shoulder_left['y']:.2f})")
-    print(f"    Shoulder Right: ({shoulder_right['x']:.2f}, {shoulder_right['y']:.2f})")
-    print(f"    Arm Start:      ({arm_start['x']:.2f}, {arm_start['y']:.2f})")
-    print(f"    Arm End:        ({arm_end['x']:.2f}, {arm_end['y']:.2f})")
-    
-    shared_info = {
-        'has_shared_point': False,
-        'arm_shoulder_point_idx': None,  # 0 or 1 for arm measurement
-        'shoulder_point_idx': None,  # 0 or 1 for shoulder measurement
-        'side': None  # 'left' or 'right'
-    }
-    
-    # Check arm start point against shoulder endpoints
-    dist_to_left = np.sqrt((arm_start['x'] - shoulder_left['x'])**2 + (arm_start['y'] - shoulder_left['y'])**2)
-    dist_to_right = np.sqrt((arm_start['x'] - shoulder_right['x'])**2 + (arm_start['y'] - shoulder_right['y'])**2)
-    
-    print(f"    Distances from arm start:")
-    print(f"      → Left shoulder:  {dist_to_left:.2f}px")
-    print(f"      → Right shoulder: {dist_to_right:.2f}px")
-    
-    if dist_to_left < tolerance:
-        shared_info['has_shared_point'] = True
-        shared_info['arm_shoulder_point_idx'] = 0  # arm start
-        shared_info['shoulder_point_idx'] = 0  # left shoulder
-        shared_info['side'] = 'left'
-        print(f"    ✓ MATCH DETECTED: arm start ↔ left shoulder (distance: {dist_to_left:.2f}px < {tolerance}px tolerance)")
-        return shared_info
-    elif dist_to_right < tolerance:
-        shared_info['has_shared_point'] = True
-        shared_info['arm_shoulder_point_idx'] = 0  # arm start
-        shared_info['shoulder_point_idx'] = 1  # right shoulder
-        shared_info['side'] = 'right'
-        print(f"    ✓ MATCH DETECTED: arm start ↔ right shoulder (distance: {dist_to_right:.2f}px < {tolerance}px tolerance)")
-        return shared_info
-    
-    # Check arm end point against shoulder endpoints (less common but possible)
-    dist_to_left_end = np.sqrt((arm_end['x'] - shoulder_left['x'])**2 + (arm_end['y'] - shoulder_left['y'])**2)
-    dist_to_right_end = np.sqrt((arm_end['x'] - shoulder_right['x'])**2 + (arm_end['y'] - shoulder_right['y'])**2)
-    
-    print(f"    Distances from arm end:")
-    print(f"      → Left shoulder:  {dist_to_left_end:.2f}px")
-    print(f"      → Right shoulder: {dist_to_right_end:.2f}px")
-    
-    if dist_to_left_end < tolerance:
-        shared_info['has_shared_point'] = True
-        shared_info['arm_shoulder_point_idx'] = 1  # arm end
-        shared_info['shoulder_point_idx'] = 0  # left shoulder
-        shared_info['side'] = 'left'
-        print(f"    ✓ MATCH DETECTED: arm end ↔ left shoulder (distance: {dist_to_left_end:.2f}px < {tolerance}px tolerance)")
-        return shared_info
-    elif dist_to_right_end < tolerance:
-        shared_info['has_shared_point'] = True
-        shared_info['arm_shoulder_point_idx'] = 1  # arm end
-        shared_info['shoulder_point_idx'] = 1  # right shoulder
-        shared_info['side'] = 'right'
-        print(f"    ✓ MATCH DETECTED: arm end ↔ right shoulder (distance: {dist_to_right_end:.2f}px < {tolerance}px tolerance)")
-        return shared_info
-    
-    # If no match within tolerance, provide detailed diagnostic information
-    min_dist = min(dist_to_left, dist_to_right, dist_to_left_end, dist_to_right_end)
-    print(f"    ✗ NO MATCH: Closest distance is {min_dist:.2f}px (tolerance: {tolerance}px)")
-    
-    if min_dist < 30:  # Within reasonable range but not exact
-        print(f"    ⚠ WARNING: Arm point near shoulder but outside tolerance")
-        print(f"      This suggests frontend snap may not have triggered correctly.")
-        print(f"      Check browser console for '✓ ARM SNAP DETECTED' message.")
-    
-    print(f"    ========================================\n")
-    
-    return shared_info
-
-
 def refine_measurement_with_contours(p1, p2, image, mask=None, num_samples=5):
     """
     Refine a measurement by sampling along the line and averaging edge-snapped points.
@@ -1452,37 +1333,10 @@ def process_manual_view(landmarks_data, user_height_cm, view_name, image=None):
                 print(f"  ⚠ Could not generate mask: {e}")
                 mask = None
         
-        # 3. Detect and handle shared shoulder-arm points
-        shared_point_info = detect_shared_shoulder_arm_points(landmarks)
-        shared_shoulder_coord = None  # Store the shared contour-snapped coordinate
-        
-        if shared_point_info and shared_point_info['has_shared_point']:
-            print(f"\n  ✓ DETECTED SHARED SHOULDER-ARM POINT ({shared_point_info['side']} side)")
-            print(f"    Shoulder and arm measurements will use synchronized coordinates")
-        
-        # 4. Process each manual landmark line with edge snapping and refinement
+        # 3. Process each manual landmark line with edge snapping and refinement
         # Create a visualization image
         vis_image = image.copy() if image is not None else np.zeros((image_height, image_width, 3), dtype=np.uint8)
         
-        # First pass: Process shoulder measurement to get shared coordinate
-        if shared_point_info and shared_point_info['has_shared_point']:
-            for landmark in landmarks:
-                if landmark.get('type') == 'shoulder':
-                    points = landmark.get('points', [])
-                    if len(points) == 2:
-                        shoulder_idx = shared_point_info['shoulder_point_idx']
-                        shoulder_point = points[shoulder_idx]
-                        x_orig, y_orig = shoulder_point['x'], shoulder_point['y']
-                        
-                        # Snap to edge
-                        if image is not None:
-                            shared_shoulder_coord = snap_point_to_edge((x_orig, y_orig), image, mask, search_radius=15)
-                            print(f"    Shared shoulder coordinate: ({x_orig:.1f}, {y_orig:.1f}) → ({shared_shoulder_coord[0]:.1f}, {shared_shoulder_coord[1]:.1f})")
-                        else:
-                            shared_shoulder_coord = (x_orig, y_orig)
-                    break
-        
-        # Second pass: Process all landmarks with synchronized coordinates
         for landmark in landmarks:
             landmark_type = landmark.get('type', 'custom')
             landmark_label = landmark.get('label', 'Unknown')
@@ -1500,52 +1354,16 @@ def process_manual_view(landmarks_data, user_height_cm, view_name, image=None):
                 print(f"    Original points: ({x1_orig:.1f}, {y1_orig:.1f}) → ({x2_orig:.1f}, {y2_orig:.1f})")
                 
                 # ACCURACY IMPROVEMENT: Snap points to body contour edges
-                # ENFORCE SHARED COORDINATES for shoulder and arm measurements
                 if image is not None:
-                    # Check if this is a shoulder or arm measurement with shared point
-                    use_shared_coord_p1 = False
-                    use_shared_coord_p2 = False
-                    
-                    if shared_point_info and shared_point_info['has_shared_point'] and shared_shoulder_coord:
-                        if landmark_type == 'shoulder':
-                            # Use shared coordinate for one endpoint
-                            shoulder_idx = shared_point_info['shoulder_point_idx']
-                            if shoulder_idx == 0:
-                                use_shared_coord_p1 = True
-                            else:
-                                use_shared_coord_p2 = True
-                        elif landmark_type == 'arm':
-                            # Use shared coordinate for shoulder endpoint
-                            arm_shoulder_idx = shared_point_info['arm_shoulder_point_idx']
-                            if arm_shoulder_idx == 0:
-                                use_shared_coord_p1 = True
-                            else:
-                                use_shared_coord_p2 = True
-                    
                     # Refine with contour detection and multi-sample averaging
-                    (x1_refined, y1_refined), (x2_refined, y2_refined) = refine_measurement_with_contours(
+                    (x1, y1), (x2, y2) = refine_measurement_with_contours(
                         (x1_orig, y1_orig), 
                         (x2_orig, y2_orig),
                         image, 
                         mask,
                         num_samples=5
                     )
-                    
-                    # Override with shared coordinate if applicable
-                    if use_shared_coord_p1:
-                        x1, y1 = shared_shoulder_coord
-                        x2, y2 = x2_refined, y2_refined
-                        print(f"    Using SHARED shoulder coordinate for point 1: ({x1:.1f}, {y1:.1f})")
-                        print(f"    Refined point 2: ({x2:.1f}, {y2:.1f})")
-                    elif use_shared_coord_p2:
-                        x1, y1 = x1_refined, y1_refined
-                        x2, y2 = shared_shoulder_coord
-                        print(f"    Refined point 1: ({x1:.1f}, {y1:.1f})")
-                        print(f"    Using SHARED shoulder coordinate for point 2: ({x2:.1f}, {y2:.1f})")
-                    else:
-                        x1, y1 = x1_refined, y1_refined
-                        x2, y2 = x2_refined, y2_refined
-                        print(f"    Refined points: ({x1:.1f}, {y1:.1f}) → ({x2:.1f}, {y2:.1f})")
+                    print(f"    Refined points: ({x1:.1f}, {y1:.1f}) → ({x2:.1f}, {y2:.1f})")
                 else:
                     x1, y1, x2, y2 = x1_orig, y1_orig, x2_orig, y2_orig
                 
