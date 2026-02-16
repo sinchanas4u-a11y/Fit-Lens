@@ -108,7 +108,7 @@ def process_upload():
 
 
 def process_single_image(image, scale_factor, view):
-    """Process a single image"""
+    """Process a single image using hybrid vision approach"""
     try:
         print(f"Processing {view} image with scale factor: {scale_factor}")
         
@@ -132,10 +132,27 @@ def process_single_image(image, scale_factor, view):
         
         print(f"Number of landmarks: {len(landmarks)}")
         
-        # Calculate measurements with pixel data
-        measurements_with_pixels = {}
+        # Extract edge reference points from segmentation for hybrid approach
+        edge_reference_points = None
+        if mask is not None:
+            try:
+                # Extract body contour from segmentation mask
+                contour = landmark_detector.extract_body_contour(mask)
+                if contour is not None:
+                    h, w = image.shape[:2]
+                    # Extract edge reference points (shoulder, waist, hip edges)
+                    edge_reference_points = landmark_detector.extract_edge_reference_points(
+                        contour, h, w, landmarks
+                    )
+                    print(f"Edge reference points extracted: {edge_reference_points.get('is_valid')}")
+            except Exception as e:
+                print(f"Warning: Could not extract edge points: {e}")
+                edge_reference_points = None
+        
+        # Calculate measurements with hybrid approach
+        # Uses edge points for width measurements, MediaPipe for others
         measurements = measurement_engine.calculate_measurements_with_confidence(
-            landmarks, scale_factor, view
+            landmarks, scale_factor, view, edge_reference_points=edge_reference_points
         )
         
         print(f"Measurements calculated: {len(measurements)} measurements")
@@ -143,6 +160,7 @@ def process_single_image(image, scale_factor, view):
         # Get pixel distances for each measurement
         landmark_dict = measurement_engine._landmarks_to_dict(landmarks)
         
+        measurements_with_pixels = {}
         for name, val in measurements.items():
             cm_value, confidence, source = val
             
@@ -153,7 +171,7 @@ def process_single_image(image, scale_factor, view):
                 'value_cm': float(cm_value),
                 'value_pixels': float(pixel_distance),
                 'confidence': float(confidence),
-                'source': source,
+                'source': source,  # Now includes "Segmentation Edge" vs "MediaPipe Joints"
                 'calculation': f"{pixel_distance:.2f} px × {scale_factor:.4f} cm/px = {cm_value:.2f} cm"
             }
         
@@ -189,7 +207,8 @@ def process_single_image(image, scale_factor, view):
     h, w = vis_img.shape[:2]
     y_offset = 30
     for name, data in list(measurements_with_pixels.items())[:5]:  # Show first 5
-        text = f"{name}: {data['value_cm']:.1f}cm ({data['value_pixels']:.0f}px)"
+        source_label = "Edge" if data['source'] == "Segmentation Edge" else "MediaPipe"
+        text = f"{name}: {data['value_cm']:.1f}cm ({source_label})"
         cv2.putText(vis_img, text, (10, y_offset), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
         y_offset += 25
@@ -197,6 +216,14 @@ def process_single_image(image, scale_factor, view):
     vis_base64 = encode_image(vis_img)
     
     print(f"Returning {len(measurements_with_pixels)} measurements")
+    
+    # Add hybrid approach metadata to response
+    source_summary = {
+        'segmentation_edge': len([m for m in measurements_with_pixels.values() 
+                                   if m['source'] == 'Segmentation Edge']),
+        'mediapipe_joints': len([m for m in measurements_with_pixels.values() 
+                                 if m['source'] == 'MediaPipe Joints'])
+    }
     
     return {
         'measurements': measurements_with_pixels,
@@ -206,6 +233,11 @@ def process_single_image(image, scale_factor, view):
             'scale_factor': float(scale_factor),
             'unit': 'cm/pixel',
             'description': f'1 pixel = {scale_factor:.4f} cm'
+        },
+        'hybrid_approach': {
+            'enabled': True,
+            'edge_points_available': edge_reference_points is not None and edge_reference_points.get('is_valid'),
+            'source_summary': source_summary
         }
     }
 
@@ -610,5 +642,594 @@ def encode_image(img_array):
     return f"data:image/png;base64,{img_base64}"
 
 
+# ========== SHOULDER EDGE DETECTION ENDPOINTS ==========
+
+@app.route('/api/shoulder/detect', methods=['POST'])
+def detect_shoulder_edges():
+    """
+    Detect shoulder edge points from uploaded image
+    
+    Expected JSON:
+    {
+        "image": "base64_encoded_image",
+        "shoulder_type": "both" (or "left", "right")
+    }
+    
+    Returns:
+    {
+        "frame_number": int,
+        "shoulder_edge_points": [{"x": float, "y": float}, ...],
+        "confidence_score": float,
+        "detection_quality": {...},
+        "visualization": "base64_encoded_image"
+    }
+    """
+    try:
+        data = request.json
+        
+        if 'image' not in data:
+            return jsonify({'error': 'Image required'}), 400
+        
+        # Decode image
+        image = decode_image(data['image'])
+        shoulder_type = data.get('shoulder_type', 'both')
+        
+        # Detect landmarks first
+        landmarks = landmark_detector.detect(image)
+        
+        if landmarks is None:
+            return jsonify({
+                'error': 'No person detected in image'
+            }), 400
+        
+        # Detect shoulder edges
+        shoulder_data = landmark_detector.detect_shoulder_edge_points(
+            image, landmarks, shoulder_type=shoulder_type
+        )
+        
+        # Create visualization
+        annotated_frame = landmark_detector.draw_shoulder_edges(image, shoulder_data)
+        vis_base64 = encode_image(annotated_frame)
+        
+        # Prepare response
+        response = {
+            'success': True,
+            'frame_number': shoulder_data['frame_number'],
+            'shoulder_edge_points': shoulder_data['shoulder_edge_points'],
+            'confidence_score': shoulder_data['confidence_score'],
+            'detection_quality': landmark_detector._assess_detection_quality(shoulder_data),
+            'visualization': vis_base64
+        }
+        
+        return jsonify(response)
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/shoulder/batch', methods=['POST'])
+def batch_detect_shoulder_edges():
+    """
+    Process multiple frames and detect shoulder edges
+    
+    Expected JSON:
+    {
+        "images": ["base64_image1", "base64_image2", ...],
+        "shoulder_type": "both"
+    }
+    
+    Returns:
+    {
+        "success": true,
+        "frames": [detection_result1, detection_result2, ...],
+        "statistics": {...}
+    }
+    """
+    try:
+        data = request.json
+        
+        if 'images' not in data:
+            return jsonify({'error': 'Images array required'}), 400
+        
+        images = [decode_image(img) for img in data['images']]
+        shoulder_type = data.get('shoulder_type', 'both')
+        
+        results = []
+        all_shoulder_data = []
+        
+        for image in images:
+            try:
+                # Detect landmarks
+                landmarks = landmark_detector.detect(image)
+                
+                if landmarks is None:
+                    results.append({
+                        'error': 'No person detected'
+                    })
+                    continue
+                
+                # Detect shoulder edges
+                shoulder_data = landmark_detector.detect_shoulder_edge_points(
+                    image, landmarks, shoulder_type=shoulder_type
+                )
+                all_shoulder_data.append(shoulder_data)
+                results.append(shoulder_data)
+            
+            except Exception as e:
+                results.append({'error': str(e)})
+        
+        # Calculate statistics
+        valid_results = [r for r in all_shoulder_data if isinstance(r, dict)]
+        stats = landmark_detector.get_detection_statistics(valid_results)
+        
+        response = {
+            'success': True,
+            'total_frames': len(images),
+            'frames': results,
+            'statistics': stats
+        }
+        
+        return jsonify(response)
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/shoulder/export-json', methods=['POST'])
+def export_shoulder_json():
+    """
+    Export shoulder detection data in formatted JSON
+    
+    Expected JSON:
+    {
+        "image": "base64_encoded_image",
+        "include_raw_points": true
+    }
+    
+    Returns:
+    {
+        "json_data": {...},
+        "json_string": "..." (formatted JSON string)
+    }
+    """
+    try:
+        data = request.json
+        
+        if 'image' not in data:
+            return jsonify({'error': 'Image required'}), 400
+        
+        # Decode and process image
+        image = decode_image(data['image'])
+        include_raw_points = data.get('include_raw_points', True)
+        
+        # Detect landmarks
+        landmarks = landmark_detector.detect(image)
+        if landmarks is None:
+            return jsonify({'error': 'No person detected'}), 400
+        
+        # Detect shoulder edges
+        shoulder_data = landmark_detector.detect_shoulder_edge_points(image, landmarks)
+        
+        # Export to JSON string
+        json_string = landmark_detector.export_shoulder_data_json(
+            shoulder_data, include_raw_points=include_raw_points
+        )
+        
+        # Parse back to return both string and object
+        json_obj = json.loads(json_string)
+        
+        return jsonify({
+            'success': True,
+            'json_object': json_obj,
+            'json_string': json_string
+        })
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/shoulder/stats', methods=['POST'])
+def get_shoulder_stats():
+    """
+    Get statistics from multiple shoulder detections
+    
+    Expected JSON:
+    {
+        "images": ["base64_image1", "base64_image2", ...]
+    }
+    
+    Returns:
+    {
+        "statistics": {
+            "total_frames": int,
+            "average_confidence": float,
+            "detection_success_rate": float,
+            ...
+        }
+    }
+    """
+    try:
+        data = request.json
+        
+        if 'images' not in data:
+            return jsonify({'error': 'Images array required'}), 400
+        
+        images = [decode_image(img) for img in data['images']]
+        results_list = landmark_detector.batch_detect_shoulder_edges(images)
+        
+        # Calculate statistics
+        stats = landmark_detector.get_detection_statistics(results_list)
+        
+        return jsonify({
+            'success': True,
+            'statistics': stats,
+            'recommendation': get_detection_recommendation(stats)
+        })
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def get_detection_recommendation(stats: dict) -> str:
+    """Get recommendation based on detection statistics"""
+    success_rate = stats.get('detection_success_rate', 0)
+    avg_conf = stats.get('average_confidence', 0)
+    
+    if success_rate >= 0.9 and avg_conf >= 0.85:
+        return 'Excellent detection quality. Ready for production use.'
+    elif success_rate >= 0.75 and avg_conf >= 0.70:
+        return 'Good detection quality. Suitable for most applications.'
+    elif success_rate >= 0.6 and avg_conf >= 0.60:
+        return 'Fair detection quality. May need manual review for critical uses.'
+    else:
+        return 'Poor detection quality. Recommend retaking measurements or adjusting capture conditions.'
+
+
+# ========== SEGMENTATION-BASED SHOULDER REFINEMENT ENDPOINTS ==========
+
+@app.route('/api/shoulder/detect-refined', methods=['POST'])
+def detect_refined_shoulders():
+    """
+    Detect and refine shoulder landmarks using segmentation mask
+    
+    This endpoint uses YOLOv8 segmentation to refine shoulder landmarks
+    for improved accuracy in shoulder-based measurements.
+    
+    Expected JSON:
+    {
+        "image": "base64_encoded_image",
+        "enable_refinement": true,
+        "confidence_threshold": 0.5,
+        "scale_factor": 0.2 (pixels to cm conversion)
+    }
+    
+    Returns:
+    {
+        "success": true,
+        "refined_shoulders": {
+            "left_shoulder": {"x": float, "y": float, "confidence": float},
+            "right_shoulder": {"x": float, "y": float, "confidence": float},
+            "shoulder_width_cm": float,
+            "refinement_quality": float,
+            "is_refined": true
+        },
+        "original_shoulders": {
+            "left_shoulder": {...},
+            "right_shoulder": {...},
+            "shoulder_width_cm": float
+        },
+        "measurements": {
+            "shoulder_width": [value_cm, confidence, source],
+            "chest_width": [value_cm, confidence, source],
+            "arm_span": [value_cm, confidence, source]
+        },
+        "comparison": {
+            "improvement_percent": float,
+            "quality_gain": float,
+            "recommendation": string
+        },
+        "visualization": "base64_annotated_image"
+    }
+    """
+    try:
+        data = request.json
+        
+        if 'image' not in data:
+            return jsonify({'error': 'Image required'}), 400
+        
+        # Decode image
+        image = decode_image(data['image'])
+        enable_refinement = data.get('enable_refinement', True)
+        scale_factor = data.get('scale_factor', 0.2)  # Default: 1 pixel = 0.2 cm
+        
+        # Detect landmarks from image
+        landmarks = landmark_detector.detect(image)
+        
+        if landmarks is None:
+            return jsonify({
+                'error': 'No person detected in image'
+            }), 400
+        
+        # Get original shoulder positions
+        left_shoulder_idx = 11
+        right_shoulder_idx = 12
+        left_shoulder_orig = landmarks[left_shoulder_idx]
+        right_shoulder_orig = landmarks[right_shoulder_idx]
+        
+        original_shoulders = {
+            'left_shoulder': {
+                'x': float(left_shoulder_orig[0]),
+                'y': float(left_shoulder_orig[1]),
+                'confidence': float(left_shoulder_orig[2])
+            },
+            'right_shoulder': {
+                'x': float(right_shoulder_orig[0]),
+                'y': float(right_shoulder_orig[1]),
+                'confidence': float(right_shoulder_orig[2])
+            },
+            'shoulder_width_cm': float(
+                np.linalg.norm(left_shoulder_orig[:2] - right_shoulder_orig[:2]) * scale_factor
+            )
+        }
+        
+        refined_data = None
+        measurements_with_refinement = None
+        
+        # Apply segmentation-based refinement if enabled
+        if enable_refinement:
+            # Generate segmentation mask
+            mask = segmentation_model.segment_person(image, conf_threshold=0.5)
+            
+            if mask is not None:
+                # Refine shoulder landmarks using segmentation
+                refined_data = landmark_detector.refine_shoulder_landmarks(
+                    image, landmarks, mask
+                )
+                
+                # Calculate measurements with refined shoulders
+                measurements_with_refinement = (
+                    measurement_engine.calculate_shoulder_measurements_only(
+                        landmarks, scale_factor, refined_data
+                    )
+                )
+            else:
+                # Fallback if segmentation failed
+                measurements_with_refinement = (
+                    measurement_engine.calculate_shoulder_measurements_only(
+                        landmarks, scale_factor, None
+                    )
+                )
+        else:
+            # Calculate without refinement
+            measurements_with_refinement = (
+                measurement_engine.calculate_shoulder_measurements_only(
+                    landmarks, scale_factor, None
+                )
+            )
+        
+        # Format measurements
+        measurements_formatted = {}
+        for name, (value, conf, source) in measurements_with_refinement.items():
+            measurements_formatted[name] = [value, conf, source]
+        
+        # Create refined shoulders response
+        refined_shoulders_response = None
+        comparison = None
+        
+        if refined_data and refined_data.get('is_refined'):
+            refined_shoulders_response = {
+                'left_shoulder': {
+                    'x': float(refined_data['left_shoulder']['x']),
+                    'y': float(refined_data['left_shoulder']['y']),
+                    'confidence': float(refined_data['left_shoulder']['confidence'])
+                },
+                'right_shoulder': {
+                    'x': float(refined_data['right_shoulder']['x']),
+                    'y': float(refined_data['right_shoulder']['y']),
+                    'confidence': float(refined_data['right_shoulder']['confidence'])
+                },
+                'shoulder_width_cm': float(
+                    np.linalg.norm(
+                        np.array([refined_data['left_shoulder']['x'], refined_data['left_shoulder']['y']]) -
+                        np.array([refined_data['right_shoulder']['x'], refined_data['right_shoulder']['y']])
+                    ) * scale_factor
+                ),
+                'refinement_quality': float(refined_data.get('refinement_quality', 0.0)),
+                'is_refined': True
+            }
+            
+            # Calculate comparison
+            orig_width = original_shoulders['shoulder_width_cm']
+            refined_width = refined_shoulders_response['shoulder_width_cm']
+            
+            # Check if refinement is realistic (shoulder width should be 30-60cm)
+            if 30 <= refined_width <= 60:
+                improvement_percent = abs(refined_width - orig_width) / orig_width * 100
+                quality_gain = refined_data.get('refinement_quality', 0.0)
+                
+                if quality_gain >= 0.8:
+                    recommendation = 'Excellent refinement. Use refined shoulders for measurements.'
+                elif quality_gain >= 0.6:
+                    recommendation = 'Good refinement. Refined shoulders recommended.'
+                elif quality_gain >= 0.4:
+                    recommendation = 'Moderate refinement. Consider original landmarks.'
+                else:
+                    recommendation = 'Poor refinement. Use original landmarks.'
+            else:
+                improvement_percent = 0
+                quality_gain = 0
+                recommendation = 'Refinement produced unrealistic values. Using original landmarks.'
+                refined_shoulders_response = None
+            
+            comparison = {
+                'improvement_percent': improvement_percent,
+                'quality_gain': quality_gain,
+                'recommendation': recommendation,
+                'original_shoulder_width': float(original_shoulders['shoulder_width_cm']),
+                'refined_shoulder_width': float(refined_shoulders_response['shoulder_width_cm']) if refined_shoulders_response else None
+            }
+        else:
+            refined_shoulders_response = {
+                'is_refined': False,
+                'reason': 'Segmentation mask unavailable or refinement disabled'
+            }
+        
+        # Create visualization
+        annotated_frame = image.copy()
+        
+        # Draw original shoulders (red)
+        cv2.circle(annotated_frame, 
+                  (int(left_shoulder_orig[0]), int(left_shoulder_orig[1])),
+                  8, (0, 0, 255), -1)
+        cv2.circle(annotated_frame,
+                  (int(right_shoulder_orig[0]), int(right_shoulder_orig[1])),
+                  8, (0, 0, 255), -1)
+        
+        # Draw shoulder width line (red)
+        cv2.line(annotated_frame,
+                (int(left_shoulder_orig[0]), int(left_shoulder_orig[1])),
+                (int(right_shoulder_orig[0]), int(right_shoulder_orig[1])),
+                (0, 0, 255), 2)
+        
+        # Draw refined shoulders if available (green)
+        if refined_shoulders_response and refined_shoulders_response.get('is_refined'):
+            left_ref = refined_shoulders_response['left_shoulder']
+            right_ref = refined_shoulders_response['right_shoulder']
+            
+            cv2.circle(annotated_frame, (int(left_ref['x']), int(left_ref['y'])), 8, (0, 255, 0), -1)
+            cv2.circle(annotated_frame, (int(right_ref['x']), int(right_ref['y'])), 8, (0, 255, 0), -1)
+            
+            # Draw refined shoulder line (green)
+            cv2.line(annotated_frame,
+                    (int(left_ref['x']), int(left_ref['y'])),
+                    (int(right_ref['x']), int(right_ref['y'])),
+                    (0, 255, 0), 2)
+            
+            # Add legend
+            cv2.putText(annotated_frame, 'Original (Red)', (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.putText(annotated_frame, 'Refined (Green)', (10, 60),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        vis_base64 = encode_image(annotated_frame)
+        
+        response = {
+            'success': True,
+            'refined_shoulders': refined_shoulders_response,
+            'original_shoulders': original_shoulders,
+            'measurements': measurements_formatted,
+            'comparison': comparison,
+            'visualization': vis_base64
+        }
+        
+        return jsonify(response)
+    
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/shoulder/refine-batch', methods=['POST'])
+def refine_batch_shoulders():
+    """
+    Process multiple images and refine shoulder landmarks
+    
+    Expected JSON:
+    {
+        "images": ["base64_image1", "base64_image2", ...],
+        "scale_factor": 0.2
+    }
+    
+    Returns:
+    {
+        "success": true,
+        "total_frames": int,
+        "results": [refined_result1, refined_result2, ...],
+        "average_refinement_quality": float,
+        "average_improvement": float
+    }
+    """
+    try:
+        data = request.json
+        
+        if 'images' not in data:
+            return jsonify({'error': 'Images array required'}), 400
+        
+        images = [decode_image(img) for img in data['images']]
+        scale_factor = data.get('scale_factor', 0.2)
+        
+        results = []
+        refinement_qualities = []
+        improvements = []
+        
+        for image in images:
+            try:
+                # Detect landmarks
+                landmarks = landmark_detector.detect(image)
+                
+                if landmarks is None:
+                    results.append({'error': 'No person detected'})
+                    continue
+                
+                # Get original shoulders
+                left_shoulder = landmarks[11]
+                right_shoulder = landmarks[12]
+                orig_width = np.linalg.norm(left_shoulder[:2] - right_shoulder[:2]) * scale_factor
+                
+                # Generate segmentation mask
+                mask = segmentation_model.segment_person(image, conf_threshold=0.5)
+                
+                if mask is not None:
+                    # Refine shoulders
+                    refined_data = landmark_detector.refine_shoulder_landmarks(
+                        image, landmarks, mask
+                    )
+                    
+                    if refined_data.get('is_refined'):
+                        left_ref = refined_data['left_shoulder']
+                        right_ref = refined_data['right_shoulder']
+                        refined_width = np.linalg.norm(
+                            np.array([left_ref['x'], left_ref['y']]) -
+                            np.array([right_ref['x'], right_ref['y']])
+                        ) * scale_factor
+                        
+                        improvement = abs(refined_width - orig_width) / orig_width * 100
+                        quality = refined_data.get('refinement_quality', 0.0)
+                        
+                        refinement_qualities.append(quality)
+                        improvements.append(improvement)
+                        
+                        results.append({
+                            'success': True,
+                            'refined_width': refined_width,
+                            'original_width': orig_width,
+                            'improvement_percent': improvement,
+                            'quality': quality
+                        })
+                    else:
+                        results.append({'error': 'Refinement failed'})
+                else:
+                    results.append({'error': 'Segmentation mask unavailable'})
+            
+            except Exception as e:
+                results.append({'error': str(e)})
+        
+        response = {
+            'success': True,
+            'total_frames': len(images),
+            'results': results,
+            'average_refinement_quality': float(np.mean(refinement_qualities)) if refinement_qualities else 0.0,
+            'average_improvement': float(np.mean(improvements)) if improvements else 0.0,
+            'successful_refinements': len([r for r in results if r.get('success')])
+        }
+        
+        return jsonify(response)
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+

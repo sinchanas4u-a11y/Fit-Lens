@@ -2,10 +2,16 @@
 Measurement Engine
 Calculates body measurements from landmarks with confidence scores
 Uses ellipse geometry for chest and waist circumference calculations
+Includes hybrid shoulder detection using MediaPipe + YOLOv8 + OpenCV
 """
 import numpy as np
 from typing import Dict, Tuple, Optional
 import math
+try:
+    from hybrid_shoulder_detector import HybridShoulderDetector
+    HYBRID_SHOULDER_AVAILABLE = True
+except ImportError:
+    HYBRID_SHOULDER_AVAILABLE = False
 
 
 class MeasurementEngine:
@@ -22,6 +28,16 @@ class MeasurementEngine:
         self.chest_depth_ratio = 0.55  # Chest depth to width ratio (typical: 0.5-0.6)
         self.waist_depth_ratio = 0.45  # Waist depth to width ratio (typical: 0.4-0.5)
         self.hip_depth_ratio = 0.50   # Hip depth to width ratio (typical: 0.45-0.55)
+        
+        # Initialize hybrid shoulder detector if available
+        self.hybrid_shoulder_detector = None
+        if HYBRID_SHOULDER_AVAILABLE:
+            try:
+                self.hybrid_shoulder_detector = HybridShoulderDetector()
+                print("✓ Hybrid shoulder detector initialized")
+            except Exception as e:
+                print(f"⚠️ Failed to initialize hybrid shoulder detector: {e}")
+        
         # Measurement definitions
         self.measurements = {
             'front': {
@@ -387,6 +403,76 @@ class MeasurementEngine:
         
         # Calculate circumference using Ramanujan's approximation
         return self.calculate_ellipse_circumference(a, b)
+    
+    def calculate_shoulder_width_hybrid(
+        self,
+        image: np.ndarray,
+        mask: np.ndarray,
+        landmarks: np.ndarray,
+        scale_factor: float,
+        debug: bool = False
+    ) -> Dict[str, any]:
+        """
+        Calculate shoulder width using hybrid approach
+        
+        Uses:
+        - MediaPipe for shoulder Y-level
+        - YOLOv8 mask for body silhouette
+        - OpenCV Canny edge detection
+        - OpenCV contour extraction
+        - NumPy for point filtering
+        
+        Args:
+            image: Original image (BGR)
+            mask: YOLOv8 segmentation mask
+            landmarks: MediaPipe landmarks
+            scale_factor: Pixel to cm conversion
+            debug: Whether to include debug info
+            
+        Returns:
+            Dictionary with shoulder_width_cm, confidence, and debug info
+        """
+        result = {
+            'shoulder_width_cm': None,
+            'shoulder_width_px': None,
+            'confidence': 0.0,
+            'source': 'hybrid',
+            'left_shoulder': None,
+            'right_shoulder': None,
+            'shoulder_y': None,
+            'debug_image': None,
+        }
+        
+        if not HYBRID_SHOULDER_AVAILABLE:
+            print("⚠️ Hybrid shoulder detector not available")
+            return result
+        
+        if self.hybrid_shoulder_detector is None:
+            print("⚠️ Hybrid shoulder detector not initialized")
+            return result
+        
+        try:
+            # Use the hybrid detector with optional scikit-image refinement
+            hybrid_result = self.hybrid_shoulder_detector.detect_shoulder_width_with_refinement(
+                image, mask, landmarks, scale_factor, use_scikit_image=True, debug=debug
+            )
+            
+            # Copy relevant fields
+            result.update({
+                'shoulder_width_cm': hybrid_result.get('shoulder_width_cm'),
+                'shoulder_width_px': hybrid_result.get('shoulder_width_px'),
+                'confidence': hybrid_result.get('confidence', 0.0),
+                'left_shoulder': hybrid_result.get('left_shoulder'),
+                'right_shoulder': hybrid_result.get('right_shoulder'),
+                'shoulder_y': hybrid_result.get('shoulder_y'),
+                'debug_image': hybrid_result.get('debug_image') if debug else None,
+            })
+            
+            return result
+            
+        except Exception as e:
+            print(f"⚠️ Error in hybrid shoulder detection: {e}")
+            return result
     
     def calculate_body_proportions(self, measurements: Dict[str, float]) -> Dict[str, float]:
         """Calculate body proportions and ratios"""

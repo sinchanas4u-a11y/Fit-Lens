@@ -24,7 +24,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from reference_detector import ReferenceDetector
 from measurement_engine import MeasurementEngine
 from segmentation_model import SegmentationModel
-from landmark_detector import LandmarkDetector
+
+# LandmarkDetector will be imported and initialized on startup
+landmark_detector = None
+
+def get_landmark_detector():
+    """Get the landmark detector instance (lazy load if not initialized)."""
+    global landmark_detector
+    if landmark_detector is None:
+        try:
+            print("Loading MediaPipe landmark detector...")
+            from landmark_detector import LandmarkDetector
+            landmark_detector = LandmarkDetector()
+            print("✓ LandmarkDetector loaded")
+        except Exception as e:
+            print(f"✗ Could not load landmark_detector: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    return landmark_detector
 
 # Directory for storing measurement images
 IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measurement_images")
@@ -84,7 +102,6 @@ print("Initializing models...")
 reference_detector = ReferenceDetector()
 measurement_engine = MeasurementEngine()
 segmentation_model = SegmentationModel(model_size='n')  # YOLOv8 nano for speed
-landmark_detector = LandmarkDetector()
 print("✓ Models initialized")
 
 # Live Session State
@@ -107,11 +124,12 @@ live_session = LiveSession()
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
+    ld = get_landmark_detector()
     return jsonify({
         'status': 'healthy',
         'models_loaded': {
             'yolov8_segmentation': segmentation_model.model is not None,
-            'mediapipe_landmarks': landmark_detector.pose is not None,
+            'mediapipe_landmarks': ld is not None and hasattr(ld, 'pose') and ld.pose is not None,
             'reference_detector': True
         }
     })
@@ -244,7 +262,10 @@ def process_alignment(image, view):
     3. User centered in frame
     """
     h, w, _ = image.shape
-    landmarks = landmark_detector.detect(image)
+    ld = get_landmark_detector()
+    if ld is None:
+        return 'red', 'Landmark detector unavailable', None
+    landmarks = ld.detect(image)
 
     if landmarks is None:
         live_session.stability_start_time = None
@@ -339,7 +360,11 @@ def process_all_captured_images():
             return
 
         # Detect landmarks for scale
-        temp_landmarks = landmark_detector.detect(front_img)
+        ld = get_landmark_detector()
+        if ld is None:
+            emit('error', {'message': 'Landmark detector unavailable'})
+            return
+        temp_landmarks = ld.detect(front_img)
         if temp_landmarks is None:
              emit('error', {'message': 'Could not detect person in front view'})
              return
@@ -399,19 +424,151 @@ def process_all_captured_images():
         traceback.print_exc()
         emit('error', {'message': str(e)})
 
+from face_verifier import FaceVerifier
+
+# Initialize models
+print("Initializing models...")
+try:
+    reference_detector = ReferenceDetector()
+    measurement_engine = MeasurementEngine()
+    segmentation_model = SegmentationModel(model_size='n')  # YOLOv8 nano for speed
+    # Initialize landmark detector on startup
+    print("Loading MediaPipe landmark detector...")
+    landmark_detector = get_landmark_detector()
+    if landmark_detector is None:
+        print("⚠ Warning: LandmarkDetector failed to initialize - some features will be unavailable")
+    else:
+        print("✓ LandmarkDetector initialized successfully")
+    print("✓ Core models initialized")
+except Exception as e:
+    print(f"Error initializing core models: {e}")
+    raise
+    raise
+
+# Initialize face verifier for identity verification
+try:
+    face_verifier = FaceVerifier(model_name="buffalo_l", det_size=(640, 640))
+    print("✓ Face verifier initialized")
+except Exception as e:
+    print(f"Warning: Could not initialize FaceVerifier: {e}")
+    face_verifier = None
+
+print("✓ Models initialized")
 
 # --- Existing API Routes ---
+
+@app.route('/api/verify-identity', methods=['POST'])
+def verify_identity():
+    """
+    Verify identity between two images using ArcFace cosine similarity.
+    Thresholds:
+    - similarity >= 0.65: Same person (verified)
+    - 0.50 <= similarity < 0.65: Uncertain range (verified with warning)
+    - similarity < 0.50: Different person (not verified)
+    - No face detected: Not verified
+    """
+    try:
+        if face_verifier is None:
+            return jsonify({
+                'success': False,
+                'verified': False,
+                'error': 'Face verification service unavailable'
+            }), 503
+        
+        data = request.json
+        print("\n" + "="*60)
+        print("IDENTITY VERIFICATION REQUEST")
+        print(f"Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        front_b64 = data.get('front_image', '')
+        side_b64 = data.get('side_image', '')
+        
+        if not front_b64 or not side_b64:
+            return jsonify({
+                'success': False,
+                'verified': False,
+                'error': 'Both front and side images are required'
+            }), 400
+        
+        print(f"Front image payload size: {len(front_b64) / 1024:.2f} KB")
+        print(f"Side image payload size: {len(side_b64) / 1024:.2f} KB")
+        
+        # Decode base64 images
+        front_img = decode_image(front_b64)
+        side_img = decode_image(side_b64)
+        
+        if front_img is None or side_img is None:
+            return jsonify({
+                'success': False,
+                'verified': False,
+                'error': 'Invalid image data'
+            }), 400
+        
+        # Run face verification
+        result = face_verifier.verify_person(front_img, side_img)
+        
+        # Extract values from result
+        verified = result.get('verified', False)
+        similarity = result.get('similarity', 0.0)
+        threshold = result.get('threshold', 0.65)
+        no_face = result.get('no_face', False)
+        has_warning = result.get('warning', False)
+        error_msg = result.get('error', '')
+        
+        # Construct response
+        response_data = {
+            'success': True,
+            'verified': verified,
+            'similarity': float(similarity),
+            'threshold': float(threshold)
+        }
+        
+        # Build appropriate message based on verification result
+        if no_face:
+            response_data['message'] = 'Face verification failed - face not detected clearly'
+            response_data['verified'] = False
+        elif not verified:
+            if similarity < 0.50:
+                response_data['message'] = 'Face verification failed - different person detected'
+            else:
+                response_data['message'] = 'Face verification failed'
+            response_data['verified'] = False
+        elif verified and has_warning:
+            response_data['message'] = 'Identity verified (uncertain range - similarity between 0.50-0.65)'
+            response_data['verified'] = True
+            response_data['warning'] = True
+        else:
+            response_data['message'] = 'Identity verified successfully'
+            response_data['verified'] = True
+        
+        print(f"\n📊 Verification Result:")
+        print(f"   Verified: {verified}")
+        print(f"   Similarity: {similarity:.4f}")
+        print(f"   Message: {response_data['message']}")
+        print("="*60)
+        
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        print(f"✗ Server Error in verify_identity: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'verified': False,
+            'error': f'Server error: {str(e)}'
+        }), 500
 
 @app.route('/api/process', methods=['POST'])
 def process_images():
     """
     Complete workflow:
     1. Upload photos
-    2. Use user's height as reference
-    3. YOLOv8-seg masking (detect only human body)
-    4. MediaPipe pose (get landmarks)
-    5. Compute pixel distances and convert to cm using height
-    6. Return measurements as JSON
+    2. Verify identity (Face Verification)
+    3. Use user's height as reference
+    4. YOLOv8-seg masking (detect only human body)
+    5. MediaPipe pose (get landmarks)
+    6. Compute pixel distances and convert to cm using height
+    7. Return measurements as JSON
     """
     try:
         data = request.json
@@ -431,6 +588,37 @@ def process_images():
         if side_img is not None:
             print(f"✓ Side image: {side_img.shape}")
             
+            # --- SECURITY CHECK: FACE VERIFICATION ---
+            print("\n" + "="*60)
+            print("STEP 1.5: VERIFYING IDENTITY")
+            print("="*60)
+
+            if face_verifier is None:
+                return jsonify({
+                    'error': 'Face verification service unavailable',
+                    'step': 1.5
+                }), 503
+            
+            # Verify that both images belong to the same person
+            verification_result = face_verifier.verify_person(front_img, side_img)
+            
+            # InsightFace returns similarity (higher = more similar)
+            similarity = verification_result.get('similarity', 0.0)
+            
+            if verification_result.get('no_face'):
+                error_message = 'Face not detected clearly. Please upload clear front and side images.'
+                return jsonify({'error': error_message, 'step': 1.5}), 400
+
+            if not verification_result.get('verified'):
+                # Identity mismatch
+                error_message = 'Please upload front and side images of the same person.'
+                return jsonify({'error': error_message, 'step': 1.5}), 400
+            
+            # Log warning if in uncertain range
+            if verification_result.get('warning'):
+                print(f"⚠ Warning: Similarity in uncertain range (0.50-0.65): {similarity:.4f}")
+            # ----------------------------------------
+
         # Save uploaded images
         if data.get('front_image'):
             save_measurement_image(data.get('front_image'), 'front', source='upload')
@@ -453,7 +641,13 @@ def process_images():
         # First, we need to detect landmarks to measure height in pixels
         # We'll do a preliminary landmark detection on front image
         print("Detecting landmarks to measure height in pixels...")
-        temp_landmarks = landmark_detector.detect(front_img)
+        ld = get_landmark_detector()
+        if ld is None:
+            return jsonify({
+                'error': 'Could not initialize landmark detector',
+                'step': 2
+            }), 503
+        temp_landmarks = ld.detect(front_img)
         
         if temp_landmarks is None:
             return jsonify({
@@ -576,7 +770,10 @@ def process_single_view(image, scale_factor, view_name):
         print("-" * 60)
         
         # Run MediaPipe on original image (works better than masked)
-        landmarks = landmark_detector.detect(image)
+        ld = get_landmark_detector()
+        if ld is None:
+            raise Exception('Landmark detector unavailable')
+        landmarks = ld.detect(image)
         
         if landmarks is None:
             print("✗ No landmarks detected")
@@ -637,7 +834,11 @@ def process_single_view(image, scale_factor, view_name):
         print(f"Formatted measurements keys: {list(formatted_measurements.keys())}")
         
         # Create visualization
-        vis_image = landmark_detector.draw_landmarks(masked_image.copy(), landmarks)
+        ld = get_landmark_detector()
+        if ld is None:
+            vis_image = masked_image.copy()
+        else:
+            vis_image = ld.draw_landmarks(masked_image.copy(), landmarks)
         vis_base64 = encode_image(vis_image)
         
         # Encode mask
@@ -701,6 +902,766 @@ def encode_image(img_array):
     except Exception as e:
         print(f"Image encode error: {e}")
         return None
+
+
+def merge_manual_measurements(front_results, side_results):
+    """
+    Merge front view (width) and side view (depth) manual measurements into 
+    a single consolidated measurements dictionary.
+    
+    Special handling:
+    - leg_length: taken from front view
+    - arm_length: taken from side view
+    - Both front and side visualizations/masks are preserved and returned
+    
+    Args:
+        front_results: Dictionary with front view measurements
+        side_results: Dictionary with side view measurements
+        
+    Returns:
+        Dictionary with merged measurements, both visualizations, and metadata
+    """
+    merged = {
+        'success': True,
+        'measurements': {},
+        'front_visualization': None,
+        'front_mask': None,
+        'side_visualization': None,
+        'side_mask': None,
+        'visualization': None,  # Keep for backward compatibility
+        'mask': None,  # Keep for backward compatibility
+        'scale_factor': 0,
+        'height_px': 0,
+        'total_landmarks': 0
+    }
+    
+    # Extract front measurements (widths + leg_length)
+    if front_results and front_results.get('success'):
+        front_measurements = front_results.get('measurements', {})
+        
+        # Add front measurements
+        # leg_length MUST come from front view
+        for name, data in front_measurements.items():
+            if name == 'leg_length':
+                # Prioritize front view for leg_length
+                merged['measurements'][name] = data
+                print(f"  ✓ Using leg_length from FRONT view: {data.get('value_cm')} cm")
+            elif name != 'arm_length':
+                # Add all other measurements except arm_length (which should come from side)
+                merged['measurements'][name] = data
+        
+        # Store front visualization and metadata
+        merged['front_visualization'] = front_results.get('visualization')
+        merged['front_mask'] = front_results.get('mask')
+        merged['visualization'] = front_results.get('visualization')  # Primary visualization
+        merged['mask'] = front_results.get('mask')  # Primary mask
+        merged['scale_factor'] = front_results.get('scale_factor', 0)
+        merged['height_px'] = front_results.get('height_px', 0)
+        merged['total_landmarks'] = front_results.get('total_landmarks', 0)
+    
+    # Extract side measurements (depths + arm_length)
+    if side_results and side_results.get('success'):
+        side_measurements = side_results.get('measurements', {})
+        
+        # Add side measurements
+        # arm_length MUST come from side view
+        for name, data in side_measurements.items():
+            if name == 'arm_length':
+                # Prioritize side view for arm_length
+                merged['measurements'][name] = data
+                print(f"  ✓ Using arm_length from SIDE view: {data.get('value_cm')} cm")
+            elif name == 'leg_length':
+                # Skip leg_length from side (already handled from front)
+                print(f"  ⓘ Skipping leg_length from side view (using front view instead)")
+                continue
+            elif name not in merged['measurements']:
+                # Add other measurements if not already present
+                merged['measurements'][name] = data
+            else:
+                # If conflict, keep both with prefixes
+                merged['measurements'][f'front_{name}'] = merged['measurements'][name]
+                merged['measurements'][f'side_{name}'] = data
+                del merged['measurements'][name]
+        
+        # Store side visualization and metadata
+        merged['side_visualization'] = side_results.get('visualization')
+        merged['side_mask'] = side_results.get('mask')
+        
+        # Update total landmarks count
+        merged['total_landmarks'] += side_results.get('total_landmarks', 0)
+    
+    print(f"\n✓ Merged manual measurements: {len(merged['measurements'])} total measurements")
+    print(f"  Measurements: {list(merged['measurements'].keys())}")
+    if 'arm_length' in merged['measurements']:
+        print(f"  ✓ arm_length: {merged['measurements']['arm_length'].get('value_cm')} cm (from SIDE view)")
+    if 'leg_length' in merged['measurements']:
+        print(f"  ✓ leg_length: {merged['measurements']['leg_length'].get('value_cm')} cm (from FRONT view)")
+    
+    return merged
+
+
+@app.route('/api/process-manual', methods=['POST'])
+def process_manual_landmarks():
+    """
+    Process manually marked landmarks and compute measurements.
+    Uses the same pixel-to-scale conversion logic as automatic detection.
+    """
+    try:
+        data = request.json
+        
+        print("\n" + "="*60)
+        print("MANUAL LANDMARK PROCESSING")
+        print("="*60)
+        
+        # Get user height for scaling
+        user_height_cm = data.get('user_height')
+        if user_height_cm is None:
+            user_height_cm = 0
+        user_height_cm = float(user_height_cm)
+        if user_height_cm <= 0:
+            return jsonify({'error': 'User height is required'}), 400
+        
+        print(f"✓ User height: {user_height_cm} cm")
+        
+        # Decode images if provided
+        front_img = decode_image(data.get('front_image'))
+        side_img = decode_image(data.get('side_image'))
+        
+        if front_img is not None:
+            print(f"✓ Front image received: {front_img.shape}")
+        
+        # Process front view manual landmarks
+        front_landmarks = data.get('front_landmarks', {})
+        front_results = None
+        side_results = None
+        
+        if front_landmarks:
+            print("\n" + "="*60)
+            print("PROCESSING FRONT VIEW MANUAL LANDMARKS")
+            print("="*60)
+            
+            front_results = process_manual_view(
+                front_landmarks,
+                user_height_cm,
+                'front',
+                front_img
+            )
+        
+        # Process side view if provided
+        side_landmarks = data.get('side_landmarks', {})
+        if side_landmarks:
+            print("\n" + "="*60)
+            print("PROCESSING SIDE VIEW MANUAL LANDMARKS")
+            print("="*60)
+            
+            side_img_to_use = side_img if side_img is not None else front_img # Fallback? No, just None
+            
+            side_results = process_manual_view(
+                side_landmarks,
+                user_height_cm,
+                'side',
+                side_img
+            )
+        
+        # MERGE FRONT AND SIDE MEASUREMENTS
+        # Instead of returning separate front/side results,
+        # merge them into a single consolidated result
+        print("\n" + "="*60)
+        print("MERGING MANUAL MEASUREMENTS")
+        print("="*60)
+        
+        merged_result = merge_manual_measurements(front_results, side_results)
+        
+        # Prepare calibration data from merged result
+        calibration_data = {
+            'user_height_cm': user_height_cm,
+            'method': 'manual_landmark_marking',
+            'height_in_image_px': merged_result.get('height_px', 0),
+            'scale_factor': merged_result.get('scale_factor', 0),
+            'formula': f'{user_height_cm} cm / {merged_result.get("height_px", 1):.2f} px = {merged_result.get("scale_factor", 0):.4f} cm/px' if merged_result.get('height_px', 0) > 0 else 'N/A',
+            'description': f'1 pixel = {merged_result.get("scale_factor", 0):.4f} cm' if merged_result.get('scale_factor', 0) > 0 else 'Manual mode'
+        }
+
+        response = {
+            'success': True,
+            'mode': 'manual',
+            'calibration': calibration_data,
+            'results': {
+                'merged': merged_result  # Single consolidated result instead of separate front/side
+            }
+        }
+        
+        print("✓ Manual processing complete!")
+        print("="*60 + "\n")
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        print(f"\n✗ ERROR: {str(e)}")
+        traceback.print_exc()
+        return jsonify({
+            'error': f'Manual processing failed: {str(e)}'
+        }), 500
+
+
+def snap_point_to_edge(point, image, mask=None, search_radius=20, sample_count=8):
+    """
+    Snap a user-marked point to the nearest body contour edge.
+    
+    Uses Canny edge detection on the segmentation mask to find precise body boundaries,
+    then searches for the closest edge point within a radius.
+    
+    Args:
+        point: Tuple (x, y) of user-marked point
+        image: Original image (numpy array)
+        mask: Segmentation mask (optional, improves accuracy)
+        search_radius: Pixel radius to search for edges
+        sample_count: Number of radial samples to average
+        
+    Returns:
+        Refined (x, y) point snapped to edge, or original point if no edge found
+    """
+    x, y = int(point[0]), int(point[1])
+    h, w = image.shape[:2]
+    
+    # Validate point is within image bounds
+    if x < 0 or x >= w or y < 0 or y >= h:
+        return point
+    
+    try:
+        # Use mask if available, otherwise use image
+        if mask is not None and mask.size > 0:
+            # Apply Canny edge detection on mask
+            edges = cv2.Canny(mask, 50, 150)
+        else:
+            # Convert to grayscale and apply edge detection
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+            edges = cv2.Canny(gray, 50, 150)
+        
+        # Search in a circular region around the point
+        y_min = max(0, y - search_radius)
+        y_max = min(h, y + search_radius)
+        x_min = max(0, x - search_radius)
+        x_max = min(w, x + search_radius)
+        
+        # Extract region of interest
+        roi = edges[y_min:y_max, x_min:x_max]
+        
+        if roi.size == 0:
+            return point
+        
+        # Find edge pixels in ROI
+        edge_points = np.where(roi > 0)
+        
+        if len(edge_points[0]) == 0:
+            # No edges found, return original point
+            return point
+        
+        # Convert to absolute coordinates
+        edge_y = edge_points[0] + y_min
+        edge_x = edge_points[1] + x_min
+        
+        # Find closest edge point
+        distances = np.sqrt((edge_x - x)**2 + (edge_y - y)**2)
+        min_idx = np.argmin(distances)
+        
+        snapped_x = edge_x[min_idx]
+        snapped_y = edge_y[min_idx]
+        
+        # Average multiple nearby edge points for stability
+        close_threshold = 3  # pixels
+        close_mask = distances < close_threshold
+        if np.sum(close_mask) >= 3:
+            snapped_x = int(np.mean(edge_x[close_mask]))
+            snapped_y = int(np.mean(edge_y[close_mask]))
+        
+        print(f"    Edge snap: ({x}, {y}) → ({snapped_x}, {snapped_y}), distance: {distances[min_idx]:.1f}px")
+        return (float(snapped_x), float(snapped_y))
+        
+    except Exception as e:
+        print(f"    ⚠ Edge snapping failed: {e}, using original point")
+        return point
+
+
+def detect_shared_shoulder_arm_points(landmarks):
+    """
+    Detect if shoulder and arm measurements share a common point.
+    
+    In proper measurement technique:
+    - Shoulder width: left_shoulder → right_shoulder
+    - Arm length: shoulder → wrist
+    
+    The shoulder endpoint of arm measurement should match one of the shoulder width endpoints.
+    
+    Args:
+        landmarks: List of landmark dictionaries
+        
+    Returns:
+        Dictionary mapping shared points between measurements
+    """
+    shoulder_landmark = None
+    arm_landmark = None
+    
+    for landmark in landmarks:
+        lm_type = landmark.get('type', '')
+        if lm_type == 'shoulder':
+            shoulder_landmark = landmark
+        elif lm_type == 'arm':
+            arm_landmark = landmark
+    
+    if not shoulder_landmark or not arm_landmark:
+        return None
+    
+    shoulder_points = shoulder_landmark.get('points', [])
+    arm_points = arm_landmark.get('points', [])
+    
+    if len(shoulder_points) != 2 or len(arm_points) != 2:
+        return None
+    
+    # Check if arm starting point matches either shoulder endpoint
+    # Increased tolerance from 5px to 10px to account for sub-pixel rounding and coordinate precision
+    # Frontend snaps within 25px, stores with 2 decimal precision
+    tolerance = 10  # Relaxed tolerance for robustness against rounding errors
+    
+    arm_start = arm_points[0]
+    arm_end = arm_points[1]
+    shoulder_left = shoulder_points[0]
+    shoulder_right = shoulder_points[1]
+    
+    # Enhanced debug logging - show all coordinates
+    print(f"\n    === SHOULDER-ARM COORDINATE MATCHING ===")
+    print(f"    Shoulder Left:  ({shoulder_left['x']:.2f}, {shoulder_left['y']:.2f})")
+    print(f"    Shoulder Right: ({shoulder_right['x']:.2f}, {shoulder_right['y']:.2f})")
+    print(f"    Arm Start:      ({arm_start['x']:.2f}, {arm_start['y']:.2f})")
+    print(f"    Arm End:        ({arm_end['x']:.2f}, {arm_end['y']:.2f})")
+    
+    shared_info = {
+        'has_shared_point': False,
+        'arm_shoulder_point_idx': None,  # 0 or 1 for arm measurement
+        'shoulder_point_idx': None,  # 0 or 1 for shoulder measurement
+        'side': None  # 'left' or 'right'
+    }
+    
+    # Check arm start point against shoulder endpoints
+    dist_to_left = np.sqrt((arm_start['x'] - shoulder_left['x'])**2 + (arm_start['y'] - shoulder_left['y'])**2)
+    dist_to_right = np.sqrt((arm_start['x'] - shoulder_right['x'])**2 + (arm_start['y'] - shoulder_right['y'])**2)
+    
+    print(f"    Distances from arm start:")
+    print(f"      → Left shoulder:  {dist_to_left:.2f}px")
+    print(f"      → Right shoulder: {dist_to_right:.2f}px")
+    
+    if dist_to_left < tolerance:
+        shared_info['has_shared_point'] = True
+        shared_info['arm_shoulder_point_idx'] = 0  # arm start
+        shared_info['shoulder_point_idx'] = 0  # left shoulder
+        shared_info['side'] = 'left'
+        print(f"    ✓ MATCH DETECTED: arm start ↔ left shoulder (distance: {dist_to_left:.2f}px < {tolerance}px tolerance)")
+        return shared_info
+    elif dist_to_right < tolerance:
+        shared_info['has_shared_point'] = True
+        shared_info['arm_shoulder_point_idx'] = 0  # arm start
+        shared_info['shoulder_point_idx'] = 1  # right shoulder
+        shared_info['side'] = 'right'
+        print(f"    ✓ MATCH DETECTED: arm start ↔ right shoulder (distance: {dist_to_right:.2f}px < {tolerance}px tolerance)")
+        return shared_info
+    
+    # Check arm end point against shoulder endpoints (less common but possible)
+    dist_to_left_end = np.sqrt((arm_end['x'] - shoulder_left['x'])**2 + (arm_end['y'] - shoulder_left['y'])**2)
+    dist_to_right_end = np.sqrt((arm_end['x'] - shoulder_right['x'])**2 + (arm_end['y'] - shoulder_right['y'])**2)
+    
+    print(f"    Distances from arm end:")
+    print(f"      → Left shoulder:  {dist_to_left_end:.2f}px")
+    print(f"      → Right shoulder: {dist_to_right_end:.2f}px")
+    
+    if dist_to_left_end < tolerance:
+        shared_info['has_shared_point'] = True
+        shared_info['arm_shoulder_point_idx'] = 1  # arm end
+        shared_info['shoulder_point_idx'] = 0  # left shoulder
+        shared_info['side'] = 'left'
+        print(f"    ✓ MATCH DETECTED: arm end ↔ left shoulder (distance: {dist_to_left_end:.2f}px < {tolerance}px tolerance)")
+        return shared_info
+    elif dist_to_right_end < tolerance:
+        shared_info['has_shared_point'] = True
+        shared_info['arm_shoulder_point_idx'] = 1  # arm end
+        shared_info['shoulder_point_idx'] = 1  # right shoulder
+        shared_info['side'] = 'right'
+        print(f"    ✓ MATCH DETECTED: arm end ↔ right shoulder (distance: {dist_to_right_end:.2f}px < {tolerance}px tolerance)")
+        return shared_info
+    
+    # If no match within tolerance, provide detailed diagnostic information
+    min_dist = min(dist_to_left, dist_to_right, dist_to_left_end, dist_to_right_end)
+    print(f"    ✗ NO MATCH: Closest distance is {min_dist:.2f}px (tolerance: {tolerance}px)")
+    
+    if min_dist < 30:  # Within reasonable range but not exact
+        print(f"    ⚠ WARNING: Arm point near shoulder but outside tolerance")
+        print(f"      This suggests frontend snap may not have triggered correctly.")
+        print(f"      Check browser console for '✓ ARM SNAP DETECTED' message.")
+    
+    print(f"    ========================================\n")
+    
+    return shared_info
+
+
+def refine_measurement_with_contours(p1, p2, image, mask=None, num_samples=5):
+    """
+    Refine a measurement by sampling along the line and averaging edge-snapped points.
+    
+    This improves accuracy by:
+    1. Taking multiple samples along the measurement line
+    2. Snapping each sample to nearest edge
+    3. Averaging to reduce noise and improve robustness
+    
+    Args:
+        p1: Start point (x, y)
+        p2: End point (x, y)
+        image: Original image
+        mask: Segmentation mask (optional)
+        num_samples: Number of samples to take along the line
+        
+    Returns:
+        Refined (p1, p2) tuple
+    """
+    try:
+        # Sample points along the line
+        t_values = np.linspace(0, 1, num_samples)
+        
+        # For start point, sample nearby points
+        start_samples = []
+        for t in t_values[:2]:  # Sample near start
+            sample_x = p1[0] + t * 0.1 * (p2[0] - p1[0])
+            sample_y = p1[1] + t * 0.1 * (p2[1] - p1[1])
+            snapped = snap_point_to_edge((sample_x, sample_y), image, mask, search_radius=15)
+            start_samples.append(snapped)
+        
+        # Average start samples
+        if start_samples:
+            refined_p1 = (
+                np.mean([s[0] for s in start_samples]),
+                np.mean([s[1] for s in start_samples])
+            )
+        else:
+            refined_p1 = snap_point_to_edge(p1, image, mask)
+        
+        # For end point, sample nearby points
+        end_samples = []
+        for t in t_values[-2:]:  # Sample near end
+            sample_x = p1[0] + (0.9 + t * 0.1) * (p2[0] - p1[0])
+            sample_y = p1[1] + (0.9 + t * 0.1) * (p2[1] - p1[1])
+            snapped = snap_point_to_edge((sample_x, sample_y), image, mask, search_radius=15)
+            end_samples.append(snapped)
+        
+        # Average end samples
+        if end_samples:
+            refined_p2 = (
+                np.mean([s[0] for s in end_samples]),
+                np.mean([s[1] for s in end_samples])
+            )
+        else:
+            refined_p2 = snap_point_to_edge(p2, image, mask)
+        
+        return refined_p1, refined_p2
+        
+    except Exception as e:
+        print(f"    ⚠ Contour refinement failed: {e}, using original points")
+        return p1, p2
+
+
+def process_manual_view(landmarks_data, user_height_cm, view_name, image=None):
+    """
+    Process manually marked landmarks for a single view.
+    
+    Args:
+        landmarks_data: Dictionary with 'landmarks', 'imageWidth', 'imageHeight'
+        user_height_cm: User's actual height in cm
+        view_name: 'front' or 'side'
+        image: Original image (numpy array) for visualization and automatic scale calibration
+    
+    Returns:
+        Dictionary with measurements
+    """
+    try:
+        landmarks = landmarks_data.get('landmarks', [])
+        image_width = landmarks_data.get('imageWidth', 1)
+        image_height = landmarks_data.get('imageHeight', 1)
+        
+        if not landmarks and not image:
+             return {
+                'success': False,
+                'error': 'No landmarks provided',
+                'measurements': {}
+            }
+        
+        print(f"✓ Processing {len(landmarks)} manual landmarks")
+        
+        # 1. Determine Scale Factor
+        scale_factor = 0
+        height_px = 0
+        
+        # Method A: Try Automatic Detection first (Most Accurate)
+        if image is not None:
+            print("  Attempting automatic detection for scale calibration...")
+            # Detect landmarks to measure height in pixels
+            ld = get_landmark_detector()
+            if ld is not None:
+                auto_landmarks = ld.detect(image)
+            else:
+                auto_landmarks = None
+            
+            if auto_landmarks is not None:
+                nose = auto_landmarks[0]
+                left_ankle = auto_landmarks[27]
+                right_ankle = auto_landmarks[28]
+                ankle_y = max(left_ankle[1], right_ankle[1])
+                height_px = ankle_y - nose[1]
+                
+                if height_px > 0:
+                    scale_factor = user_height_cm / height_px
+                    print(f"  ✓ Auto-calibration successful: {height_px:.1f} px height -> {scale_factor:.4f} cm/px")
+                else:
+                    print("  ⚠ Auto-detection found landmarks but height calculation failed.")
+            else:
+                print("  ⚠ Automatic detection failed (no person found).")
+        
+        # Method B: Estimate from manual landmarks if Auto failed
+        if scale_factor <= 0:
+            print("  Falling back to manual height estimation...")
+            height_px = estimate_height_from_landmarks(landmarks, image_height)
+            
+            if height_px <= 0:
+                 # Fallback: use image height as approximation
+                height_px = image_height * 0.85 
+                print(f"  ⚠ Could not estimate height from landmarks. Using 85% image height: {height_px:.1f} px")
+            
+            scale_factor = user_height_cm / height_px
+            print(f"  ✓ Manual/Fallback calibration: {height_px:.1f} px height -> {scale_factor:.4f} cm/px")
+
+        
+        measurements = {}
+        
+        # 2. Generate segmentation mask for edge refinement
+        mask = None
+        if image is not None:
+            try:
+                print("  Generating segmentation mask for edge refinement...")
+                mask = segmentation_model.segment_person(image, conf_threshold=0.3)
+                if mask is not None:
+                    print(f"  ✓ Mask generated: {mask.shape}")
+                else:
+                    print("  ⚠ Mask generation failed, will use image edges directly")
+            except Exception as e:
+                print(f"  ⚠ Could not generate mask: {e}")
+                mask = None
+        
+        # 3. Detect and handle shared shoulder-arm points
+        shared_point_info = detect_shared_shoulder_arm_points(landmarks)
+        shared_shoulder_coord = None  # Store the shared contour-snapped coordinate
+        
+        if shared_point_info and shared_point_info['has_shared_point']:
+            print(f"\n  ✓ DETECTED SHARED SHOULDER-ARM POINT ({shared_point_info['side']} side)")
+            print(f"    Shoulder and arm measurements will use synchronized coordinates")
+        
+        # 4. Process each manual landmark line with edge snapping and refinement
+        # Create a visualization image
+        vis_image = image.copy() if image is not None else np.zeros((image_height, image_width, 3), dtype=np.uint8)
+        
+        # First pass: Process shoulder measurement to get shared coordinate
+        if shared_point_info and shared_point_info['has_shared_point']:
+            for landmark in landmarks:
+                if landmark.get('type') == 'shoulder':
+                    points = landmark.get('points', [])
+                    if len(points) == 2:
+                        shoulder_idx = shared_point_info['shoulder_point_idx']
+                        shoulder_point = points[shoulder_idx]
+                        x_orig, y_orig = shoulder_point['x'], shoulder_point['y']
+                        
+                        # Snap to edge
+                        if image is not None:
+                            shared_shoulder_coord = snap_point_to_edge((x_orig, y_orig), image, mask, search_radius=15)
+                            print(f"    Shared shoulder coordinate: ({x_orig:.1f}, {y_orig:.1f}) → ({shared_shoulder_coord[0]:.1f}, {shared_shoulder_coord[1]:.1f})")
+                        else:
+                            shared_shoulder_coord = (x_orig, y_orig)
+                    break
+        
+        # Second pass: Process all landmarks with synchronized coordinates
+        for landmark in landmarks:
+            landmark_type = landmark.get('type', 'custom')
+            landmark_label = landmark.get('label', 'Unknown')
+            points = landmark.get('points', [])
+            
+            if len(points) == 2:
+                # Get original user-marked points
+                p1 = points[0]
+                p2 = points[1]
+                
+                x1_orig, y1_orig = p1['x'], p1['y']
+                x2_orig, y2_orig = p2['x'], p2['y']
+                
+                print(f"\n  Processing: {landmark_label}")
+                print(f"    Original points: ({x1_orig:.1f}, {y1_orig:.1f}) → ({x2_orig:.1f}, {y2_orig:.1f})")
+                
+                # ACCURACY IMPROVEMENT: Snap points to body contour edges
+                # ENFORCE SHARED COORDINATES for shoulder and arm measurements
+                if image is not None:
+                    # Check if this is a shoulder or arm measurement with shared point
+                    use_shared_coord_p1 = False
+                    use_shared_coord_p2 = False
+                    
+                    if shared_point_info and shared_point_info['has_shared_point'] and shared_shoulder_coord:
+                        if landmark_type == 'shoulder':
+                            # Use shared coordinate for one endpoint
+                            shoulder_idx = shared_point_info['shoulder_point_idx']
+                            if shoulder_idx == 0:
+                                use_shared_coord_p1 = True
+                            else:
+                                use_shared_coord_p2 = True
+                        elif landmark_type == 'arm':
+                            # Use shared coordinate for shoulder endpoint
+                            arm_shoulder_idx = shared_point_info['arm_shoulder_point_idx']
+                            if arm_shoulder_idx == 0:
+                                use_shared_coord_p1 = True
+                            else:
+                                use_shared_coord_p2 = True
+                    
+                    # Refine with contour detection and multi-sample averaging
+                    (x1_refined, y1_refined), (x2_refined, y2_refined) = refine_measurement_with_contours(
+                        (x1_orig, y1_orig), 
+                        (x2_orig, y2_orig),
+                        image, 
+                        mask,
+                        num_samples=5
+                    )
+                    
+                    # Override with shared coordinate if applicable
+                    if use_shared_coord_p1:
+                        x1, y1 = shared_shoulder_coord
+                        x2, y2 = x2_refined, y2_refined
+                        print(f"    Using SHARED shoulder coordinate for point 1: ({x1:.1f}, {y1:.1f})")
+                        print(f"    Refined point 2: ({x2:.1f}, {y2:.1f})")
+                    elif use_shared_coord_p2:
+                        x1, y1 = x1_refined, y1_refined
+                        x2, y2 = shared_shoulder_coord
+                        print(f"    Refined point 1: ({x1:.1f}, {y1:.1f})")
+                        print(f"    Using SHARED shoulder coordinate for point 2: ({x2:.1f}, {y2:.1f})")
+                    else:
+                        x1, y1 = x1_refined, y1_refined
+                        x2, y2 = x2_refined, y2_refined
+                        print(f"    Refined points: ({x1:.1f}, {y1:.1f}) → ({x2:.1f}, {y2:.1f})")
+                else:
+                    x1, y1, x2, y2 = x1_orig, y1_orig, x2_orig, y2_orig
+                
+                # Calculate pixel distance with refined points
+                dx = x2 - x1
+                dy = y2 - y1
+                pixel_dist = np.sqrt(dx**2 + dy**2)
+                
+                # Calculate original distance for comparison
+                dx_orig = x2_orig - x1_orig
+                dy_orig = y2_orig - y1_orig
+                pixel_dist_orig = np.sqrt(dx_orig**2 + dy_orig**2)
+                
+                improvement = abs(pixel_dist - pixel_dist_orig)
+                if improvement > 0.5:
+                    print(f"    ✓ Accuracy improvement: {improvement:.1f} px ({improvement*scale_factor:.2f} cm)")
+                
+                # Convert to cm using scale factor (UNCHANGED - using correct formula)
+                cm_dist = pixel_dist * scale_factor
+                
+                measurements[landmark_type] = {
+                    'value_cm': round(float(cm_dist), 2),
+                    'value_px': round(float(pixel_dist), 2),
+                    'confidence': 0.95,  # High confidence due to edge snapping
+                    'source': 'Manual (Edge-Refined)',
+                    'label': landmark_label,
+                    'formula': f"{pixel_dist:.2f} px × {scale_factor:.4f} cm/px = {cm_dist:.2f} cm",
+                    'refinement': {
+                        'original_px': round(float(pixel_dist_orig), 2),
+                        'refined_px': round(float(pixel_dist), 2),
+                        'improvement_px': round(float(improvement), 2),
+                        'edge_snapped': True
+                    }
+                }
+
+                # Draw on visualization with both original and refined points
+                # Draw original points in gray (faded)
+                pt1_orig = (int(x1_orig), int(y1_orig))
+                pt2_orig = (int(x2_orig), int(y2_orig))
+                cv2.line(vis_image, pt1_orig, pt2_orig, (128, 128, 128), 1) # Gray line (original)
+                cv2.circle(vis_image, pt1_orig, 4, (128, 128, 128), 1) # Gray dots (original)
+                cv2.circle(vis_image, pt2_orig, 4, (128, 128, 128), 1)
+                
+                # Draw refined points in bright colors
+                pt1 = (int(x1), int(y1))
+                pt2 = (int(x2), int(y2))
+                cv2.line(vis_image, pt1, pt2, (0, 255, 255), 3) # Yellow line (refined)
+                cv2.circle(vis_image, pt1, 6, (0, 255, 0), -1) # Green dots (refined)
+                cv2.circle(vis_image, pt2, 6, (0, 255, 0), -1)
+                
+                # Draw label
+                mid_x = int((x1 + x2) / 2)
+                mid_y = int((y1 + y2) / 2)
+                cv2.putText(vis_image, f"{cm_dist:.1f}cm", (mid_x, mid_y - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                
+                print(f"  ✓ {landmark_label}: {cm_dist:.2f} cm ({pixel_dist:.1f} px) [Edge-Refined]")
+
+        # 4. Generate outputs
+        vis_base64 = encode_image(vis_image)
+        
+        mask_base64 = None
+        if image is not None:
+             # Try to generate a mask for aesthetics
+             try:
+                mask = segmentation_model.segment_person(image, conf_threshold=0.3)
+                if mask is not None:
+                    mask_base64 = encode_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
+             except Exception as e:
+                 print(f"  ⚠ Could not generate mask: {e}")
+
+        return {
+            'success': True,
+            'measurements': measurements,
+            'scale_factor': float(scale_factor),
+            'height_px': float(height_px),
+            'visualization': vis_base64,
+            'mask': mask_base64,
+            'total_landmarks': len(landmarks)
+        }
+        
+    except Exception as e:
+        print(f"✗ Manual view processing error: {e}")
+        traceback.print_exc()
+        return {
+            'success': False,
+            'error': str(e),
+            'measurements': {}
+        }
+
+
+def estimate_height_from_landmarks(landmarks, image_height):
+    """
+    Estimate body height in pixels from landmark positions.
+    Looks for vertical measurements like shoulder-to-ankle or hip-to-ankle.
+    """
+    height_estimates = []
+    
+    for landmark in landmarks:
+        points = landmark.get('points', [])
+        if len(points) == 2:
+            # Check if measurement is primarily vertical
+            p1 = points[0]
+            p2 = points[1]
+            dy = abs(p2['y'] - p1['y'])
+            dx = abs(p2['x'] - p1['x'])
+            
+            # If vertical component is much larger than horizontal
+            if dy > dx * 2:
+                height_estimates.append(dy)
+    
+    if height_estimates:
+        # Use the largest vertical measurement as height estimate
+        return max(height_estimates)
+    
+    return 0
 
 
 if __name__ == '__main__':
