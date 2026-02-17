@@ -9,17 +9,35 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
   const [selectedPoint, setSelectedPoint] = useState(null);
   const canvasRef = useRef(null);
   const imageRef = useRef(null);
-  
+
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
 
-  // Landmark types with colors
+  // Point registry for shared coordinates (shoulder = arm-start)
+  const [pointRegistry, setPointRegistry] = useState({});
+  const [nextPointId, setNextPointId] = useState(0);
+
+  // Landmark types with colors and aliasing configuration
   const landmarkTypes = [
-    { id: 'shoulder', label: 'Shoulder Width', color: '#FF6B6B', description: 'Mark left & right shoulder edges' },
+    {
+      id: 'shoulder',
+      label: 'Shoulder Width',
+      color: '#FF6B6B',
+      description: 'Mark left & right shoulder edges',
+      createSharedPoints: true,
+      pointAliases: { 0: 'left_shoulder', 1: 'right_shoulder' }
+    },
     { id: 'chest', label: 'Chest Width', color: '#4ECDC4', description: 'Mark left & right chest edges' },
     { id: 'waist', label: 'Waist Width', color: '#45B7D1', description: 'Mark left & right waist edges' },
     { id: 'hip', label: 'Hip Width', color: '#FFA07A', description: 'Mark left & right hip edges' },
-    { id: 'arm', label: 'Arm Length', color: '#98D8C8', description: 'Mark shoulder to wrist' },
+    {
+      id: 'arm',
+      label: 'Arm Length',
+      color: '#98D8C8',
+      description: 'Mark shoulder to wrist',
+      requiresSharedPoint: true,
+      sharedPointRef: 'shoulder'
+    },
     { id: 'leg', label: 'Leg Length', color: '#F7DC6F', description: 'Mark hip to ankle' },
     { id: 'custom', label: 'Custom Measurement', color: '#BB8FCE', description: 'Mark any two points' }
   ];
@@ -31,14 +49,14 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
       const image = imageRef.current;
       const canvas = canvasRef.current;
       const ctx = canvas.getContext('2d');
-      
+
       // Calculate scale to fit image in canvas
       const maxWidth = canvas.width;
       const maxHeight = canvas.height;
       const scaleX = maxWidth / image.naturalWidth;
       const scaleY = maxHeight / image.naturalHeight;
       const newScale = Math.min(scaleX, scaleY, 1);
-      
+
       setScale(newScale);
       setOffset({
         x: (maxWidth - image.naturalWidth * newScale) / 2,
@@ -69,7 +87,7 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
     // Draw existing landmarks and lines
     landmarks.forEach((landmark, idx) => {
       const color = landmarkTypes.find(t => t.id === landmark.type)?.color || '#888';
-      
+
       // Draw line if landmark has pair
       if (landmark.points.length === 2) {
         ctx.strokeStyle = color;
@@ -92,7 +110,7 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
           Math.pow(landmark.points[1].x - landmark.points[0].x, 2) +
           Math.pow(landmark.points[1].y - landmark.points[0].y, 2)
         );
-        
+
         ctx.fillStyle = color;
         ctx.font = 'bold 14px Arial';
         ctx.fillText(`${Math.round(distance)}px`, midX + 5, midY - 5);
@@ -103,10 +121,10 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
         ctx.fillStyle = color;
         ctx.strokeStyle = '#fff';
         ctx.lineWidth = 2;
-        
+
         const isHovered = hoveredPoint === `${idx}-${pointIdx}`;
         const radius = isHovered ? 8 : 6;
-        
+
         ctx.beginPath();
         ctx.arc(
           point.x * scale + offset.x,
@@ -157,7 +175,7 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
     if (!canvas) return { x: 0, y: 0 };
 
     const rect = canvas.getBoundingClientRect();
-    
+
     // Calculate scale between displayed size (CSS) and internal resolution (width/height attributes)
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
@@ -179,7 +197,7 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
 
     // Check if clicking on existing point to start line
     const clickedPointIndex = findClickedPoint(x, y);
-    
+
     if (clickedPointIndex !== null) {
       const [landmarkIdx, pointIdx] = clickedPointIndex.split('-').map(Number);
       setSelectedPoint(clickedPointIndex);
@@ -203,7 +221,7 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
         ],
         label: landmarkTypes.find(t => t.id === selectedType)?.label || 'Custom'
       };
-      
+
       setLandmarks([...landmarks, newLandmark]);
       setCurrentLine(null);
     }
@@ -303,7 +321,7 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
             style={{ display: 'none' }}
             onLoad={redrawCanvas}
           />
-          
+
           {currentLine && (
             <div className="cancel-line-button">
               <button onClick={handleCancelCurrentLine}>Cancel Current Line (ESC)</button>
@@ -344,7 +362,7 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
                     Math.pow(landmark.points[1].y - landmark.points[0].y, 2)
                   );
                   const color = landmarkTypes.find(t => t.id === landmark.type)?.color;
-                  
+
                   return (
                     <li key={idx} style={{ borderLeftColor: color }}>
                       <span className="landmark-info">

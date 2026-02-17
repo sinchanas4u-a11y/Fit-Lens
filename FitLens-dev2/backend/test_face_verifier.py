@@ -21,7 +21,7 @@ def create_dummy_face():
 
 def test_verifier():
     print("Initializing FaceVerifier...")
-    verifier = FaceVerifier(model_name="ArcFace", detector_backend="mediapipe") # mediapipe is fast
+    verifier = FaceVerifier(model_name="buffalo_l", det_size=(640, 640))
     
     if not verifier.is_ready:
         print("FAIL: FaceVerifier not ready (library missing?)")
@@ -37,12 +37,21 @@ def test_verifier():
     print("Running verification (expecting 'Face not detected' or 'Verified' depending on strictness)...")
     result = verifier.verify_person(img1, img2)
     
-    print("Result:", result)
+    print("\nFull Result Dictionary:")
+    import pprint
+    pprint.pprint(result)
     
-    if 'error' in result:
-        print(f"Verified Error Handling: {result['error']}")
+    if 'issues' in result:
+        print("\nQuality Issues Found:")
+        print(f"Front: {result['issues']['front']}")
+        print(f"Side: {result['issues']['side']}")
     else:
-        print(f"Verified Success: {result['verified']}, Distance: {result['distance']}")
+        print("\nWARNING: 'issues' key missing from result!")
+
+    if 'error' in result:
+        print(f"\nVerification Error: {result['error']}")
+    else:
+        print(f"\nVerified Success: {result['verified']}, Similarity: {result.get('similarity', 0):.4f}")
 
 if __name__ == "__main__":
     test_verifier()

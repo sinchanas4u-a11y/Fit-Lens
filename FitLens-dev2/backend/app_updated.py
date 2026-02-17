@@ -514,32 +514,60 @@ def verify_identity():
         no_face = result.get('no_face', False)
         has_warning = result.get('warning', False)
         error_msg = result.get('error', '')
+        issues = result.get('issues', {'front': [], 'side': []})
         
         # Construct response
         response_data = {
             'success': True,
             'verified': verified,
             'similarity': float(similarity),
-            'threshold': float(threshold)
+            'threshold': float(threshold),
+            'issues': issues
         }
         
         # Build appropriate message based on verification result
-        if no_face:
-            response_data['message'] = 'Face verification failed - face not detected clearly'
-            response_data['verified'] = False
-        elif not verified:
-            if similarity < 0.50:
-                response_data['message'] = 'Face verification failed - different person detected'
-            else:
-                response_data['message'] = 'Face verification failed'
-            response_data['verified'] = False
-        elif verified and has_warning:
-            response_data['message'] = 'Identity verified (uncertain range - similarity between 0.50-0.65)'
-            response_data['verified'] = True
-            response_data['warning'] = True
-        else:
+        if verified:
+            # PRIORITIZE similarity verification:
+            # If similarity is high enough, we proceed even if there are "soft" quality issues
+            
             response_data['message'] = 'Identity verified successfully'
             response_data['verified'] = True
+            
+            if has_warning:
+                 response_data['warning'] = True
+                 response_data['message'] += ' (uncertain range)'
+                 
+        else:
+            # Verification Failed
+            response_data['verified'] = False
+            
+            # 1. No Face Check (Blocking)
+            if no_face:
+                 response_data['message'] = 'Face verification failed - face not detected clearly'
+            else:
+                 # 2. Identity Mismatch vs Quality
+                 # If similarity is VERY low, it's likely a mismatch.
+                 # If similarity is borderline, maybe quality is to blame.
+                 # User request: "If mismatch → show mismatch error first. Then optionally show supporting quality hints"
+                 
+                 main_error = "Identity verification failed"
+                 if similarity < 0.40: # Very low similarity
+                      main_error += " (Different people detected)"
+                 elif similarity < threshold:
+                      main_error += " (Mismatch detected)"
+                      
+                 # Collect hints
+                 hints = []
+                 if issues['front']:
+                     hints.append(f"Front: {', '.join(issues['front'])}")
+                 if issues['side']:
+                     hints.append(f"Side: {', '.join(issues['side'])}")
+                     
+                 if hints:
+                      # Append hints to main error
+                      response_data['message'] = f"{main_error}. Note: {'; '.join(hints)}"
+                 else:
+                      response_data['message'] = f"{main_error}. Please ensure both photos are of the same person."
         
         print(f"\n📊 Verification Result:")
         print(f"   Verified: {verified}")
@@ -604,15 +632,37 @@ def process_images():
             
             # InsightFace returns similarity (higher = more similar)
             similarity = verification_result.get('similarity', 0.0)
+            verified = verification_result.get('verified', False)
+            issues = verification_result.get('issues', {'front': [], 'side': []})
             
-            if verification_result.get('no_face'):
-                error_message = 'Face not detected clearly. Please upload clear front and side images.'
-                return jsonify({'error': error_message, 'step': 1.5}), 400
+            # Refined Logic: If Verified, proceed (ignore quality issues). If Not Verified, check issues.
+            if not verified:
+                # Verification failed. 
+                # User request: Priority to Mismatch Error.
+                
+                if verification_result.get('no_face'):
+                     return jsonify({'error': 'Face verification failed - face not detected clearly', 'step': 1.5}), 400
 
-            if not verification_result.get('verified'):
-                # Identity mismatch
-                error_message = 'Please upload front and side images of the same person.'
-                return jsonify({'error': error_message, 'step': 1.5}), 400
+                main_error = "Identity verification failed"
+                # If similarity is low, emphasize mismatch
+                similarity = verification_result.get('similarity', 0.0)
+                if similarity < 0.40:
+                     main_error += " (Different people detected)"
+                
+                # Append hints if any
+                hints = []
+                if issues['front']:
+                    hints.append(f"Front: {', '.join(issues['front'])}")
+                if issues['side']:
+                    hints.append(f"Side: {', '.join(issues['side'])}")
+                
+                full_error_msg = main_error
+                if hints:
+                     full_error_msg += f". Issues: {'; '.join(hints)}"
+                else:
+                     full_error_msg += ". Please ensure both photos are of the same person."
+
+                return jsonify({'error': full_error_msg, 'step': 1.5}), 400
             
             # Log warning if in uncertain range
             if verification_result.get('warning'):

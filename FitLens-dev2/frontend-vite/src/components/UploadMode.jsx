@@ -33,6 +33,7 @@ const UploadMode = () => {
   const [isVerifying, setIsVerifying] = useState(false);
   const [isVerified, setIsVerified] = useState(false);
   const [verificationError, setVerificationError] = useState(null);
+  const [verificationIssues, setVerificationIssues] = useState({ front: [], side: [] }); // New: detailed issues
 
   const steps = [
     'Upload Photos',
@@ -53,7 +54,9 @@ const UploadMode = () => {
 
   const handleIdentityVerification = async () => {
     setIsVerifying(true);
+    setIsVerifying(true);
     setVerificationError(null);
+    setVerificationIssues({ front: [], side: [] }); // Reset issues
     setIsVerified(false);
 
     try {
@@ -71,10 +74,14 @@ const UploadMode = () => {
       if (response.data.success && response.data.verified) {
         console.log('✓ Identity verified successfully');
         setIsVerified(true);
+        // Do NOT show issues if verified, as per requirements
+        setVerificationIssues({ front: [], side: [] });
       } else {
-        const errorMsg = response.data.error || 'Face verification failed.';
+        const errorMsg = response.data.message || response.data.error || 'Face verification failed.';
+        const issues = response.data.issues || { front: [], side: [] };
         console.error('✗ Verification failed:', errorMsg);
         setVerificationError(errorMsg);
+        setVerificationIssues(issues);
       }
     } catch (err) {
       console.error('❌ Verification API error:', err);
@@ -94,8 +101,10 @@ const UploadMode = () => {
     const file = e.target.files[0];
     if (file) {
       setImage(file);
+      setImage(file);
       setIsVerified(false); // Reset verification if images change
       setVerificationError(null);
+      setVerificationIssues({ front: [], side: [] }); // Clear issues on new upload
       const reader = new FileReader();
       reader.onloadend = () => {
         setPreview(reader.result);
@@ -439,6 +448,17 @@ const UploadMode = () => {
                   <img src={frontPreview} alt="Front view" />
                 </div>
               )}
+              {/* Front Image Error Display */}
+              {verificationIssues?.front && verificationIssues.front.length > 0 && (
+                <div style={{ marginTop: '5px', padding: '8px', background: '#fff1f0', border: '1px solid #ffa39e', borderRadius: '4px', color: '#cf1322', fontSize: '13px' }}>
+                  <strong>Issues:</strong>
+                  <ul style={{ margin: '5px 0 0 20px', padding: 0 }}>
+                    {verificationIssues.front.map((issue, i) => (
+                      <li key={i}>{issue}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
 
             {/* Side Image */}
@@ -456,6 +476,17 @@ const UploadMode = () => {
               {sidePreview && (
                 <div className="image-preview">
                   <img src={sidePreview} alt="Side view" />
+                </div>
+              )}
+              {/* Side Image Error Display */}
+              {verificationIssues?.side && verificationIssues.side.length > 0 && (
+                <div style={{ marginTop: '5px', padding: '8px', background: '#fff1f0', border: '1px solid #ffa39e', borderRadius: '4px', color: '#cf1322', fontSize: '13px' }}>
+                  <strong>Issues:</strong>
+                  <ul style={{ margin: '5px 0 0 20px', padding: 0 }}>
+                    {verificationIssues.side.map((issue, i) => (
+                      <li key={i}>{issue}</li>
+                    ))}
+                  </ul>
                 </div>
               )}
             </div>
@@ -727,14 +758,14 @@ const UploadMode = () => {
                           } else if (name === 'leg_length') {
                             viewBadge = 'Front View';
                           }
-                          
+
                           return (
                             <tr key={name}>
                               <td>{data.label || name.replace(/_/g, ' ').toUpperCase()}</td>
                               <td>{data.value_cm} cm</td>
                               <td>{data.value_px.toFixed(2)} px</td>
-                              <td style={{ 
-                                fontSize: '12px', 
+                              <td style={{
+                                fontSize: '12px',
                                 fontWeight: (name === 'arm_length' || name === 'leg_length') ? 'bold' : 'normal',
                                 color: name === 'arm_length' ? '#2196f3' : (name === 'leg_length' ? '#4caf50' : '#666')
                               }}>
