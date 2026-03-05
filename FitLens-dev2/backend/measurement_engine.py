@@ -13,36 +13,36 @@ class MeasurementEngine:
     
     def __init__(self):
         """Initialize measurement engine"""
-        # Measurement definitions - tracks which use edges vs joints
+        # Measurement definitions - only requested measurements
         self.measurements = {
             'front': {
                 'shoulder_width': ('left_shoulder', 'right_shoulder'),
-                'hip_width': ('left_hip', 'right_hip'),
-                'chest_width': ('left_shoulder', 'right_shoulder'),
-                'waist_width': ('left_hip', 'right_hip'),
-                'arm_span': ('left_wrist', 'right_wrist'),
+                'arm_length': ('left_shoulder', 'left_wrist'),
+                'chest_circumference': ('left_shoulder', 'right_shoulder'),
+                'waist_circumference': ('left_hip', 'right_hip'),
+                'torso_length': ('left_shoulder', 'left_hip'),
+                'leg_length': ('left_hip', 'left_ankle'),
+                'full_height': ('nose', 'left_ankle'),
             },
             'side': {
-                'torso_depth': ('chest', 'back'),
-                'shoulder_to_hip': ('shoulder', 'hip'),
-                'hip_to_ankle': ('hip', 'ankle'),
+                'torso_length': ('shoulder', 'hip'),
+                'leg_length': ('hip', 'ankle'),
             }
         }
         
         # Measurements that use segmentation edges instead of MediaPipe
         self.edge_based_measurements = {
             'shoulder_width',
-            'chest_width',
-            'waist_width',
-            'hip_width'
+            'chest_circumference',
+            'waist_circumference',
         }
         
         # Measurements that use MediaPipe joints
         self.joint_based_measurements = {
-            'arm_span',
-            'shoulder_to_hip',
-            'hip_to_ankle',
-            'torso_depth'
+            'arm_length',
+            'torso_length',
+            'leg_length',
+            'full_height',
         }
     
     def calculate_scale_factor_from_height(self, height_px: float, user_height_cm: float) -> float:
@@ -205,7 +205,7 @@ class MeasurementEngine:
         Calculate distance between edge points for a specific measurement.
         
         Args:
-            measurement_name: Name of measurement (shoulder_width, hip_width, etc.)
+            measurement_name: Name of measurement (shoulder_width, chest_circumference, etc.)
             edge_reference_points: Dictionary with edge coordinates
             
         Returns:
@@ -213,15 +213,12 @@ class MeasurementEngine:
         """
         left_point = right_point = None
         
-        if measurement_name in ('shoulder_width', 'chest_width'):
+        if measurement_name in ('shoulder_width', 'chest_circumference'):
             left_point = edge_reference_points.get('shoulder_left')
             right_point = edge_reference_points.get('shoulder_right')
-        elif measurement_name == 'waist_width':
+        elif measurement_name == 'waist_circumference':
             left_point = edge_reference_points.get('waist_left')
             right_point = edge_reference_points.get('waist_right')
-        elif measurement_name == 'hip_width':
-            left_point = edge_reference_points.get('hip_left')
-            right_point = edge_reference_points.get('hip_right')
         
         if left_point and right_point and (left_point != (0, 0) or right_point != (0, 0)):
             left_array = np.array(left_point, dtype=np.float32)
@@ -243,10 +240,9 @@ class MeasurementEngine:
         """
         # Realistic measurement ranges (in cm) for front view
         realistic_ranges = {
-            'shoulder_width': (25, 65),   # Shoulder widths typical 30-60cm
-            'chest_width': (20, 55),      # Chest widths typical 25-50cm
-            'waist_width': (18, 45),      # Waist widths typical 20-40cm
-            'hip_width': (25, 55)         # Hip widths typical 30-50cm
+            'shoulder_width': (25, 65),         # Shoulder widths typical 30-60cm
+            'chest_circumference': (60, 140),   # Chest circumference typical 70-130cm
+            'waist_circumference': (50, 120),   # Waist circumference typical 60-110cm
         }
         
         if measurement_name not in realistic_ranges:
@@ -429,12 +425,15 @@ class MeasurementEngine:
         """Validate measurements are within reasonable ranges"""
         validation = {}
         
-        # Define reasonable ranges (cm)
+        # Define reasonable ranges (cm) for requested measurements
         ranges = {
-            'shoulder_width': (30, 60),
-            'hip_width': (25, 50),
-            'arm_span': (120, 220),
-            'torso_depth': (15, 35),
+            'shoulder_width': (25, 65),
+            'arm_length': (40, 90),
+            'chest_circumference': (60, 140),
+            'waist_circumference': (50, 120),
+            'torso_length': (40, 80),
+            'leg_length': (60, 120),
+            'full_height': (100, 220),
         }
         
         for name, value in measurements.items():

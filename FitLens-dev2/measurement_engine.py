@@ -38,43 +38,20 @@ class MeasurementEngine:
             except Exception as e:
                 print(f"⚠️ Failed to initialize hybrid shoulder detector: {e}")
         
-        # Measurement definitions
+        # Measurement definitions - only requested measurements
         self.measurements = {
             'front': {
-                # Width measurements
                 'shoulder_width': ('left_shoulder', 'right_shoulder'),
-                'hip_width': ('left_hip', 'right_hip'),
-                'chest_width': ('left_shoulder', 'right_shoulder'),
-                'waist_width': ('left_hip', 'right_hip'),
-                'arm_span': ('left_wrist', 'right_wrist'),
-                'knee_width': ('left_knee', 'right_knee'),
-                'ankle_width': ('left_ankle', 'right_ankle'),
-                
-                # Length measurements (left side)
-                'left_arm_length': ('left_shoulder', 'left_wrist'),
-                'left_upper_arm': ('left_shoulder', 'left_elbow'),
-                'left_forearm': ('left_elbow', 'left_wrist'),
-                'left_leg_length': ('left_hip', 'left_ankle'),
-                'left_thigh': ('left_hip', 'left_knee'),
-                'left_calf': ('left_knee', 'left_ankle'),
-                
-                # Length measurements (right side)
-                'right_arm_length': ('right_shoulder', 'right_wrist'),
-                'right_upper_arm': ('right_shoulder', 'right_elbow'),
-                'right_forearm': ('right_elbow', 'right_wrist'),
-                'right_leg_length': ('right_hip', 'right_ankle'),
-                'right_thigh': ('right_hip', 'right_knee'),
-                'right_calf': ('right_knee', 'right_ankle'),
-                
-                # Torso measurements
+                'arm_length': ('left_shoulder', 'left_wrist'),
+                'chest_circumference': ('left_shoulder', 'right_shoulder'),
+                'waist_circumference': ('left_hip', 'right_hip'),
                 'torso_length': ('left_shoulder', 'left_hip'),
-                'shoulder_to_knee': ('left_shoulder', 'left_knee'),
-                'neck_to_waist': ('nose', 'left_hip'),
+                'leg_length': ('left_hip', 'left_ankle'),
+                'full_height': ('nose', 'left_ankle'),
             },
             'side': {
                 'torso_length': ('left_shoulder', 'left_hip'),
-                'shoulder_to_hip': ('left_shoulder', 'left_hip'),
-                'hip_to_ankle': ('left_hip', 'left_ankle'),
+                'leg_length': ('left_hip', 'left_ankle'),
                 'full_height': ('nose', 'left_ankle'),
             }
         }
@@ -192,27 +169,30 @@ class MeasurementEngine:
         print(f"\n   ✓ Total measurements calculated: {len(measurements)}")
         print(f"   Measurement names: {list(measurements.keys())}")
         
-        # Calculate chest, waist, and hip circumferences using improved ellipse method
+        # Calculate chest and waist circumferences using improved ellipse method
         print(f"\n   🔄 Calculating circumferences using improved ellipse method...")
         
         # Get width measurements
         shoulder_width = measurements.get('shoulder_width', (None,))[0] if 'shoulder_width' in measurements else None
-        waist_width = measurements.get('waist_width', (None,))[0] if 'waist_width' in measurements else None
-        hip_width = measurements.get('hip_width', (None,))[0] if 'hip_width' in measurements else None
         
         if shoulder_width:
             print(f"     Shoulder width: {shoulder_width:.2f} cm")
-        if waist_width:
-            print(f"     Waist width: {waist_width:.2f} cm")
-        if hip_width:
-            print(f"     Hip width: {hip_width:.2f} cm")
         
         # Calculate chest width from shoulder width
         chest_width = shoulder_width * self.alpha_s if shoulder_width else None
         
+        # For waist, we need to estimate from hip landmarks (using the same approach)
+        waist_width = None
+        if 'left_hip' in landmark_dict and 'right_hip' in landmark_dict:
+            left_hip = landmark_dict['left_hip']
+            right_hip = landmark_dict['right_hip']
+            waist_width_px = np.linalg.norm(left_hip[:2] - right_hip[:2])
+            waist_width = waist_width_px * scale_factor
+            print(f"     Hip width (for waist calc): {waist_width:.2f} cm")
+        
         # Estimate depths using improved method
         chest_depth, waist_depth, hip_depth = self.estimate_torso_depth_improved(
-            landmark_dict, scale_factor, chest_width, waist_width, hip_width
+            landmark_dict, scale_factor, chest_width, waist_width, waist_width  # Use waist_width for hip too
         )
         
         # Calculate chest circumference
@@ -236,17 +216,6 @@ class MeasurementEngine:
             
             measurements['waist_circumference'] = (waist_circumference, avg_confidence, 'ellipse_improved')
             print(f"     ✓ Waist circumference: {waist_circumference:.2f} cm (width: {waist_width:.2f}, depth: {waist_depth:.2f})")
-        
-        # Calculate hip circumference
-        if hip_width:
-            hip_circumference = self.calculate_circumference_from_width(hip_width, hip_depth)
-            
-            # Calculate confidence
-            avg_confidence = (landmark_dict.get('left_hip', [0,0,0])[2] + 
-                            landmark_dict.get('right_hip', [0,0,0])[2]) / 2
-            
-            measurements['hip_circumference'] = (hip_circumference, avg_confidence, 'ellipse_improved')
-            print(f"     ✓ Hip circumference: {hip_circumference:.2f} cm (width: {hip_width:.2f}, depth: {hip_depth:.2f})")
         
         print(f"\n   ✓ Final total measurements: {len(measurements)}")
         return measurements

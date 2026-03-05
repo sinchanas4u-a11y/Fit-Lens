@@ -97,12 +97,7 @@ app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Initialize models
-print("Initializing models...")
-reference_detector = ReferenceDetector()
-measurement_engine = MeasurementEngine()
-segmentation_model = SegmentationModel(model_size='n')  # YOLOv8 nano for speed
-print("✓ Models initialized")
+# Models will be initialized below with full error handling
 
 # Live Session State
 class LiveSession:
@@ -443,7 +438,6 @@ try:
 except Exception as e:
     print(f"Error initializing core models: {e}")
     raise
-    raise
 
 # Initialize face verifier for identity verification
 try:
@@ -758,8 +752,15 @@ def process_images():
         print("STEP 6: RETURNING MEASUREMENTS AS JSON")
         print("="*60)
         
+        # Add original images to results for display
+        if front_results.get('success'):
+            front_results['original_image'] = data.get('front_image')
+        if side_img is not None and results.get('side', {}).get('success'):
+            results['side']['original_image'] = data.get('side_image')
+        
         response = {
             'success': True,
+            'mode': 'automatic',  # Set mode for frontend display
             'calibration': {
                 'user_height_cm': user_height_cm,
                 'height_in_image_px': float(height_px),
@@ -835,6 +836,27 @@ def process_single_view(image, scale_factor, view_name):
         
         print(f"✓ Detected {len(landmarks)} body landmarks")
         
+        # Extract edge reference points from segmentation mask for hybrid approach
+        edge_reference_points = None
+        print(f"\nSTEP 4.5: EXTRACTING EDGE REFERENCE POINTS ({view_name.upper()} VIEW)")
+        print("-" * 60)
+        
+        if mask is not None:
+            try:
+                # Use the landmark detector to extract edge points from the segmentation mask
+                edge_reference_points = ld.extract_body_edge_keypoints(mask, landmarks)
+                
+                if edge_reference_points and edge_reference_points.get('is_valid'):
+                    print("✓ Edge reference points extracted successfully:")
+                    print(f"  Shoulder width: {edge_reference_points.get('shoulder_right', (0,0))[0] - edge_reference_points.get('shoulder_left', (0,0))[0]:.1f} px")
+                    print(f"  Hip width: {edge_reference_points.get('hip_right', (0,0))[0] - edge_reference_points.get('hip_left', (0,0))[0]:.1f} px")
+                    print(f"  Height: {edge_reference_points.get('height_px', 0):.1f} px")
+                else:
+                    print("⚠ Edge extraction returned invalid points, using MediaPipe fallback")
+            except Exception as e:
+                print(f"Warning: Could not extract edge points: {e}")
+                edge_reference_points = None
+        
         print(f"\nSTEP 5: COMPUTING MEASUREMENTS ({view_name.upper()} VIEW)")
         print("-" * 60)
         
@@ -842,11 +864,21 @@ def process_single_view(image, scale_factor, view_name):
         print(f"  Landmarks shape: {landmarks.shape if hasattr(landmarks, 'shape') else 'N/A'}")
         print(f"  Scale factor: {scale_factor}")
         print(f"  View: {view_name}")
+        print(f"  Edge points available: {edge_reference_points is not None and edge_reference_points.get('is_valid', False)}")
         
-        # Calculate measurements with pixel distances
-        measurements = measurement_engine.calculate_measurements_with_confidence(
-            landmarks, scale_factor, view_name
-        )
+        # Calculate measurements with pixel distances using hybrid approach
+        # Uses edge points for width measurements, MediaPipe for others
+        try:
+            measurements = measurement_engine.calculate_measurements_with_confidence(
+                landmarks, scale_factor, view_name, edge_reference_points=edge_reference_points
+            )
+        except TypeError as e:
+            # Fallback: measurement engine doesn't support edge_reference_points
+            print(f"⚠ Measurement engine doesn't support edge_reference_points: {e}")
+            print("  Falling back to MediaPipe-only measurements")
+            measurements = measurement_engine.calculate_measurements_with_confidence(
+                landmarks, scale_factor, view_name
+            )
         
         print(f"\n✓ Measurement engine returned: {type(measurements)}")
         print(f"✓ Number of measurements: {len(measurements) if measurements else 0}")
@@ -894,13 +926,26 @@ def process_single_view(image, scale_factor, view_name):
         # Encode mask
         mask_base64 = encode_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
         
+        # Add hybrid approach metadata
+        source_summary = {
+            'segmentation_edge': len([m for m in formatted_measurements.values() 
+                                      if m.get('source') in ['Canny+findContours Edge', 'Segmentation Edge']]),
+            'mediapipe_landmarks': len([m for m in formatted_measurements.values() 
+                                        if m.get('source') == 'MediaPipe Landmarks (33 points)'])
+        }
+        
         return {
             'success': True,
             'measurements': formatted_measurements,
             'landmark_count': len(landmarks),
             'visualization': vis_base64,
             'mask': mask_base64,
-            'bbox': bbox if bbox else None
+            'bbox': bbox if bbox else None,
+            'hybrid_approach': {
+                'enabled': True,
+                'edge_points_available': edge_reference_points is not None and edge_reference_points.get('is_valid', False),
+                'source_summary': source_summary
+            }
         }
         
     except Exception as e:

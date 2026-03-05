@@ -616,6 +616,19 @@ const UploadMode = () => {
             </div>
           )}
 
+          {/* Automatic Mode Note */}
+          {results.mode === 'automatic' && (
+            <div style={{
+              background: '#e8f5e9',
+              border: '1px solid #4caf50',
+              padding: '12px',
+              borderRadius: '5px',
+              marginBottom: '20px'
+            }}>
+              <strong>ℹ️ Automatic Mode:</strong> AI-powered measurements using YOLOv8 segmentation + MediaPipe pose detection.
+            </div>
+          )}
+
           {/* Debug: Show full response */}
           <details style={{ marginBottom: '20px', padding: '10px', background: '#f0f0f0', borderRadius: '5px' }}>
             <summary style={{ cursor: 'pointer', fontWeight: 'bold' }}>🔍 Debug: View Raw Response Data</summary>
@@ -644,6 +657,7 @@ const UploadMode = () => {
             has_merged: !!results?.results?.merged,
             has_front: !!results?.results?.front,
             front_success: results?.results?.front?.success,
+            front_keys: results?.results?.front ? Object.keys(results.results.front) : [],
             has_measurements: !!results?.results?.front?.measurements,
             measurement_count: results?.results?.front?.measurements ? Object.keys(results.results.front.measurements).length : 0
           })}
@@ -783,24 +797,61 @@ const UploadMode = () => {
           )}
 
           {/* AUTOMATIC MODE: Separate Front and Side Tables */}
-          {results.mode !== 'manual' && results.results.front && results.results.front.success && (
+          {results.mode === 'automatic' && results.results?.front && (
             <div className="view-results">
               <h3>Front View Measurements</h3>
+              
+              {/* Debug: Show front result structure */}
+              {console.log('🔍 Front result:', results.results.front)}
+              
+              {/* Mode badge */}
+              <p style={{
+                color: '#4caf50',
+                fontSize: '14px',
+                fontStyle: 'italic',
+                marginBottom: '15px'
+              }}>
+                🤖 Automatic Mode: AI-powered body measurements
+              </p>
 
               {/* Debug: Show raw data */}
               {console.log('📊 Front measurements:', results.results.front.measurements)}
 
               {/* Visualizations */}
               <div className="visualizations">
-                <div className="vis-item">
-                  <h4>Landmarks</h4>
-                  <img src={results.results.front.visualization} alt="Front landmarks" />
-                </div>
+                {/* Original Image */}
+                {results.results.front.original_image && (
+                  <div className="vis-item">
+                    <h4>Original Image</h4>
+                    <img src={results.results.front.original_image} alt="Original front" />
+                  </div>
+                )}
                 <div className="vis-item">
                   <h4>Segmentation Mask</h4>
                   <img src={results.results.front.mask} alt="Front mask" />
                 </div>
+                <div className="vis-item">
+                  <h4>Landmark Detection</h4>
+                  <img src={results.results.front.visualization} alt="Front landmarks" />
+                </div>
               </div>
+
+              {/* Hybrid Approach Info */}
+              {results.results.front.hybrid_approach && results.results.front.hybrid_approach.enabled && (
+                <div style={{
+                  background: '#e8f5e9',
+                  border: '1px solid #4caf50',
+                  padding: '12px',
+                  borderRadius: '5px',
+                  marginBottom: '20px'
+                }}>
+                  <strong>🔬 Hybrid Vision Approach:</strong>
+                  <ul style={{ margin: '8px 0 0 20px', padding: 0 }}>
+                    <li>Edge-based measurements (shoulder, chest, waist, hip widths): {results.results.front.hybrid_approach.source_summary?.segmentation_edge || 0}</li>
+                    <li>MediaPipe joint measurements: {results.results.front.hybrid_approach.source_summary?.mediapipe_landmarks || 0}</li>
+                  </ul>
+                </div>
+              )}
 
               {/* Measurements Table */}
               <div className="measurements-table">
@@ -821,6 +872,7 @@ const UploadMode = () => {
                         <div key={name} style={{ padding: '8px', borderBottom: '1px solid #ddd' }}>
                           <strong>{name.replace(/_/g, ' ').toUpperCase()}:</strong>{' '}
                           {data.value_cm} cm ({data.value_px.toFixed(2)} px)
+                          {data.source && <span style={{ color: '#666', marginLeft: '10px', fontSize: '12px' }}>[{data.source}]</span>}
                         </div>
                       ))}
                     </div>
@@ -832,16 +884,20 @@ const UploadMode = () => {
                           <th>Measurement</th>
                           <th>Value (cm)</th>
                           <th>Value (px)</th>
+                          <th>Source</th>
                         </tr>
                       </thead>
                       <tbody>
                         {Object.entries(results.results.front.measurements).map(([name, data]) => {
                           console.log(`📏 Rendering measurement: ${name}`, data);
+                          const sourceLabel = data.source?.includes('Edge') ? 'Segmentation' : 'MediaPipe';
+                          const sourceColor = data.source?.includes('Edge') ? '#4caf50' : '#2196f3';
                           return (
                             <tr key={name}>
                               <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
                               <td>{data.value_cm} cm</td>
                               <td>{data.value_px.toFixed(2)} px</td>
+                              <td style={{ color: sourceColor, fontSize: '12px', fontWeight: 'bold' }}>{sourceLabel}</td>
                             </tr>
                           );
                         })}
@@ -854,43 +910,90 @@ const UploadMode = () => {
           )}
 
           {/* Side View Results - Only for Automatic Mode */}
-          {results.mode !== 'manual' && results.results.side && results.results.side.success && (
+          {results.mode === 'automatic' && results.results?.side && (
             <div className="view-results">
               <h3>Side View Measurements</h3>
+              
+              {/* Mode badge */}
+              <p style={{
+                color: '#4caf50',
+                fontSize: '14px',
+                fontStyle: 'italic',
+                marginBottom: '15px'
+              }}>
+                🤖 Automatic Mode: AI-powered body measurements
+              </p>
 
               {/* Visualizations */}
               <div className="visualizations">
-                <div className="vis-item">
-                  <h4>Landmarks</h4>
-                  <img src={results.results.side.visualization} alt="Side landmarks" />
-                </div>
+                {/* Original Image */}
+                {results.results.side.original_image && (
+                  <div className="vis-item">
+                    <h4>Original Image</h4>
+                    <img src={results.results.side.original_image} alt="Original side" />
+                  </div>
+                )}
                 <div className="vis-item">
                   <h4>Segmentation Mask</h4>
                   <img src={results.results.side.mask} alt="Side mask" />
                 </div>
+                <div className="vis-item">
+                  <h4>Landmark Detection</h4>
+                  <img src={results.results.side.visualization} alt="Side landmarks" />
+                </div>
               </div>
+
+              {/* Hybrid Approach Info */}
+              {results.results.side.hybrid_approach && results.results.side.hybrid_approach.enabled && (
+                <div style={{
+                  background: '#e8f5e9',
+                  border: '1px solid #4caf50',
+                  padding: '12px',
+                  borderRadius: '5px',
+                  marginBottom: '20px'
+                }}>
+                  <strong>🔬 Hybrid Vision Approach:</strong>
+                  <ul style={{ margin: '8px 0 0 20px', padding: 0 }}>
+                    <li>Edge-based measurements: {results.results.side.hybrid_approach.source_summary?.segmentation_edge || 0}</li>
+                    <li>MediaPipe joint measurements: {results.results.side.hybrid_approach.source_summary?.mediapipe_landmarks || 0}</li>
+                  </ul>
+                </div>
+              )}
 
               {/* Measurements Table */}
               <div className="measurements-table">
-                <h4>Body Measurements</h4>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Measurement</th>
-                      <th>Value (cm)</th>
-                      <th>Value (px)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Object.entries(results.results.side.measurements).map(([name, data]) => (
-                      <tr key={name}>
-                        <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
-                        <td>{data.value_cm} cm</td>
-                        <td>{data.value_px} px</td>
+                <h4>Body Measurements ({results.results.side.measurements ? Object.keys(results.results.side.measurements).length : 0})</h4>
+                
+                {!results.results.side.measurements || Object.keys(results.results.side.measurements).length === 0 ? (
+                  <div className="error-message">
+                    <strong>No measurements found in side view.</strong>
+                  </div>
+                ) : (
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Measurement</th>
+                        <th>Value (cm)</th>
+                        <th>Value (px)</th>
+                        <th>Source</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {Object.entries(results.results.side.measurements).map(([name, data]) => {
+                        const sourceLabel = data.source?.includes('Edge') ? 'Segmentation' : 'MediaPipe';
+                        const sourceColor = data.source?.includes('Edge') ? '#4caf50' : '#2196f3';
+                        return (
+                          <tr key={name}>
+                            <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
+                            <td>{data.value_cm} cm</td>
+                            <td>{data.value_px.toFixed(2)} px</td>
+                            <td style={{ color: sourceColor, fontSize: '12px', fontWeight: 'bold' }}>{sourceLabel}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </div>
           )}
