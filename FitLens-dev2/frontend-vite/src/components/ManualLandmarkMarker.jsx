@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import PropTypes from 'prop-types';
 import './ManualLandmarkMarker.css';
 
-const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imageHeight, imageWidth }) => {
+const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, onReset, imageHeight, imageWidth }) => {
   const [landmarks, setLandmarks] = useState([]);
   const [currentLine, setCurrentLine] = useState(null);
   const [hoveredPoint, setHoveredPoint] = useState(null);
@@ -265,6 +265,24 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
     setLandmarks(landmarks.filter((_, idx) => idx !== index));
   };
 
+  const handleResetAll = () => {
+    // Clear all internal state
+    setLandmarks([]);
+    setCurrentLine(null);
+    setPointRegistry({});
+    setNextPointId(0);
+    setSelectedPoint(null);
+    // Call parent's reset handler
+    if (onReset) {
+      onReset();
+    }
+  };
+
+  const handleResetByType = (typeId) => {
+    // Remove all landmarks of a specific type
+    setLandmarks(landmarks.filter(l => l.type !== typeId));
+  };
+
   const handleCancelCurrentLine = () => {
     setCurrentLine(null);
   };
@@ -333,21 +351,35 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
         <div className="marker-controls">
           <div className="landmark-type-selector">
             <h4>Select Measurement Type:</h4>
-            {landmarkTypes.map(type => (
-              <button
-                key={type.id}
-                className={`type-button ${selectedType === type.id ? 'active' : ''}`}
-                onClick={() => setSelectedType(type.id)}
-                style={{
-                  borderColor: type.color,
-                  backgroundColor: selectedType === type.id ? type.color : 'transparent',
-                  color: selectedType === type.id ? '#fff' : type.color
-                }}
-              >
-                <span className="type-dot" style={{ backgroundColor: type.color }}></span>
-                <span className="type-label">{type.label}</span>
-              </button>
-            ))}
+            {landmarkTypes.map(type => {
+              const count = landmarks.filter(l => l.type === type.id).length;
+              return (
+                <div key={type.id} className="type-button-wrapper">
+                  <button
+                    className={`type-button ${selectedType === type.id ? 'active' : ''}`}
+                    onClick={() => setSelectedType(type.id)}
+                    style={{
+                      borderColor: type.color,
+                      backgroundColor: selectedType === type.id ? type.color : 'transparent',
+                      color: selectedType === type.id ? '#fff' : type.color
+                    }}
+                  >
+                    <span className="type-dot" style={{ backgroundColor: type.color }}></span>
+                    <span className="type-label">{type.label}</span>
+                    {count > 0 && <span className="type-count">({count})</span>}
+                  </button>
+                  {count > 0 && (
+                    <button
+                      className="reset-type-button"
+                      onClick={() => handleResetByType(type.id)}
+                      title={`Clear all ${type.label} measurements`}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
           <div className="marked-landmarks">
@@ -387,6 +419,11 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, imag
             <button className="cancel-button" onClick={onCancel}>
               Cancel
             </button>
+            {onReset && (
+              <button className="reset-button" onClick={handleResetAll} title="Clear all landmarks and start over">
+                🔄 Reset All
+              </button>
+            )}
             <button
               className="submit-button"
               onClick={handleSubmit}
@@ -406,6 +443,7 @@ ManualLandmarkMarker.propTypes = {
   imageType: PropTypes.string.isRequired,
   onComplete: PropTypes.func.isRequired,
   onCancel: PropTypes.func.isRequired,
+  onReset: PropTypes.func,
   imageHeight: PropTypes.number,
   imageWidth: PropTypes.number
 };

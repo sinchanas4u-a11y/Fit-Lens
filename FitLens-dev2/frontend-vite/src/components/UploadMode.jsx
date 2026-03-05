@@ -218,6 +218,20 @@ const UploadMode = () => {
     setShowModeSelection(true);
   };
 
+  const handleResetLandmarks = () => {
+    // Clear all manual landmarks but keep uploaded images
+    setManualLandmarks({
+      front: null,
+      side: null
+    });
+    setResults(null);
+    setError(null);
+    // Restart manual marking from front view
+    setCurrentMarkingView('front');
+    setShowManualMarker(true);
+    console.log('🔄 Landmarks reset - keeping uploaded images');
+  };
+
   const processManualLandmarks = async (landmarks) => {
     setProcessing(true);
     setError(null);
@@ -1029,6 +1043,7 @@ const UploadMode = () => {
             imageType={currentMarkingView}
             onComplete={handleManualLandmarkComplete}
             onCancel={handleManualMarkingCancel}
+            onReset={handleResetLandmarks}
           />
         )
       }

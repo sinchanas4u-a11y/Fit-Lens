@@ -123,6 +123,44 @@
   text-align: left;
 }
 
+.type-count {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-left: 4px;
+}
+
+/* Type button wrapper for individual reset */
+.type-button-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.type-button-wrapper .type-button {
+  flex: 1;
+}
+
+.reset-type-button {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: #e74c3c;
+  color: white;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.reset-type-button:hover {
+  background: #c0392b;
+  transform: scale(1.1);
+}
+
 .marked-landmarks h4 {
   font-size: 16px;
   margin-bottom: 12px;
@@ -229,6 +267,17 @@
   background: #7f8c8d;
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(149, 165, 166, 0.3);
+}
+
+.reset-button {
+  background: #f39c12;
+  color: white;
+}
+
+.reset-button:hover {
+  background: #e67e22;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(243, 156, 18, 0.3);
 }
 
 .submit-button {
