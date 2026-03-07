@@ -17,6 +17,7 @@ import os
 import time
 import json
 import datetime
+import hashlib
 
 # Add parent directory to path to import modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -48,6 +49,30 @@ def get_landmark_detector():
 IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measurement_images")
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
+# Global set to track hashes of images we've already saved to prevent duplicates
+saved_image_hashes = set()
+
+def load_existing_hashes():
+    """Load existing image hashes from metadata.jsonl on startup."""
+    metadata_path = os.path.join(IMAGES_DIR, "metadata.jsonl")
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, 'r') as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            data = json.loads(line)
+                            if 'hash' in data:
+                                saved_image_hashes.add(data['hash'])
+                        except json.JSONDecodeError:
+                            continue
+            print(f"Loaded {len(saved_image_hashes)} existing image hashes to prevent duplicates.")
+        except Exception as e:
+            print(f"Error loading existing hashes: {e}")
+
+# Load existing hashes when the app starts
+load_existing_hashes()
+
 def save_measurement_image(image_data, view_name, source='upload'):
     """
     Save the measurement image to disk with metadata.
@@ -61,26 +86,50 @@ def save_measurement_image(image_data, view_name, source='upload'):
         filename = f"{timestamp}_{source}_{view_name}.png"
         filepath = os.path.join(IMAGES_DIR, filename)
         
-        # Determine image format and save
+        # Determine image format and extract bytes for hashing
+        img_bytes = None
         if isinstance(image_data, str):
             # Base64 string
             if ',' in image_data:
                 image_data = image_data.split(',')[1]
-            with open(filepath, "wb") as f:
-                f.write(base64.b64decode(image_data))
+            img_bytes = base64.b64decode(image_data)
         elif isinstance(image_data, np.ndarray):
-            # Numpy array
-            cv2.imwrite(filepath, image_data)
+            # Numpy array: encode back to bytes to get a consistent hash
+            # If we don't encode, numpy arrays won't match base64 uploads correctly
+            success, buffer = cv2.imencode('.png', image_data)
+            if success:
+                img_bytes = buffer.tobytes()
         else:
             print(f"Warning: Unsupported image format for saving: {type(image_data)}")
             return
+            
+        if img_bytes is None:
+            print("Warning: Failed to extract image bytes for deduplication.")
+            return
+
+        # Compute MD5 hash and check for duplicates
+        img_hash = hashlib.md5(img_bytes).hexdigest()
+        if img_hash in saved_image_hashes:
+            print(f"Duplicate image detected ({view_name}). Skipping save.")
+            return
+            
+        # Add new hash to the tracked set
+        saved_image_hashes.add(img_hash)
+
+        # Save to disk
+        if isinstance(image_data, str):
+            with open(filepath, "wb") as f:
+                f.write(img_bytes)
+        elif isinstance(image_data, np.ndarray):
+            cv2.imwrite(filepath, image_data)
 
         # Save metadata
         metadata = {
             "filename": filename,
             "timestamp": timestamp,
             "view": view_name,
-            "source": source
+            "source": source,
+            "hash": img_hash
         }
         
         metadata_path = os.path.join(IMAGES_DIR, "metadata.jsonl")
