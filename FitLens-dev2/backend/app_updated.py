@@ -45,9 +45,37 @@ def get_landmark_detector():
             return None
     return landmark_detector
 
-# Directory for storing measurement images
+# Directory for storing measurement images (metadata only now)
 IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measurement_images")
 os.makedirs(IMAGES_DIR, exist_ok=True)
+
+# Directory for storing measurement results (JSON)
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measurement_results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+def save_body_measurements(results):
+    """Save the final measurement results to a JSONL file."""
+    try:
+        results_path = os.path.join(RESULTS_DIR, "results.jsonl")
+        # Add metadata to the result
+        store_data = {
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "data": results
+        }
+        # We strip out large base64 strings if they exist to keep the file clean
+        if 'results' in results:
+            for view in results['results']:
+                if isinstance(results['results'][view], dict):
+                    results['results'][view].pop('original_image', None)
+                    results['results'][view].pop('visualization', None)
+                    results['results'][view].pop('mask', None)
+
+        with open(results_path, "a") as f:
+            f.write(json.dumps(store_data) + "\n")
+        print(f"✓ Measurement results saved to {results_path}")
+    except Exception as e:
+        print(f"Error saving measurement results: {e}")
+        traceback.print_exc()
 
 # Global set to track hashes of images we've already saved to prevent duplicates
 saved_image_hashes = set()
@@ -116,14 +144,16 @@ def save_measurement_image(image_data, view_name, source='upload'):
         # Add new hash to the tracked set
         saved_image_hashes.add(img_hash)
 
-        # Save to disk
-        if isinstance(image_data, str):
-            with open(filepath, "wb") as f:
-                f.write(img_bytes)
-        elif isinstance(image_data, np.ndarray):
-            cv2.imwrite(filepath, image_data)
+        # Save to disk - DISABLED as per user request to store results instead of images
+        # if isinstance(image_data, str):
+        #     with open(filepath, "wb") as f:
+        #         f.write(img_bytes)
+        # elif isinstance(image_data, np.ndarray):
+        #     cv2.imwrite(filepath, image_data)
+        
+        print(f"Image deduplication check passed for {view_name} (File writing skipped).")
 
-        # Save metadata
+        # Save metadata info to keep track of seen images
         metadata = {
             "filename": filename,
             "timestamp": timestamp,
@@ -460,6 +490,9 @@ def process_all_captured_images():
             },
             'results': results
         }
+        
+        # Store results persistently
+        save_body_measurements(final_response)
         
         emit('processing_complete', final_response)
         
@@ -819,6 +852,9 @@ def process_images():
             },
             'results': results
         }
+        
+        # Store results persistently
+        save_body_measurements(response)
         
         print("✓ Processing complete!")
         print("="*60 + "\n")
