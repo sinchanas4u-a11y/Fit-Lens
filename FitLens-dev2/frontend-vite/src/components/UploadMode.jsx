@@ -400,26 +400,40 @@ const UploadMode = () => {
     setVerificationError(null);
   };
 
-  const downloadJSON = () => {
-    // Sanitize results to remove confidence scores for export
-    const sanitizedResults = JSON.parse(JSON.stringify(results));
-    if (sanitizedResults.results) {
-      ['front', 'side'].forEach(view => {
-        if (sanitizedResults.results[view]?.measurements) {
-          Object.values(sanitizedResults.results[view].measurements).forEach(m => {
-            delete m.confidence;
-          });
-        }
+  const downloadReport = async (format) => {
+    try {
+      const response = await axios.post(`/api/download/${format}`, {
+        results: results.results,
+        calibration: results.calibration,
+        user_id: 'User_' + Math.floor(1000 + Math.random() * 9000) // Simple ID for now
+      }, {
+        responseType: 'blob', // Important for handling binary data
+        timeout: 30000
       });
+
+      // Create a blob from the response data
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      
+      // Extract filename from content-disposition if available, else use a default
+      const contentDisposition = response.headers['content-disposition'];
+      let filename = `FitLens_Report.${format}`;
+      if (contentDisposition && contentDisposition.indexOf('filename=') !== -1) {
+        filename = contentDisposition.split('filename=')[1].replace(/["']/g, '');
+      }
+      
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      
+      // Cleanup
+      link.parentNode.removeChild(link);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(`❌ ${format.toUpperCase()} export error:`, err);
+      alert(`Failed to download ${format.toUpperCase()} report. Please try again.`);
     }
-    const dataStr = JSON.stringify(sanitizedResults, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'measurements.json';
-    link.click();
-    URL.revokeObjectURL(url);
   };
 
   return (
@@ -1013,12 +1027,18 @@ const UploadMode = () => {
           )}
 
           {/* Action Buttons */}
-          <div className="action-buttons">
+          <div className="action-buttons" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'center' }}>
             <button onClick={handleReset} className="reset-button">
               Process New Images
             </button>
-            <button onClick={downloadJSON} className="download-button">
-              Download JSON
+            <button onClick={() => downloadReport('pdf')} className="download-button" style={{ backgroundColor: '#ff4d4f' }}>
+              Download PDF
+            </button>
+            <button onClick={() => downloadReport('docx')} className="download-button" style={{ backgroundColor: '#1890ff' }}>
+              Download DOCX
+            </button>
+            <button onClick={() => downloadReport('xml')} className="download-button" style={{ backgroundColor: '#52c41a' }}>
+              Download XML
             </button>
           </div>
         </div>
