@@ -296,6 +296,18 @@
   opacity: 0.6;
 }
 
+.secondary-nav-button {
+  background: #ecf0f1;
+  color: #2c3e50;
+  border: 1px solid #d0d7de;
+}
+
+.secondary-nav-button:hover {
+  background: #dde3e8;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(44, 62, 80, 0.15);
+}
+
 /* Responsive adjustments */
 @media (max-width: 1200px) {
   .marker-content {

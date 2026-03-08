@@ -2,7 +2,20 @@ import { useState, useRef, useEffect } from 'react';
 import PropTypes from 'prop-types';
 import './ManualLandmarkMarker.css';
 
-const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, onReset, imageHeight, imageWidth }) => {
+const ManualLandmarkMarker = ({
+  imageData,
+  imageType,
+  onComplete,
+  onCancel,
+  onReset,
+  onPrevious,
+  previousLabel,
+  nextLabel,
+  onLandmarksChange,
+  initialLandmarks,
+  imageHeight,
+  imageWidth
+}) => {
   const [landmarks, setLandmarks] = useState([]);
   const [currentLine, setCurrentLine] = useState(null);
   const [hoveredPoint, setHoveredPoint] = useState(null);
@@ -43,6 +56,28 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, onRe
   ];
 
   const [selectedType, setSelectedType] = useState(landmarkTypes[0].id);
+
+  const cloneLandmarks = (items = []) =>
+    items.map(item => ({
+      ...item,
+      points: (item.points || []).map(p => ({ ...p }))
+    }));
+
+  useEffect(() => {
+    // Only rehydrate when switching to a different photo/view.
+    // Including `initialLandmarks` here causes a parent-child update loop
+    // that can reset in-progress clicks and make marking feel unresponsive.
+    setLandmarks(cloneLandmarks(initialLandmarks));
+    setCurrentLine(null);
+    setHoveredPoint(null);
+    setSelectedPoint(null);
+  }, [imageType, imageData]);
+
+  useEffect(() => {
+    if (onLandmarksChange) {
+      onLandmarksChange(cloneLandmarks(landmarks));
+    }
+  }, [landmarks, onLandmarksChange]);
 
   useEffect(() => {
     if (imageRef.current && canvasRef.current) {
@@ -424,12 +459,17 @@ const ManualLandmarkMarker = ({ imageData, imageType, onComplete, onCancel, onRe
                 🔄 Reset All
               </button>
             )}
+            {onPrevious && (
+              <button className="secondary-nav-button" onClick={onPrevious}>
+                {previousLabel || '<- Previous'}
+              </button>
+            )}
             <button
               className="submit-button"
               onClick={handleSubmit}
               disabled={landmarks.length === 0}
             >
-              Complete Marking ({landmarks.length} measurements)
+              {nextLabel || `Complete Marking (${landmarks.length} measurements)`}
             </button>
           </div>
         </div>
@@ -444,6 +484,11 @@ ManualLandmarkMarker.propTypes = {
   onComplete: PropTypes.func.isRequired,
   onCancel: PropTypes.func.isRequired,
   onReset: PropTypes.func,
+  onPrevious: PropTypes.func,
+  previousLabel: PropTypes.string,
+  nextLabel: PropTypes.string,
+  onLandmarksChange: PropTypes.func,
+  initialLandmarks: PropTypes.array,
   imageHeight: PropTypes.number,
   imageWidth: PropTypes.number
 };

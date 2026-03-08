@@ -67,6 +67,7 @@ const SilhouetteOverlay = ({ view }) => (
 );
 
 const LiveCamera = () => {
+    const emptyLandmarksRef = useRef([]);
     const webcamRef = useRef(null);
     const [socket, setSocket] = useState(null);
     const [isConnected, setIsConnected] = useState(false);
@@ -94,6 +95,7 @@ const LiveCamera = () => {
     const [awaitingSelection, setAwaitingSelection] = useState(false);
     const [lastCapturedImage, setLastCapturedImage] = useState(null);
     const [showManualMarker, setShowManualMarker] = useState(false);
+    const [manualLandmarksByView, setManualLandmarksByView] = useState({});
     const [errorMsg, setErrorMsg] = useState(null);
     const [cameraStatus, setCameraStatus] = useState('initializing'); // 'initializing', 'ready', 'error'
     const [cameraErrorMsg, setCameraErrorMsg] = useState(null);
@@ -274,6 +276,7 @@ const LiveCamera = () => {
         setLastCapturedImage(null);
         setAwaitingSelection(false);
         setShowManualMarker(false);
+        setManualLandmarksByView({});
         setCurrentView('front');
         setResults(null);
         setProcessing(false);
@@ -334,6 +337,11 @@ const LiveCamera = () => {
         setIsReviewing(false);
         setCameraActive(true);
         setCompletedViews(prev => prev.filter(v => v !== view));
+        setManualLandmarksByView(prev => {
+            const next = { ...prev };
+            delete next[view];
+            return next;
+        });
         setCaptureSequenceComplete(false);
         setAwaitingSelection(false);
         setMarkingMode(null);
@@ -377,6 +385,31 @@ const LiveCamera = () => {
         setMarkingViewIndex(0);
         markingModeRef.current = 'manual';
         markingViewIndexRef.current = 0;
+        setShowManualMarker(true);
+    };
+
+    const getNextManualLabel = () => {
+        if (markingViewIndex === 0) return 'Next: Right ->';
+        if (markingViewIndex === 1) return 'Next: Back ->';
+        if (markingViewIndex === 2) return 'Next: Left ->';
+        return 'Finish & Calculate ->';
+    };
+
+    const getPreviousManualLabel = () => {
+        if (markingViewIndex === 1) return '<- Front';
+        if (markingViewIndex === 2) return '<- Right';
+        if (markingViewIndex === 3) return '<- Back';
+        return '<- Previous';
+    };
+
+    const handleManualPrevious = () => {
+        if (markingViewIndex <= 0) {
+            return;
+        }
+
+        const prevIndex = markingViewIndex - 1;
+        setMarkingViewIndex(prevIndex);
+        markingViewIndexRef.current = prevIndex;
         setShowManualMarker(true);
     };
 
@@ -542,15 +575,31 @@ const LiveCamera = () => {
                     <div className="progress-badge">Marking {markingViewIndex + 1} of 4</div>
                 </div>
                 <ManualLandmarkMarker
+                    key={currentMarkingView}
                     imageData={imageData}
                     imageType={currentMarkingView}
+                    initialLandmarks={manualLandmarksByView[currentMarkingView] || emptyLandmarksRef.current}
+                    onLandmarksChange={(updatedLandmarks) => {
+                        setManualLandmarksByView(prev => ({
+                            ...prev,
+                            [currentMarkingView]: updatedLandmarks
+                        }));
+                    }}
+                    onPrevious={markingViewIndex > 0 ? handleManualPrevious : null}
+                    previousLabel={getPreviousManualLabel()}
+                    nextLabel={getNextManualLabel()}
                     onComplete={handleManualLandmarkComplete}
                     onCancel={() => {
                         setShowManualMarker(false);
                         setMarkingMode(null);
                         setAwaitingSelection(true);
                     }}
-                    onReset={() => {}}
+                    onReset={() => {
+                        setManualLandmarksByView(prev => ({
+                            ...prev,
+                            [currentMarkingView]: []
+                        }));
+                    }}
                 />
             </div>
         );
