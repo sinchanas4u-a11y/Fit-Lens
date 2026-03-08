@@ -187,7 +187,8 @@ class LiveSession:
         self.reset()
 
     def reset(self):
-        self.captured_images = {}
+        self.captured_images = {} # Original base64
+        self.processed_results = {} # Measurements + Visualizations
         self.current_view = 'front'  # front, right, back, left
         self.stability_start_time = None
         self.is_stable = False
@@ -300,9 +301,7 @@ def handle_frame(data):
                 'voice_message': voice_message
             })
             
-            if next_view == 'complete':
-                # Trigger final processing
-                process_all_captured_images()
+            # Note: Final processing is now triggered by 'finalize_session' from frontend
 
 
         emit('frame_processed', {
@@ -315,6 +314,114 @@ def handle_frame(data):
     except Exception as e:
         print(f"Error processing frame: {e}")
         traceback.print_exc()
+
+@socketio.on('retake_view')
+def handle_retake(data):
+    view = data.get('view')
+    print(f"Retake requested for {view}")
+    if view in live_session.captured_images:
+        del live_session.captured_images[view]
+    if view in live_session.processed_results:
+        del live_session.processed_results[view]
+    live_session.stability_start_time = None
+    live_session.current_view = view
+
+@socketio.on('process_selection')
+def handle_process_selection(data):
+    try:
+        view = data.get('view')
+        image_data = data.get('image')
+        selection_type = data.get('type') # 'auto' or 'manual'
+        manual_landmarks = data.get('landmarks', [])
+        user_height_cm = data.get('user_height', live_session.user_height_cm)
+
+        img = decode_image(image_data)
+        if img is None:
+            emit('selection_processed', {'error': 'Invalid image data'})
+            return
+
+        if selection_type == 'manual':
+            # Reuse process_manual_view
+            h, w = img.shape[:2]
+            results = process_manual_view(
+                {'landmarks': manual_landmarks, 'imageWidth': w, 'imageHeight': h},
+                user_height_cm,
+                view,
+                image=img
+            )
+            
+            # Store in session
+            live_session.processed_results[view] = results
+            
+            # Encode visualization
+            vis_base64 = encode_image(results['visualization'])
+            
+            emit('selection_processed', {
+                'view': view,
+                'next_view': get_next_view(view),
+                'visualization': vis_base64,
+                'measurements': results['measurements']
+            })
+
+        else: # auto
+            # Process view using auto logic
+            # For simplicity, we trigger the measurement pipeline for this view
+            # We need to ensure scale is available if it's not the front view
+            
+            ld = get_landmark_detector()
+            landmarks = ld.detect(img)
+            if landmarks is None:
+                emit('selection_processed', {'error': 'Could not detect body landmarks. Please retake photo or use Manual Marking.'})
+                return
+            
+            # For auto detection, we'll use a simplified version of the main process
+            # or just call the core measurement functions
+            
+            # Generate visualization and measurements
+            # Note: In a real scenario, we might want to wait for front view for scale
+            # But the requirement says "Show same results table as upload photo mode"
+            
+            # We'll calculate a temporary scale if it's the front view
+            scale = live_session.scale_factor
+            if view == 'front' or scale == 0:
+                nose = landmarks[0]
+                left_ankle = landmarks[27]
+                right_ankle = landmarks[28]
+                height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
+                if height_px > 0:
+                    scale = user_height_cm / height_px
+                    if view == 'front':
+                        live_session.scale_factor = scale
+
+            # Measurement Logic
+            measurements = compute_measurements(img, landmarks, scale, view)
+            mask = segmentation_model.segment_person(img)
+            vis = visualize_measurements(img, landmarks, measurements)
+            
+            res = {
+                'measurements': measurements,
+                'visualization': vis,
+                'original_image': img,
+                'mask': mask
+            }
+            live_session.processed_results[view] = res
+            
+            emit('selection_processed', {
+                'view': view,
+                'next_view': get_next_view(view),
+                'visualization': encode_image(vis),
+                'measurements': measurements
+            })
+
+    except Exception as e:
+        print(f"Error in process_selection: {e}")
+        traceback.print_exc()
+        emit('selection_processed', {'error': str(e)})
+
+@socketio.on('finalize_session')
+def handle_finalize():
+    print("Finalizing live session...")
+    process_all_captured_images()
 
 def get_next_view(current):
     # Order: Front → Right → Back → Left
@@ -424,85 +531,76 @@ def process_alignment(image, view):
 
 def process_all_captured_images():
     """
-    Process all 4 captured images using the existing pipeline
+    Process all views, favoring manually marked/pre-processed results
     """
     print("Processing all captured images...")
     try:
-        results = {}
+        final_results = {}
+        scale = live_session.scale_factor
         
-        # 1. Calculate scale from Front view
-        front_img = decode_image(live_session.captured_images.get('front'))
-        if front_img is None:
-            emit('error', {'message': 'Front image missing'})
-            return
+        # If scale is still 0 (shouldn't happen if front was captured), try to calculate it
+        if scale == 0 and 'front' in live_session.captured_images:
+            front_img = decode_image(live_session.captured_images['front'])
+            ld = get_landmark_detector()
+            landmarks = ld.detect(front_img)
+            if landmarks is not None:
+                nose = landmarks[0]
+                left_ankle = landmarks[27]
+                right_ankle = landmarks[28]
+                height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
+                if height_px > 0:
+                    scale = live_session.user_height_cm / height_px
+                    live_session.scale_factor = scale
 
-        # Detect landmarks for scale
-        ld = get_landmark_detector()
-        if ld is None:
-            emit('error', {'message': 'Landmark detector unavailable'})
-            return
-        temp_landmarks = ld.detect(front_img)
-        if temp_landmarks is None:
-             emit('error', {'message': 'Could not detect person in front view'})
-             return
-             
-        nose = temp_landmarks[0]
-        left_ankle = temp_landmarks[27]
-        right_ankle = temp_landmarks[28]
-        ankle_y = max(left_ankle[1], right_ankle[1])
-        height_px = ankle_y - nose[1]
-        
-        scale_factor = live_session.user_height_cm / height_px
-        live_session.scale_factor = scale_factor
-        
-        # 2. Process each view
-        # 2. Process each view
-        views_to_process = ['front', 'right', 'back', 'left']
-        
-        for view_name in views_to_process:
-            img_data = live_session.captured_images.get(view_name)
-            if img_data:
-                print(f"Processing {view_name} view...")
-                img = decode_image(img_data)
+        views = ['front', 'right', 'back', 'left']
+        for v in views:
+            if v in live_session.processed_results:
+                # Use already processed result (manual or auto-selection)
+                res = live_session.processed_results[v]
                 
-                # Use 'side' logic for right/left views if needed, or pass specific view name
-                # The measurement engine likely expects 'front' or 'side' for specific formulas
-                # For now, we pass the actual view name, assuming measurement engine handles it
-                # or we map it: right/left -> side
-                
-                # Map view name for measurement logic if necessary
-                # If measurement_engine only knows 'front' and 'side':
-                engine_view_name = 'side' if view_name in ['right', 'left'] else view_name
-                
-                view_results = process_single_view(img, scale_factor, engine_view_name)
-                
-                # Add original image to results for display
-                view_results['original_image'] = img_data
-                
-                results[view_name] = view_results
+                # Convert numpy images to base64 for emission
+                final_results[v] = {
+                    'measurements': res.get('measurements', {}),
+                    'visualization': encode_image(res['visualization']) if 'visualization' in res and res['visualization'] is not None else None,
+                    'original_image': encode_image(res['original_image']) if 'original_image' in res and res['original_image'] is not None else None,
+                    'mask': encode_image(res['mask']) if 'mask' in res and res['mask'] is not None else None
+                }
+            elif v in live_session.captured_images:
+                # Fallback to auto-processing if not already processed
+                img = decode_image(live_session.captured_images[v])
+                if img is not None:
+                    ld = get_landmark_detector()
+                    landmarks = ld.detect(img)
+                    if landmarks is not None:
+                        # Auto process
+                        engine_view = 'side' if v in ['right', 'left'] else v
+                        m = compute_measurements(img, landmarks, scale, engine_view)
+                        mask = segmentation_model.segment_person(img)
+                        vis = visualize_measurements(img, landmarks, m)
+                        final_results[v] = {
+                            'measurements': m,
+                            'visualization': encode_image(vis),
+                            'original_image': encode_image(img),
+                            'mask': encode_image(mask)
+                        }
 
-        # Construct final response similar to /api/process
-        final_response = {
+        # 3. Emit final complete payload
+        payload = {
             'success': True,
+            'results': final_results,
             'calibration': {
                 'user_height_cm': live_session.user_height_cm,
-                'height_in_image_px': float(height_px),
-                'scale_factor': float(scale_factor),
-                'formula': f'{live_session.user_height_cm} cm ÷ {height_px:.2f} px = {scale_factor:.4f} cm/px',
-                'description': f'1 pixel = {scale_factor:.4f} cm'
-            },
-            'results': results
+                'scale_factor': scale
+            }
         }
         
-        # Store results persistently
-        save_body_measurements(final_response)
-        
-        emit('processing_complete', final_response)
+        save_body_measurements(payload)
+        socketio.emit('processing_complete', payload)
         
     except Exception as e:
         print(f"Error in final processing: {e}")
         traceback.print_exc()
-        emit('error', {'message': str(e)})
+        socketio.emit('error', {'message': str(e)})
 
 from face_verifier import FaceVerifier
 
