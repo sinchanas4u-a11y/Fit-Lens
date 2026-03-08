@@ -112,11 +112,21 @@ const LiveCamera = () => {
     const [captureCountdown, setCaptureCountdown] = useState(null); // 3, 2, 1, 0
     const captureTimerRef = useRef(null);
     const currentViewRef = useRef(currentView);
+    const markingViewIndexRef = useRef(0);
+    const markingModeRef = useRef(null);
 
     // Keep currentViewRef in sync with current state
     useEffect(() => {
         currentViewRef.current = currentView;
     }, [currentView]);
+
+    useEffect(() => {
+        markingViewIndexRef.current = markingViewIndex;
+    }, [markingViewIndex]);
+
+    useEffect(() => {
+        markingModeRef.current = markingMode;
+    }, [markingMode]);
 
     // Auto-capture: start/stop countdown based on alignment
     useEffect(() => {
@@ -341,6 +351,8 @@ const LiveCamera = () => {
         setAwaitingSelection(false);
         setMarkingMode('auto');
         setMarkingViewIndex(0);
+        markingModeRef.current = 'auto';
+        markingViewIndexRef.current = 0;
         processNextAutoView(0);
     };
 
@@ -363,17 +375,22 @@ const LiveCamera = () => {
         setAwaitingSelection(false);
         setMarkingMode('manual');
         setMarkingViewIndex(0);
+        markingModeRef.current = 'manual';
+        markingViewIndexRef.current = 0;
         setShowManualMarker(true);
     };
 
     const handleManualLandmarkComplete = (data) => {
+        const activeIndex = markingViewIndexRef.current;
+        const activeView = VIEW_ORDER[activeIndex];
+
         // We will emit the manual landmarks for this view
         setProcessing(true);
-        setInstruction(`Saving landmarks for ${VIEW_ORDER[markingViewIndex]}...`);
+        setInstruction(`Saving landmarks for ${activeView}...`);
 
         socket.emit('process_selection', {
-            view: VIEW_ORDER[markingViewIndex],
-            image: capturedImages[VIEW_ORDER[markingViewIndex]],
+            view: activeView,
+            image: capturedImages[activeView],
             type: 'manual',
             landmarks: data.landmarks,
             user_height: parseFloat(userHeight),
@@ -406,10 +423,12 @@ const LiveCamera = () => {
             }));
 
             // Move to next view in sequence
-            const nextIndex = markingViewIndex + 1;
+            const currentIndex = markingViewIndexRef.current;
+            const nextIndex = currentIndex + 1;
             if (nextIndex < 4) {
                 setMarkingViewIndex(nextIndex);
-                if (markingMode === 'auto') {
+                markingViewIndexRef.current = nextIndex;
+                if (markingModeRef.current === 'auto') {
                     processNextAutoView(nextIndex);
                 } else {
                     // For manual, we wait for user to be ready?
@@ -425,7 +444,7 @@ const LiveCamera = () => {
         });
 
         return () => socket.off('selection_processed');
-    }, [socket, currentView]);
+    }, [socket, currentView, capturedImages, userHeight, heightUnit]);
 
     const handleUserMedia = () => {
         console.log('Camera started successfully');
