@@ -151,39 +151,59 @@
   position: relative;
   width: 640px;
   height: 480px;
-  background: #111;
+  background: linear-gradient(160deg, #0d1a12 0%, #0a1008 60%, #111 100%);
+  transition: box-shadow 0.3s ease;
 }
 
 .silhouette-wrapper-overlay {
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
+  inset: 0;
   z-index: 2;
   pointer-events: none;
+}
+
+.silhouette-svg-inner {
+  position: absolute;
+  inset: 0;
   display: flex;
-  justify-content: center;
   align-items: center;
+  justify-content: center;
+  padding: 20px 40px;
 }
 
-.silhouette-svg {
-  height: 90%;
-  width: auto;
+.corner-guide {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  opacity: 0.7;
 }
 
-.silhouette-path {
-  fill: rgba(255, 255, 255, 0.15);
-  stroke: rgba(255, 255, 255, 0.4);
-  stroke-width: 2;
-  stroke-dasharray: 4;
+.corner-guide.top-left {
+  top: 16px;
+  left: 16px;
+  border-top: 2px solid #00FF88;
+  border-left: 2px solid #00FF88;
 }
 
-.alignment-rect {
-  fill: none;
-  stroke: rgba(255, 255, 255, 0.3);
-  stroke-width: 2;
-  stroke-dasharray: 8;
+.corner-guide.top-right {
+  top: 16px;
+  right: 16px;
+  border-top: 2px solid #00FF88;
+  border-right: 2px solid #00FF88;
+}
+
+.corner-guide.bottom-left {
+  bottom: 16px;
+  left: 16px;
+  border-bottom: 2px solid #00FF88;
+  border-left: 2px solid #00FF88;
+}
+
+.corner-guide.bottom-right {
+  bottom: 16px;
+  right: 16px;
+  border-bottom: 2px solid #00FF88;
+  border-right: 2px solid #00FF88;
 }
 
 /* Camera Controls */

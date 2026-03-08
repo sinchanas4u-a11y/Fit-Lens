@@ -435,6 +435,75 @@ def get_next_view(current):
     return 'complete'
 
 
+def _normalize_engine_view(view_name):
+    """Map live-capture view names to measurement engine view names."""
+    if view_name in ('right', 'left', 'side'):
+        return 'side'
+    return 'front' if view_name == 'back' else view_name
+
+
+def compute_measurements(image, landmarks, scale_factor, view_name):
+    """
+    Compute measurements in the same shape expected by the live-camera frontend.
+    Returns values with value_cm/value_px/source metadata.
+    """
+    if landmarks is None:
+        return {}
+
+    engine_view = _normalize_engine_view(view_name)
+    raw = measurement_engine.calculate_measurements_with_confidence(
+        landmarks, scale_factor, engine_view
+    )
+
+    formatted = {}
+    for name, data in raw.items():
+        if isinstance(data, tuple) and len(data) == 3:
+            cm_value, confidence, source = data
+            px_value = cm_value / scale_factor if scale_factor and scale_factor > 0 else 0
+            formatted[name] = {
+                'value_cm': round(float(cm_value), 2),
+                'value_px': round(float(px_value), 2),
+                'confidence': round(float(confidence), 3),
+                'source': source,
+                'label': name.replace('_', ' ').title(),
+            }
+
+    return formatted
+
+
+def visualize_measurements(image, landmarks, measurements):
+    """Render a landmark visualization image for live-camera results."""
+    if image is None:
+        return None
+
+    vis_image = image.copy()
+    ld = get_landmark_detector()
+    if ld is not None and landmarks is not None:
+        vis_image = ld.draw_landmarks(vis_image, landmarks)
+
+    # Overlay a compact summary so live view has immediate feedback.
+    if isinstance(measurements, dict):
+        y = 28
+        for name, data in list(measurements.items())[:6]:
+            value = data.get('value_cm') if isinstance(data, dict) else None
+            if value is None:
+                continue
+            text = f"{name.replace('_', ' ')}: {value:.1f} cm"
+            cv2.putText(
+                vis_image,
+                text,
+                (12, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            y += 24
+
+    return vis_image
+
+
 def process_alignment(image, view):
     """
     Check if user is aligned (centered + distance + full body visible)
