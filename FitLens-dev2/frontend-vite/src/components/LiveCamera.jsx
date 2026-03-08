@@ -85,8 +85,10 @@ const LiveCamera = () => {
     
     const [currentView, setCurrentView] = useState('front');
     const [capturedImages, setCapturedImages] = useState({});
+    const [capturedRawImages, setCapturedRawImages] = useState({});
     const [processing, setProcessing] = useState(false);
     const [results, setResults] = useState(null);
+    const [isEditingMarkings, setIsEditingMarkings] = useState(false);
     const [userHeight, setUserHeight] = useState('');
     const [heightUnit, setHeightUnit] = useState('cm');
     const [sessionStarted, setSessionStarted] = useState(false);
@@ -207,6 +209,8 @@ const LiveCamera = () => {
             console.log('Processing complete:', data);
             setResults(data);
             setProcessing(false);
+            setShowManualMarker(false);
+            setIsEditingMarkings(false);
             speak('Processing complete. Your measurements are ready.');
         });
 
@@ -272,6 +276,7 @@ const LiveCamera = () => {
         setSessionStarted(false);
         setCameraActive(false);
         setCapturedImages({});
+        setCapturedRawImages({});
         setCompletedViews([]);
         setLastCapturedImage(null);
         setAwaitingSelection(false);
@@ -290,6 +295,7 @@ const LiveCamera = () => {
         setMarkingMode(null);
         setMarkingViewIndex(0);
         setAutoProgress({});
+        setIsEditingMarkings(false);
         clearInterval(captureTimerRef.current);
         captureTimerRef.current = null;
         setCaptureCountdown(null);
@@ -304,6 +310,7 @@ const LiveCamera = () => {
         if (!imageSrc) return;
 
         setCapturedImages(prev => ({ ...prev, [view]: imageSrc }));
+        setCapturedRawImages(prev => ({ ...prev, [view]: imageSrc }));
         setCompletedViews(prev => [...new Set([...prev, view])]);
         setCameraActive(false);
         setAlignment('red');
@@ -381,6 +388,7 @@ const LiveCamera = () => {
 
     const handleManualMarking = () => {
         setAwaitingSelection(false);
+        setIsEditingMarkings(false);
         setMarkingMode('manual');
         setMarkingViewIndex(0);
         markingModeRef.current = 'manual';
@@ -388,11 +396,23 @@ const LiveCamera = () => {
         setShowManualMarker(true);
     };
 
+    const handleEditMarkings = () => {
+        setAwaitingSelection(false);
+        setIsReviewing(false);
+        setIsEditingMarkings(true);
+        setMarkingMode('manual');
+        setMarkingViewIndex(0);
+        markingModeRef.current = 'manual';
+        markingViewIndexRef.current = 0;
+        setShowManualMarker(true);
+        setInstruction('Edit your markings and recalculate measurements.');
+    };
+
     const getNextManualLabel = () => {
         if (markingViewIndex === 0) return 'Next: Right ->';
         if (markingViewIndex === 1) return 'Next: Back ->';
         if (markingViewIndex === 2) return 'Next: Left ->';
-        return 'Finish & Calculate ->';
+        return isEditingMarkings ? 'Recalculate ->' : 'Finish & Calculate ->';
     };
 
     const getPreviousManualLabel = () => {
@@ -449,11 +469,7 @@ const LiveCamera = () => {
 
             setAutoProgress(prev => ({ ...prev, [data.view]: 'done' }));
 
-            // Update captured images with visualization if provided
-            setCapturedImages(prev => ({
-                ...prev,
-                [data.view]: data.visualization || prev[data.view]
-            }));
+            // Keep raw captured photos intact for re-editing.
 
             // Move to next view in sequence
             const currentIndex = markingViewIndexRef.current;
@@ -499,7 +515,7 @@ const LiveCamera = () => {
         }
     };
 
-    if (results) {
+    if (results && !isEditingMarkings) {
         return (
             <div className="live-camera-results">
                 <h2>Measurement Results</h2>
@@ -559,14 +575,22 @@ const LiveCamera = () => {
                     ))}
                 </div>
 
-                <button onClick={resetSession} className="reset-button">Start New Session</button>
+                <div className="results-actions-row">
+                    <button onClick={handleEditMarkings} className="edit-markings-button">
+                        ✏ Edit Markings
+                    </button>
+                    <button onClick={resetSession} className="reset-button">Start New Session</button>
+                </div>
             </div>
         );
     }
 
     if (showManualMarker) {
         const currentMarkingView = VIEW_ORDER[markingViewIndex];
-        const imageData = capturedImages[currentMarkingView];
+        const imageData =
+            capturedRawImages[currentMarkingView] ||
+            capturedImages[currentMarkingView] ||
+            results?.results?.[currentMarkingView]?.original_image;
         
         return (
             <div className="manual-marker-wrapper">

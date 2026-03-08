@@ -20,6 +20,7 @@ const ManualLandmarkMarker = ({
   const [currentLine, setCurrentLine] = useState(null);
   const [hoveredPoint, setHoveredPoint] = useState(null);
   const [selectedPoint, setSelectedPoint] = useState(null);
+  const [draggingPoint, setDraggingPoint] = useState(null);
   const canvasRef = useRef(null);
   const imageRef = useRef(null);
 
@@ -71,6 +72,7 @@ const ManualLandmarkMarker = ({
     setCurrentLine(null);
     setHoveredPoint(null);
     setSelectedPoint(null);
+    setDraggingPoint(null);
   }, [imageType, imageData]);
 
   useEffect(() => {
@@ -262,11 +264,35 @@ const ManualLandmarkMarker = ({
     }
   };
 
+  const handleCanvasMouseDown = (e) => {
+    const { x: canvasX, y: canvasY } = getCanvasCoordinates(e);
+    const x = (canvasX - offset.x) / scale;
+    const y = (canvasY - offset.y) / scale;
+
+    const clickedPointIndex = findClickedPoint(x, y);
+    if (clickedPointIndex !== null) {
+      const [landmarkIdx, pointIdx] = clickedPointIndex.split('-').map(Number);
+      setDraggingPoint({ landmarkIdx, pointIdx });
+      setSelectedPoint(clickedPointIndex);
+    }
+  };
+
   const handleCanvasMouseMove = (e) => {
     const { x: canvasX, y: canvasY } = getCanvasCoordinates(e);
 
     const x = (canvasX - offset.x) / scale;
     const y = (canvasY - offset.y) / scale;
+
+    if (draggingPoint) {
+      setLandmarks(prev => prev.map((landmark, lIdx) => {
+        if (lIdx !== draggingPoint.landmarkIdx) return landmark;
+        const nextPoints = landmark.points.map((p, pIdx) =>
+          pIdx === draggingPoint.pointIdx ? { x, y } : p
+        );
+        return { ...landmark, points: nextPoints };
+      }));
+      return;
+    }
 
     // Update hover state
     const hoveredIdx = findClickedPoint(x, y);
@@ -279,6 +305,10 @@ const ManualLandmarkMarker = ({
         end: { x, y }
       });
     }
+  };
+
+  const handleCanvasMouseUp = () => {
+    setDraggingPoint(null);
   };
 
   const findClickedPoint = (x, y) => {
@@ -364,8 +394,11 @@ const ManualLandmarkMarker = ({
             width={900}
             height={700}
             onClick={handleCanvasClick}
+            onMouseDown={handleCanvasMouseDown}
             onMouseMove={handleCanvasMouseMove}
-            style={{ cursor: currentLine ? 'crosshair' : 'pointer' }}
+            onMouseUp={handleCanvasMouseUp}
+            onMouseLeave={handleCanvasMouseUp}
+            style={{ cursor: draggingPoint ? 'grabbing' : currentLine ? 'crosshair' : 'pointer' }}
           />
           <img
             ref={imageRef}
