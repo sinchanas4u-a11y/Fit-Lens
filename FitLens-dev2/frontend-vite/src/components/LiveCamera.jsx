@@ -4,13 +4,44 @@ import io from 'socket.io-client';
 import ManualLandmarkMarker from './ManualLandmarkMarker';
 import './LiveCamera.css';
 
+// --- Silhouette Components ---
+const SilhouetteOverlay = ({ view }) => {
+    const isSide = view === 'right' || view === 'left';
+    
+    return (
+        <div className="silhouette-wrapper-overlay">
+            <svg viewBox="0 0 400 600" preserveAspectRatio="xMidYMid meet" className="silhouette-svg">
+                {/* Dashed Alignment Rectangle */}
+                <rect x="50" y="20" width="300" height="560" className="alignment-rect" />
+                
+                {isSide ? (
+                    // Side Silhouette
+                    <path d="M200,50 Q230,50 240,80 Q250,110 230,140 Q210,170 200,200 L200,550 L160,550 L160,200 Q150,170 130,140 Q110,110 120,80 Q130,50 160,50 Z" className="silhouette-path" />
+                ) : (
+                    // Front/Back Silhouette
+                    <path d="M200,50 Q240,50 250,90 Q260,130 230,160 Q200,190 200,220 L280,220 Q300,220 300,250 L300,550 L240,550 L240,350 L160,350 L160,550 L100,550 L100,250 Q100,220 120,220 L200,220 Z" className="silhouette-path" />
+                )}
+            </svg>
+        </div>
+    );
+};
+
 const LiveCamera = () => {
     const webcamRef = useRef(null);
     const [socket, setSocket] = useState(null);
     const [isConnected, setIsConnected] = useState(false);
     const [alignment, setAlignment] = useState('red');
     const [instruction, setInstruction] = useState('Connecting to camera...');
-    const [countdown, setCountdown] = useState(null);
+    const [cameraActive, setCameraActive] = useState(false);
+    
+    // Lifecycle management
+    useEffect(() => {
+        // Stop camera on unmount
+        return () => {
+            setCameraActive(false);
+        };
+    }, []);
+    
     const [currentView, setCurrentView] = useState('front');
     const [capturedImages, setCapturedImages] = useState({});
     const [processing, setProcessing] = useState(false);
@@ -26,13 +57,64 @@ const LiveCamera = () => {
     const [errorMsg, setErrorMsg] = useState(null);
     const [cameraStatus, setCameraStatus] = useState('initializing'); // 'initializing', 'ready', 'error'
     const [cameraErrorMsg, setCameraErrorMsg] = useState(null);
+    const [countdown, setCountdown] = useState(null);
     
-    // New Workflow state
+    // Workflow state
     const VIEW_ORDER = ['front', 'right', 'back', 'left'];
     const [captureSequenceComplete, setCaptureSequenceComplete] = useState(false);
     const [markingMode, setMarkingMode] = useState(null); // 'manual' | 'auto'
     const [markingViewIndex, setMarkingViewIndex] = useState(0);
     const [autoProgress, setAutoProgress] = useState({}); // {front: 'done', right: 'processing', ...}
+    const [isReviewing, setIsReviewing] = useState(false);
+    const [completedViews, setCompletedViews] = useState([]);
+
+    // Auto-capture state
+    const [captureCountdown, setCaptureCountdown] = useState(null); // 3, 2, 1, 0
+    const captureTimerRef = useRef(null);
+    const currentViewRef = useRef(currentView);
+
+    // Keep currentViewRef in sync with current state
+    useEffect(() => {
+        currentViewRef.current = currentView;
+    }, [currentView]);
+
+    // Auto-capture: start/stop countdown based on alignment
+    useEffect(() => {
+        if (!sessionStarted || !cameraActive || isReviewing) {
+            clearInterval(captureTimerRef.current);
+            setCaptureCountdown(null);
+            return;
+        }
+
+        if (alignment === 'green') {
+            // Start a 3-second countdown if not already running
+            if (captureTimerRef.current === null) {
+                setCaptureCountdown(3);
+                let count = 3;
+                captureTimerRef.current = setInterval(() => {
+                    count -= 1;
+                    setCaptureCountdown(count);
+                    if (count <= 0) {
+                        clearInterval(captureTimerRef.current);
+                        captureTimerRef.current = null;
+                        setCaptureCountdown(null);
+                        // Trigger auto-capture
+                        triggerAutoCapture();
+                    }
+                }, 1000);
+            }
+        } else {
+            // User moved out of frame — reset
+            clearInterval(captureTimerRef.current);
+            captureTimerRef.current = null;
+            setCaptureCountdown(null);
+        }
+
+        return () => {
+            clearInterval(captureTimerRef.current);
+            captureTimerRef.current = null;
+        };
+    }, [alignment, sessionStarted, cameraActive, isReviewing]);
 
     // Initialize Socket.io
     useEffect(() => {
@@ -63,22 +145,10 @@ const LiveCamera = () => {
         newSocket.on('capture_complete', (data) => {
             console.log('Capture complete:', data);
             setCapturedImages(prev => ({ ...prev, [data.view]: data.image }));
-            setLastCapturedImage(data.image);
+            setCompletedViews(prev => [...new Set([...prev, data.view])]);
             
-            if (data.next_view === 'complete') {
-                setCaptureSequenceComplete(true);
-                setAwaitingSelection(true);
-                setInstruction('Choose marking method');
-                speak('All views captured. Please choose a marking method.');
-            } else {
-                setCurrentView(data.next_view);
-                setInstruction(`Turn to ${data.next_view} view`);
-                
-                // Speak the capture confirmation and next view instruction
-                if (data.voice_message) {
-                    speak(data.voice_message);
-                }
-            }
+            // In the new flow, we handle view switching manually or via capture button
+            // but the socket still confirms "captured"
         });
 
         newSocket.on('processing_complete', (data) => {
@@ -100,14 +170,14 @@ const LiveCamera = () => {
 
     // Frame processing loop
     useEffect(() => {
-        if (!sessionStarted || !isConnected || !socket) return;
+        if (!sessionStarted || !isConnected || !socket || !cameraActive || isReviewing) return;
 
         const interval = setInterval(() => {
             captureAndSendFrame();
         }, 200); // 5 FPS
 
         return () => clearInterval(interval);
-    }, [sessionStarted, isConnected, socket, currentView, userHeight, heightUnit]);
+    }, [sessionStarted, isConnected, socket, currentView, userHeight, heightUnit, cameraActive, isReviewing]);
 
     const captureAndSendFrame = useCallback(() => {
         if (webcamRef.current) {
@@ -140,6 +210,7 @@ const LiveCamera = () => {
             return;
         }
         setSessionStarted(true);
+        setCameraActive(true);
         setCameraStatus('initializing');
         setCameraErrorMsg(null);
         speak('Please face the front.');
@@ -147,7 +218,9 @@ const LiveCamera = () => {
 
     const resetSession = () => {
         setSessionStarted(false);
+        setCameraActive(false);
         setCapturedImages({});
+        setCompletedViews([]);
         setLastCapturedImage(null);
         setAwaitingSelection(false);
         setShowManualMarker(false);
@@ -155,6 +228,7 @@ const LiveCamera = () => {
         setResults(null);
         setProcessing(false);
         setErrorMsg(null);
+        setIsReviewing(false);
         setInstruction('Align yourself in the frame');
         setAlignment('red');
         setCameraStatus('initializing');
@@ -163,7 +237,56 @@ const LiveCamera = () => {
         setMarkingMode(null);
         setMarkingViewIndex(0);
         setAutoProgress({});
+        clearInterval(captureTimerRef.current);
+        captureTimerRef.current = null;
+        setCaptureCountdown(null);
         socket.emit('reset_session');
+    };
+
+
+    // Core capture logic shared by both auto and manual triggers
+    const doCapture = useCallback((view) => {
+        if (!webcamRef.current) return;
+        const imageSrc = webcamRef.current.getScreenshot();
+        if (!imageSrc) return;
+
+        setCapturedImages(prev => ({ ...prev, [view]: imageSrc }));
+        setCompletedViews(prev => [...new Set([...prev, view])]);
+        setCameraActive(false);
+        setAlignment('red');
+
+        const currentIndex = VIEW_ORDER.indexOf(view);
+        if (currentIndex < 3) {
+            const nextView = VIEW_ORDER[currentIndex + 1];
+            speak(`${view} captured. Now turn to show your ${nextView}.`);
+            setTimeout(() => {
+                setCurrentView(nextView);
+                setCameraActive(true);
+            }, 600);
+        } else {
+            setIsReviewing(true);
+            speak('All views captured. Please review your photos.');
+        }
+    }, [VIEW_ORDER]);
+
+    // Auto-capture is triggered from the countdown useEffect
+    // Uses currentViewRef to avoid stale closures inside timer
+    const triggerAutoCapture = useCallback(() => {
+        doCapture(currentViewRef.current);
+    }, [doCapture]);
+
+    const handleManualCapture = () => {
+        doCapture(currentView);
+    };
+
+    const handleRetakeView = (view) => {
+        setCurrentView(view);
+        setIsReviewing(false);
+        setCameraActive(true);
+        setCompletedViews(prev => prev.filter(v => v !== view));
+        setCaptureSequenceComplete(false);
+        setAwaitingSelection(false);
+        setMarkingMode(null);
     };
 
     const handleRetake = () => {
@@ -468,6 +591,47 @@ const LiveCamera = () => {
         );
     }
 
+    if (isReviewing) {
+        return (
+            <div className="camera-review-screen">
+                <h2>All photos captured</h2>
+                <div className="review-grid-row">
+                    {VIEW_ORDER.map(view => (
+                        <div key={view} className="review-thumb">
+                            <div className="thumb-wrapper">
+                                <img src={capturedImages[view]} alt={view} />
+                            </div>
+                            <span className="thumb-label">{view.charAt(0).toUpperCase() + view.slice(1)} View</span>
+                            <button onClick={() => handleRetakeView(view)} className="mini-retake-btn">
+                                Retake
+                            </button>
+                        </div>
+                    ))}
+                </div>
+                
+                <div className="review-footer">
+                    <p className="reference-height">Height: <strong>{userHeight} {heightUnit}</strong></p>
+                    <h3>Choose how to detect measurements</h3>
+                    <div className="selection-buttons">
+                        <button onClick={handleManualMarking} className="method-button manual">
+                            <strong>Manual Marking</strong>
+                            <span>User places points manually on body</span>
+                        </button>
+                        <button onClick={handleAutomaticMarking} className="method-button automatic" disabled={processing}>
+                            {processing ? 'Processing...' : (
+                                <>
+                                    <strong>Automatic Marking</strong>
+                                    <span>AI detects points automatically</span>
+                                </>
+                            )}
+                        </button>
+                    </div>
+                    <button onClick={resetSession} className="cancel-btn-large">Cancel</button>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="live-camera-container">
             {!sessionStarted ? (
@@ -496,53 +660,93 @@ const LiveCamera = () => {
                 </div>
             ) : (
                 <div className={`camera-view ${alignment}`}>
-                    <div className="overlay-header">
-                        <h3>{instruction}</h3>
-                        <div className="height-reference">
-                            Reference Height: <strong>{userHeight} {heightUnit}</strong>
-                        </div>
-                        {countdown !== null && <div className="countdown">{countdown}</div>}
+                    <div className="camera-header-tabs">
+                        {VIEW_ORDER.map((view, idx) => (
+                            <div key={view} className={`tab-item ${currentView === view ? 'active' : ''} ${completedViews.includes(view) ? 'completed' : ''}`}>
+                                {completedViews.includes(view) && <span className="check">✓</span>}
+                                {view.toUpperCase()}
+                            </div>
+                        ))}
                     </div>
 
-                    {cameraStatus === 'initializing' && (
-                        <div className="camera-loading">
-                            <div className="spinner-large"></div>
-                            <p>Starting camera...</p>
-                        </div>
-                    )}
+                    <div className="view-instruction-overlay">
+                        <h2>{markingViewIndex + 1} of 4 — {currentView.charAt(0).toUpperCase() + currentView.slice(1)} {currentView === 'right' || currentView === 'left' ? 'Side ' : ''}View</h2>
+                        <p>{currentView === 'front' ? 'Stand facing the camera' : 
+                            currentView === 'right' ? 'Turn to show your right side' :
+                            currentView === 'back' ? 'Turn to show your back' :
+                            'Turn to show your left side'}</p>
+                    </div>
 
-                    {cameraStatus === 'error' && (
-                        <div className="camera-error">
-                            <div className="error-icon">⚠️</div>
-                            <p>{cameraErrorMsg}</p>
-                            <button onClick={resetSession} className="retry-button">Try Again</button>
-                        </div>
-                    )}
+                    <div className="webcam-wrapper">
+                        {cameraStatus === 'initializing' && (
+                            <div className="camera-loading">
+                                <div className="spinner-large"></div>
+                                <p>Starting camera...</p>
+                            </div>
+                        )}
 
-                    <Webcam
-                        ref={webcamRef}
-                        audio={false}
-                        screenshotFormat="image/jpeg"
-                        width={640}
-                        height={480}
-                        onUserMedia={handleUserMedia}
-                        onUserMediaError={handleUserMediaError}
-                        videoConstraints={{
-                            facingMode: "user"
-                        }}
-                        style={{
-                            visibility: cameraStatus === 'ready' ? 'visible' : 'hidden'
-                        }}
-                    />
+                        {cameraStatus === 'error' && (
+                            <div className="camera-error">
+                                <div className="error-icon">⚠️</div>
+                                <p>{cameraErrorMsg}</p>
+                                <button onClick={resetSession} className="retry-button">Try Again</button>
+                            </div>
+                        )}
 
-                    <div className="overlay-footer">
-                        <div className="step-indicator">
-                            <span className={currentView === 'front' ? 'active' : capturedImages.front ? 'completed' : ''}>Front</span>
-                            <span className={currentView === 'right' ? 'active' : capturedImages.right ? 'completed' : ''}>Right</span>
-                            <span className={currentView === 'back' ? 'active' : capturedImages.back ? 'completed' : ''}>Back</span>
-                            <span className={currentView === 'left' ? 'active' : capturedImages.left ? 'completed' : ''}>Left</span>
-                        </div>
-                        <button onClick={resetSession} className="cancel-button">Cancel</button>
+                        <SilhouetteOverlay view={currentView} />
+
+                        {/* Auto-capture countdown overlay */}
+                        {alignment === 'green' && captureCountdown !== null && (
+                            <div className="auto-capture-overlay">
+                                <div className="countdown-ring">
+                                    <svg viewBox="0 0 100 100">
+                                        <circle cx="50" cy="50" r="42" className="countdown-bg" />
+                                        <circle
+                                            cx="50" cy="50" r="42"
+                                            className="countdown-progress"
+                                            strokeDasharray={`${(( captureCountdown / 3) * 263.9).toFixed(1)} 263.9`}
+                                        />
+                                    </svg>
+                                    <span className="countdown-number">{captureCountdown}</span>
+                                </div>
+                                <p className="auto-capture-hint">Hold still…</p>
+                            </div>
+                        )}
+
+                        {/* Green alignment pulse when aligned, but countdown not started yet */}
+                        {alignment === 'green' && captureCountdown === null && (
+                            <div className="alignment-good-hint">✓ Aligned</div>
+                        )}
+
+                        {/* Misaligned hint */}
+                        {alignment === 'red' && cameraActive && (
+                            <div className="alignment-hint-text">Align yourself in the frame</div>
+                        )}
+
+                        {cameraActive && (
+                            <Webcam
+                                ref={webcamRef}
+                                audio={false}
+                                screenshotFormat="image/jpeg"
+                                width={640}
+                                height={480}
+                                onUserMedia={handleUserMedia}
+                                onUserMediaError={handleUserMediaError}
+                                videoConstraints={{
+                                    facingMode: "user"
+                                }}
+                                style={{
+                                    visibility: cameraStatus === 'ready' ? 'visible' : 'hidden'
+                                }}
+                            />
+                        )}
+                    </div>
+
+                    <div className="camera-controls">
+                        <button onClick={handleManualCapture} className="capture-btn-main">
+                            <div className="capture-inner"></div>
+                        </button>
+                        <button onClick={resetSession} className="cancel-text-btn">Cancel</button>
                     </div>
                 </div>
             )}
