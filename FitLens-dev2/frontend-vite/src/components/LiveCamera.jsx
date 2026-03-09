@@ -109,6 +109,7 @@ const LiveCamera = () => {
     const [markingMode, setMarkingMode] = useState(null); // 'manual' | 'auto'
     const [markingViewIndex, setMarkingViewIndex] = useState(0);
     const [autoProgress, setAutoProgress] = useState({}); // {front: 'done', right: 'processing', ...}
+    const [autoViewOrder, setAutoViewOrder] = useState([]);
     const [isReviewing, setIsReviewing] = useState(false);
     const [completedViews, setCompletedViews] = useState([]);
 
@@ -118,6 +119,7 @@ const LiveCamera = () => {
     const currentViewRef = useRef(currentView);
     const markingViewIndexRef = useRef(0);
     const markingModeRef = useRef(null);
+    const autoViewOrderRef = useRef([]);
 
     // Keep currentViewRef in sync with current state
     useEffect(() => {
@@ -131,6 +133,10 @@ const LiveCamera = () => {
     useEffect(() => {
         markingModeRef.current = markingMode;
     }, [markingMode]);
+
+    useEffect(() => {
+        autoViewOrderRef.current = autoViewOrder;
+    }, [autoViewOrder]);
 
     // Auto-capture: start/stop countdown based on alignment
     useEffect(() => {
@@ -295,6 +301,8 @@ const LiveCamera = () => {
         setMarkingMode(null);
         setMarkingViewIndex(0);
         setAutoProgress({});
+        setAutoViewOrder([]);
+        autoViewOrderRef.current = [];
         setIsEditingMarkings(false);
         clearInterval(captureTimerRef.current);
         captureTimerRef.current = null;
@@ -363,18 +371,35 @@ const LiveCamera = () => {
     };
 
     const handleAutomaticMarking = () => {
+        const capturedOrder = VIEW_ORDER.filter(view => Boolean(capturedImages[view]));
+        if (capturedOrder.length === 0) {
+            alert('No captured photos found. Please capture photos first.');
+            return;
+        }
+
         setAwaitingSelection(false);
         setMarkingMode('auto');
         setMarkingViewIndex(0);
+        setAutoViewOrder(capturedOrder);
+        autoViewOrderRef.current = capturedOrder;
+        setAutoProgress({});
         markingModeRef.current = 'auto';
         markingViewIndexRef.current = 0;
-        processNextAutoView(0);
+        processNextAutoView(0, capturedOrder);
     };
 
-    const processNextAutoView = (index) => {
-        const view = VIEW_ORDER[index];
+    const processNextAutoView = (index, explicitOrder = null) => {
+        const orderedViews = explicitOrder || autoViewOrderRef.current;
+        if (!orderedViews || index >= orderedViews.length) {
+            setProcessing(true);
+            setInstruction('Finalizing analysis...');
+            socket.emit('finalize_session');
+            return;
+        }
+
+        const view = orderedViews[index];
         setProcessing(true);
-        setInstruction(`Processing photo ${index + 1} of 4...`);
+        setInstruction(`Processing photo ${index + 1} of ${orderedViews.length}...`);
         setAutoProgress(prev => ({ ...prev, [view]: 'processing' }));
         
         socket.emit('process_selection', {
@@ -474,7 +499,11 @@ const LiveCamera = () => {
             // Move to next view in sequence
             const currentIndex = markingViewIndexRef.current;
             const nextIndex = currentIndex + 1;
-            if (nextIndex < 4) {
+            const autoTotal = (markingModeRef.current === 'auto')
+                ? (autoViewOrderRef.current?.length || 0)
+                : 4;
+
+            if (nextIndex < autoTotal) {
                 setMarkingViewIndex(nextIndex);
                 markingViewIndexRef.current = nextIndex;
                 if (markingModeRef.current === 'auto') {
@@ -680,7 +709,7 @@ const LiveCamera = () => {
             <div className="auto-processing-container">
                 <h2>Automatic Marking</h2>
                 <div className="processing-grid">
-                    {VIEW_ORDER.map((view, index) => {
+                    {(autoViewOrder.length ? autoViewOrder : VIEW_ORDER.filter(view => Boolean(capturedImages[view]))).map((view) => {
                         const status = autoProgress[view];
                         return (
                             <div key={view} className={`processing-tile ${status || ''}`}>
@@ -716,7 +745,12 @@ const LiveCamera = () => {
                     })}
                 </div>
                 <div className="overall-status">
-                    {markingViewIndex < 4 ? `Processing photo ${markingViewIndex + 1} of 4...` : 'Finalizing analysis...'}
+                    {(() => {
+                        const total = autoViewOrder.length || VIEW_ORDER.filter(view => Boolean(capturedImages[view])).length || 4;
+                        return markingViewIndex < total
+                            ? `Processing photo ${markingViewIndex + 1} of ${total}...`
+                            : 'Finalizing analysis...';
+                    })()}
                 </div>
                 {errorMsg && <div className="error-message">{errorMsg}</div>}
             </div>

@@ -242,12 +242,11 @@ def handle_frame(data):
 
         # Update user height if provided
         if user_height:
-            height_cm = float(user_height)
-            if height_unit == 'inches':
-                height_cm *= 2.54
-            elif height_unit == 'feet':
-                height_cm *= 30.48
-            live_session.user_height_cm = height_cm
+            live_session.user_height_cm = _normalize_height_to_cm(
+                user_height,
+                height_unit,
+                fallback=live_session.user_height_cm
+            )
 
         # Decode base64 to OpenCV image
         img = decode_image(image_data)
@@ -333,7 +332,20 @@ def handle_process_selection(data):
         image_data = data.get('image')
         selection_type = data.get('type') # 'auto' or 'manual'
         manual_landmarks = data.get('landmarks', [])
-        user_height_cm = data.get('user_height', live_session.user_height_cm)
+        height_unit = data.get('height_unit', 'cm')
+        user_height_cm = _normalize_height_to_cm(
+            data.get('user_height'),
+            height_unit,
+            fallback=live_session.user_height_cm
+        )
+
+        # Keep session height in canonical centimeters for all later scale math.
+        if user_height_cm and user_height_cm > 0:
+            live_session.user_height_cm = user_height_cm
+
+        # If client didn't pass image payload for this step, use captured copy.
+        if not image_data and view in live_session.captured_images:
+            image_data = live_session.captured_images.get(view)
 
         img = decode_image(image_data)
         if img is None:
@@ -349,37 +361,80 @@ def handle_process_selection(data):
                 view,
                 image=img
             )
+
+            if not results.get('success'):
+                emit('selection_processed', {
+                    'error': results.get('error', 'Manual processing failed'),
+                    'view': view
+                })
+                return
             
-            # Store in session
-            live_session.processed_results[view] = results
-            
-            # Encode visualization
-            vis_base64 = encode_image(results['visualization'])
+            # Build upload-mode style visuals (mask + landmarks) for consistency.
+            scale = live_session.scale_factor
+            if view == 'front' or scale == 0:
+                ld = get_landmark_detector()
+                landmarks = ld.detect(img) if ld is not None else None
+                landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
+                if landmarks is not None:
+                    nose = landmarks[0]
+                    left_ankle = landmarks[27]
+                    right_ankle = landmarks[28]
+                    height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
+                    scale = _compute_scale_from_height_px(user_height_cm, height_px, fallback=scale)
+                    if view == 'front' and scale > 0:
+                        live_session.scale_factor = scale
+
+            engine_view = _normalize_engine_view(view)
+            auto_visuals = process_single_view(img, scale, engine_view)
+            visualization_b64 = auto_visuals.get('visualization') if auto_visuals.get('success') else results.get('visualization')
+            mask_b64 = auto_visuals.get('mask') if auto_visuals.get('success') else results.get('mask')
+
+            # Store in session using normalized payload (base64 strings)
+            live_session.processed_results[view] = {
+                'measurements': results.get('measurements', {}),
+                'visualization': visualization_b64,
+                'original_image': image_data,
+                'mask': mask_b64
+            }
             
             emit('selection_processed', {
                 'view': view,
                 'next_view': get_next_view(view),
-                'visualization': vis_base64,
-                'measurements': results['measurements']
+                'visualization': visualization_b64,
+                'measurements': results.get('measurements', {})
             })
 
         else: # auto
-            # Process view using auto logic
-            # For simplicity, we trigger the measurement pipeline for this view
-            # We need to ensure scale is available if it's not the front view
-            
+            # Process view with the same pipeline used by upload mode.
             ld = get_landmark_detector()
             landmarks = ld.detect(img)
+            landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
             if landmarks is None:
                 emit('selection_processed', {'error': 'Could not detect body landmarks. Please retake photo or use Manual Marking.'})
                 return
-            
-            # For auto detection, we'll use a simplified version of the main process
-            # or just call the core measurement functions
-            
-            # Generate visualization and measurements
-            # Note: In a real scenario, we might want to wait for front view for scale
-            # But the requirement says "Show same results table as upload photo mode"
+
+            # Defensive compatibility shim: some legacy paths may still reference
+            # compute_measurements directly during auto processing.
+            if 'compute_measurements' not in globals() or not callable(globals().get('compute_measurements')):
+                def compute_measurements(image, landmarks, scale_factor, view_name):
+                    engine_view = _normalize_engine_view(view_name)
+                    raw = measurement_engine.calculate_measurements_with_confidence(
+                        landmarks, scale_factor, engine_view
+                    )
+                    formatted = {}
+                    for name, data in raw.items():
+                        if isinstance(data, tuple) and len(data) == 3:
+                            cm_value, confidence, source = data
+                            px_value = cm_value / scale_factor if scale_factor and scale_factor > 0 else 0
+                            formatted[name] = {
+                                'value_cm': round(float(cm_value), 2),
+                                'value_px': round(float(px_value), 2),
+                                'confidence': round(float(confidence), 3),
+                                'source': source,
+                                'label': name.replace('_', ' ').title(),
+                            }
+                    return formatted
+                globals()['compute_measurements'] = compute_measurements
             
             # We'll calculate a temporary scale if it's the front view
             scale = live_session.scale_factor
@@ -388,29 +443,32 @@ def handle_process_selection(data):
                 left_ankle = landmarks[27]
                 right_ankle = landmarks[28]
                 height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
-                if height_px > 0:
-                    scale = user_height_cm / height_px
-                    if view == 'front':
-                        live_session.scale_factor = scale
+                scale = _compute_scale_from_height_px(user_height_cm, height_px, fallback=scale)
+                if view == 'front' and scale > 0:
+                    live_session.scale_factor = scale
 
-            # Measurement Logic
-            measurements = compute_measurements(img, landmarks, scale, view)
-            mask = segmentation_model.segment_person(img)
-            vis = visualize_measurements(img, landmarks, measurements)
+            engine_view = _normalize_engine_view(view)
+            auto_results = process_single_view(img, scale, engine_view)
+            if not auto_results.get('success'):
+                emit('selection_processed', {
+                    'error': auto_results.get('error', 'Auto processing failed'),
+                    'view': view
+                })
+                return
             
             res = {
-                'measurements': measurements,
-                'visualization': vis,
-                'original_image': img,
-                'mask': mask
+                'measurements': auto_results.get('measurements', {}),
+                'visualization': auto_results.get('visualization'),
+                'original_image': image_data,
+                'mask': auto_results.get('mask')
             }
             live_session.processed_results[view] = res
             
             emit('selection_processed', {
                 'view': view,
                 'next_view': get_next_view(view),
-                'visualization': encode_image(vis),
-                'measurements': measurements
+                'visualization': res.get('visualization'),
+                'measurements': res.get('measurements', {})
             })
 
     except Exception as e:
@@ -440,6 +498,66 @@ def _normalize_engine_view(view_name):
     if view_name in ('right', 'left', 'side'):
         return 'side'
     return 'front' if view_name == 'back' else view_name
+
+
+def _ensure_pixel_landmarks(landmarks, image_shape):
+    """
+    Ensure landmarks are in pixel coordinates.
+    If landmarks are normalized (0..1), convert to pixels using image width/height.
+    """
+    if landmarks is None:
+        return None
+
+    if len(landmarks) == 0:
+        return landmarks
+
+    h, w = image_shape[:2]
+    lm = np.array(landmarks, dtype=np.float32).copy()
+
+    max_x = float(np.max(np.abs(lm[:, 0]))) if lm.shape[1] >= 1 else 0.0
+    max_y = float(np.max(np.abs(lm[:, 1]))) if lm.shape[1] >= 2 else 0.0
+
+    # Normalized landmarks are typically <= 1.0 (allow small tolerance).
+    if max_x <= 1.5 and max_y <= 1.5:
+        lm[:, 0] = lm[:, 0] * float(w)
+        lm[:, 1] = lm[:, 1] * float(h)
+
+    return lm
+
+
+def _compute_scale_from_height_px(user_height_cm, height_px, fallback=0.0):
+    """Compute cm-per-pixel scale using the correct formula."""
+    if user_height_cm is None:
+        return fallback
+    try:
+        user_height_cm = float(user_height_cm)
+        height_px = float(height_px)
+    except Exception:
+        return fallback
+
+    if user_height_cm <= 0 or height_px <= 0:
+        return fallback
+
+    # Correct conversion: cm_per_pixel = user_height_cm / pixel_height
+    return user_height_cm / height_px
+
+
+def _normalize_height_to_cm(user_height, height_unit='cm', fallback=0.0):
+    """Normalize user height input to centimeters."""
+    if user_height is None:
+        return fallback
+    try:
+        height_cm = float(user_height)
+    except Exception:
+        return fallback
+
+    unit = str(height_unit or 'cm').strip().lower()
+    if unit == 'inches':
+        height_cm *= 2.54
+    elif unit == 'feet':
+        height_cm *= 30.48
+
+    return height_cm if height_cm > 0 else fallback
 
 
 def compute_measurements(image, landmarks, scale_factor, view_name):
@@ -519,6 +637,7 @@ def process_alignment(image, view):
     if ld is None:
         return 'red', 'Landmark detector unavailable', None
     landmarks = ld.detect(image)
+    landmarks = _ensure_pixel_landmarks(landmarks, image.shape) if landmarks is not None else None
 
     if landmarks is None:
         live_session.stability_start_time = None
@@ -612,13 +731,14 @@ def process_all_captured_images():
             front_img = decode_image(live_session.captured_images['front'])
             ld = get_landmark_detector()
             landmarks = ld.detect(front_img)
+            landmarks = _ensure_pixel_landmarks(landmarks, front_img.shape) if landmarks is not None else None
             if landmarks is not None:
                 nose = landmarks[0]
                 left_ankle = landmarks[27]
                 right_ankle = landmarks[28]
                 height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
-                if height_px > 0:
-                    scale = live_session.user_height_cm / height_px
+                scale = _compute_scale_from_height_px(live_session.user_height_cm, height_px, fallback=scale)
+                if scale > 0:
                     live_session.scale_factor = scale
 
         views = ['front', 'right', 'back', 'left']
@@ -626,31 +746,41 @@ def process_all_captured_images():
             if v in live_session.processed_results:
                 # Use already processed result (manual or auto-selection)
                 res = live_session.processed_results[v]
+
+                visualization_b64 = res.get('visualization')
+                mask_b64 = res.get('mask')
+                measurements = res.get('measurements', {})
+
+                # If any output is missing, rebuild from the same upload-mode pipeline.
+                if (not visualization_b64 or not mask_b64 or not measurements) and v in live_session.captured_images:
+                    img = decode_image(live_session.captured_images[v])
+                    if img is not None:
+                        engine_view = _normalize_engine_view(v)
+                        rebuilt = process_single_view(img, scale, engine_view)
+                        if rebuilt.get('success'):
+                            visualization_b64 = visualization_b64 or rebuilt.get('visualization')
+                            mask_b64 = mask_b64 or rebuilt.get('mask')
+                            measurements = measurements or rebuilt.get('measurements', {})
                 
-                # Convert numpy images to base64 for emission
+                # Results are stored in normalized base64 format
                 final_results[v] = {
-                    'measurements': res.get('measurements', {}),
-                    'visualization': encode_image(res['visualization']) if 'visualization' in res and res['visualization'] is not None else None,
-                    'original_image': encode_image(res['original_image']) if 'original_image' in res and res['original_image'] is not None else None,
-                    'mask': encode_image(res['mask']) if 'mask' in res and res['mask'] is not None else None
+                    'measurements': measurements,
+                    'visualization': visualization_b64,
+                    'original_image': res.get('original_image') or live_session.captured_images.get(v),
+                    'mask': mask_b64
                 }
             elif v in live_session.captured_images:
                 # Fallback to auto-processing if not already processed
                 img = decode_image(live_session.captured_images[v])
                 if img is not None:
-                    ld = get_landmark_detector()
-                    landmarks = ld.detect(img)
-                    if landmarks is not None:
-                        # Auto process
-                        engine_view = 'side' if v in ['right', 'left'] else v
-                        m = compute_measurements(img, landmarks, scale, engine_view)
-                        mask = segmentation_model.segment_person(img)
-                        vis = visualize_measurements(img, landmarks, m)
+                    engine_view = _normalize_engine_view(v)
+                    auto_results = process_single_view(img, scale, engine_view)
+                    if auto_results.get('success'):
                         final_results[v] = {
-                            'measurements': m,
-                            'visualization': encode_image(vis),
-                            'original_image': encode_image(img),
-                            'mask': encode_image(mask)
+                            'measurements': auto_results.get('measurements', {}),
+                            'visualization': auto_results.get('visualization'),
+                            'original_image': live_session.captured_images.get(v),
+                            'mask': auto_results.get('mask')
                         }
 
         # 3. Emit final complete payload
@@ -1080,6 +1210,7 @@ def process_single_view(image, scale_factor, view_name):
         if ld is None:
             raise Exception('Landmark detector unavailable')
         landmarks = ld.detect(image)
+        landmarks = _ensure_pixel_landmarks(landmarks, image.shape) if landmarks is not None else None
         
         if landmarks is None:
             print("✗ No landmarks detected")
@@ -1120,6 +1251,19 @@ def process_single_view(image, scale_factor, view_name):
         print(f"  Scale factor: {scale_factor}")
         print(f"  View: {view_name}")
         print(f"  Edge points available: {edge_reference_points is not None and edge_reference_points.get('is_valid', False)}")
+
+        # Guard against missing/invalid scale factor by recomputing from height in this frame.
+        if scale_factor is None or scale_factor <= 0:
+            nose = landmarks[0]
+            left_ankle = landmarks[27]
+            right_ankle = landmarks[28]
+            height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
+            scale_factor = _compute_scale_from_height_px(
+                live_session.user_height_cm,
+                height_px,
+                fallback=1.0
+            )
+            print(f"  Recomputed scale factor: {scale_factor}")
         
         # Calculate measurements with pixel distances using hybrid approach
         # Uses edge points for width measurements, MediaPipe for others
