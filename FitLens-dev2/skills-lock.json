@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "2d-or-3d-force-graph-with-lit": {
+      "source": "rodydavis/skills",
+      "sourceType": "github",
+      "computedHash": "0cd133386d5c811aadb8cdc0253ba705eb8711dac8b21805659d21321cc30223"
+    }
+  }
+}

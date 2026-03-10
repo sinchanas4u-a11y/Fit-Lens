@@ -1,394 +1,534 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Typography,
-  Button,
-  TextField,
-  Radio,
-  RadioGroup,
-  FormControlLabel,
-  FormControl,
-  FormLabel,
-  Paper,
-  Box,
   Alert,
-  Checkbox
+  Box,
+  Button,
+  Paper,
+  Tab,
+  Tabs,
+  TextField,
+  Typography
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
-import VideocamIcon from '@mui/icons-material/Videocam';
-import PhotoCameraIcon from '@mui/icons-material/PhotoCamera';
-import axios from 'axios';
+import Webcam from 'react-webcam';
 import io from 'socket.io-client';
 
+const VIEW_ORDER = ['front', 'right', 'back', 'left'];
+
 function LiveMode({ onBack }) {
-  const [socket, setSocket] = useState(null);
-  const [cameraActive, setCameraActive] = useState(false);
-  const [referenceSize, setReferenceSize] = useState('29.7');
-  const [referenceAxis, setReferenceAxis] = useState('height');
-  const [referenceCaptured, setReferenceCaptured] = useState(false);
-  const [currentFrame, setCurrentFrame] = useState(null);
-  const [status, setStatus] = useState('Not Ready');
-  const [statusColor, setStatusColor] = useState('red');
+  const webcamRef = useRef(null);
+  const socketRef = useRef(null);
+  const processingIndexRef = useRef(0);
+
+  const [connected, setConnected] = useState(false);
+  const [sessionStarted, setSessionStarted] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraError, setCameraError] = useState(null);
+
+  const [userHeight, setUserHeight] = useState('170');
+  const [heightUnit, setHeightUnit] = useState('cm');
+
+  const [currentView, setCurrentView] = useState('front');
+  const [alignment, setAlignment] = useState('red');
+  const [instruction, setInstruction] = useState('Align your full body in frame');
   const [countdown, setCountdown] = useState(null);
-  const [feedback, setFeedback] = useState([]);
-  const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [error, setError] = useState(null);
-  
-  const canvasRef = useRef(null);
+
+  const [capturedImages, setCapturedImages] = useState({});
+  const [isReviewing, setIsReviewing] = useState(false);
+
+  const [processing, setProcessing] = useState(false);
+  const [processingIndex, setProcessingIndex] = useState(0);
+  const [processErrors, setProcessErrors] = useState({});
+  const [resultsPayload, setResultsPayload] = useState(null);
+  const [selectedTab, setSelectedTab] = useState('front');
 
   useEffect(() => {
-    // Initialize socket connection
-    console.log('Connecting to WebSocket...');
-    const newSocket = io('http://localhost:5000');
-    setSocket(newSocket);
+    processingIndexRef.current = processingIndex;
+  }, [processingIndex]);
 
-    newSocket.on('connect', () => {
-      console.log('WebSocket connected');
-      addFeedback('Connected to server');
+  const connectedViews = useMemo(
+    () => VIEW_ORDER.filter((v) => Boolean(capturedImages[v])),
+    [capturedImages]
+  );
+
+  useEffect(() => {
+    const socket = io('http://localhost:5001');
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      setConnected(true);
+      setInstruction('Connected. Start session to begin capture.');
     });
 
-    newSocket.on('disconnect', () => {
-      console.log('WebSocket disconnected');
-      addFeedback('Disconnected from server');
+    socket.on('disconnect', () => {
+      setConnected(false);
+      setInstruction('Disconnected from backend.');
     });
 
-    newSocket.on('camera_frame', (data) => {
-      console.log('Received camera frame');
-      setCurrentFrame(data.frame);
-      
-      // Update status based on alignment
-      if (data.alignment) {
-        const statusTexts = {
-          'red': '🔴 Adjust Position',
-          'amber': '🟡 Almost Ready',
-          'green': '🟢 Perfect! Hold Still'
-        };
-        setStatus(statusTexts[data.alignment] || 'Not Ready');
-        setStatusColor(data.alignment);
+    socket.on('frame_processed', (data) => {
+      setAlignment(data.alignment || 'red');
+      setInstruction(data.instruction || 'Adjust your position.');
+      setCountdown(data.countdown ?? null);
+    });
+
+    socket.on('capture_complete', (data) => {
+      const view = data.view;
+      const nextView = data.next_view;
+      const image = data.image;
+
+      if (view && image) {
+        setCapturedImages((prev) => ({ ...prev, [view]: image }));
       }
-      
-      // Update countdown
-      if (data.countdown !== null && data.countdown !== undefined) {
-        setCountdown(data.countdown);
+
+      if (nextView && nextView !== 'complete') {
+        setCurrentView(nextView);
+      } else if (nextView === 'complete') {
+        setIsReviewing(true);
+      }
+    });
+
+    socket.on('selection_processed', (data) => {
+      const current = processingIndexRef.current;
+
+      if (data?.error) {
+        const failedView = VIEW_ORDER[current] || 'unknown';
+        setProcessErrors((prev) => ({ ...prev, [failedView]: data.error }));
+      }
+
+      const nextIndex = current + 1;
+      if (nextIndex < VIEW_ORDER.length) {
+        setProcessingIndex(nextIndex);
       } else {
-        setCountdown(null);
-      }
-      
-      // Update feedback for object detection
-      if (data.has_object === false && referenceCaptured) {
-        addFeedback('Please hold the reference object in your hand');
+        socket.emit('finalize_session');
       }
     });
 
-    newSocket.on('auto_capture', (data) => {
-      if (data.success) {
-        addFeedback('✓ Measurement captured automatically!');
-        if (voiceEnabled) {
-          speak('Measurement captured');
-        }
-        // Display results
-        if (data.result && data.result.measurements) {
-          displayMeasurements(data.result.measurements, data.result.scale_info);
-        }
-      }
+    socket.on('processing_complete', (payload) => {
+      setResultsPayload(payload);
+      setSelectedTab('front');
+      setProcessing(false);
+    });
+
+    socket.on('error', (err) => {
+      setProcessing(false);
+      setInstruction(err?.message || 'Live processing error');
     });
 
     return () => {
-      newSocket.close();
-      stopCamera();
+      socket.disconnect();
     };
-  }, [referenceCaptured, voiceEnabled]);
+  }, []);
 
   useEffect(() => {
-    if (currentFrame && canvasRef.current) {
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
-      const img = new Image();
-      img.onload = () => {
-        // Set canvas size to match container
-        const container = canvas.parentElement;
-        const maxWidth = container.clientWidth;
-        const maxHeight = container.clientHeight || 600;
-        
-        // Calculate aspect ratio
-        const aspectRatio = img.width / img.height;
-        let drawWidth = maxWidth;
-        let drawHeight = maxWidth / aspectRatio;
-        
-        if (drawHeight > maxHeight) {
-          drawHeight = maxHeight;
-          drawWidth = maxHeight * aspectRatio;
-        }
-        
-        canvas.width = drawWidth;
-        canvas.height = drawHeight;
-        ctx.drawImage(img, 0, 0, drawWidth, drawHeight);
-      };
-      img.onerror = () => {
-        console.error('Failed to load image');
-      };
-      img.src = `data:image/jpeg;base64,${currentFrame}`;
+    if (!processing) {
+      return;
     }
-  }, [currentFrame]);
 
-  const startCamera = async () => {
-    try {
-      console.log('Starting camera...');
-      const response = await axios.post('/api/camera/start');
-      console.log('Camera started:', response.data);
-      setCameraActive(true);
-      setError(null);
-      addFeedback('Camera started successfully');
-    } catch (err) {
-      console.error('Failed to start camera:', err);
-      setError('Failed to start camera: ' + (err.response?.data?.error || err.message));
-      addFeedback('ERROR: Failed to start camera');
+    const activeView = VIEW_ORDER[processingIndex];
+    const imageData = capturedImages[activeView];
+
+    if (!activeView || !imageData || !socketRef.current) {
+      return;
     }
-  };
 
-  const stopCamera = async () => {
-    try {
-      await axios.post('/api/camera/stop');
-      setCameraActive(false);
-    } catch (err) {
-      console.error('Failed to stop camera:', err);
-    }
-  };
-
-  const captureReference = async () => {
-    try {
-      const response = await axios.post('/api/camera/capture-reference', {
-        reference_size: parseFloat(referenceSize),
-        reference_axis: referenceAxis
-      });
-
-      setReferenceCaptured(true);
-      setStatus('Reference Captured');
-      setStatusColor('amber');
-      
-      // Display calibration info
-      addFeedback('✓ Reference object captured successfully!');
-      addFeedback('');
-      addFeedback('=== CALIBRATION INFO ===');
-      addFeedback(`Reference: ${referenceSize} cm`);
-      addFeedback(`Detected: ${response.data.reference_px.toFixed(2)} pixels`);
-      addFeedback(`Scale Factor: ${response.data.scale_factor.toFixed(4)} cm/px`);
-      addFeedback(`Formula: ${referenceSize} ÷ ${response.data.reference_px.toFixed(2)} = ${response.data.scale_factor.toFixed(4)}`);
-      addFeedback('');
-      addFeedback('Now hold the object and align your body for measurement.');
-      
-      if (voiceEnabled) {
-        speak('Reference captured');
-      }
-    } catch (err) {
-      setError(err.response?.data?.error || 'Failed to capture reference');
-      if (voiceEnabled) {
-        speak('Reference not found');
-      }
-    }
-  };
-
-  const displayMeasurements = (measurements, scaleInfo) => {
-    addFeedback('=== PIXEL-TO-SCALE CALIBRATION ===');
-    if (scaleInfo) {
-      addFeedback(`Scale Factor: ${scaleInfo.scale_factor.toFixed(4)} ${scaleInfo.unit}`);
-      addFeedback(`${scaleInfo.description}`);
-    }
-    addFeedback('');
-    addFeedback('=== MEASUREMENTS ===');
-    Object.entries(measurements).forEach(([name, data]) => {
-      const displayName = name.replace(/_/g, ' ').toUpperCase();
-      if (data.value_pixels) {
-        addFeedback(`${displayName}:`);
-        addFeedback(`  ${data.value_pixels.toFixed(0)} px → ${data.value_cm.toFixed(2)} cm`);
-        addFeedback(`  Confidence: ${(data.confidence * 100).toFixed(0)}%`);
-      } else {
-        addFeedback(`${displayName}: ${data.value_cm?.toFixed(2) || data.value?.toFixed(2)} cm (${(data.confidence * 100).toFixed(0)}%)`);
-      }
+    socketRef.current.emit('process_selection', {
+      view: activeView,
+      image: imageData,
+      type: 'auto',
+      user_height: Number(userHeight),
+      height_unit: heightUnit
     });
-  };
-
-  const addFeedback = (message) => {
-    setFeedback(prev => [
-      `[${new Date().toLocaleTimeString()}] ${message}`,
-      ...prev.slice(0, 9)
-    ]);
-  };
-
-  const speak = (text) => {
-    if ('speechSynthesis' in window) {
-      const utterance = new SpeechSynthesisUtterance(text);
-      window.speechSynthesis.speak(utterance);
-    }
-  };
-
-  const handleBack = () => {
-    stopCamera();
-    onBack();
-  };
+  }, [processing, processingIndex, capturedImages, userHeight, heightUnit]);
 
   useEffect(() => {
-    if (!cameraActive) {
-      startCamera();
+    if (!sessionStarted || isReviewing || processing || resultsPayload || !connected) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      if (!webcamRef.current || !socketRef.current) {
+        return;
+      }
+
+      const frame = webcamRef.current.getScreenshot();
+      if (!frame) {
+        return;
+      }
+
+      socketRef.current.emit('process_frame', {
+        image: frame,
+        view: currentView,
+        user_height: Number(userHeight),
+        height_unit: heightUnit
+      });
+    }, 220);
+
+    return () => clearInterval(interval);
+  }, [sessionStarted, isReviewing, processing, resultsPayload, connected, currentView, userHeight, heightUnit]);
+
+  const resetSession = useCallback(() => {
+    setSessionStarted(false);
+    setCameraReady(false);
+    setCameraError(null);
+    setCurrentView('front');
+    setAlignment('red');
+    setInstruction('Align your full body in frame');
+    setCountdown(null);
+    setCapturedImages({});
+    setIsReviewing(false);
+    setProcessing(false);
+    setProcessingIndex(0);
+    setProcessErrors({});
+    setResultsPayload(null);
+    setSelectedTab('front');
+    if (socketRef.current) {
+      socketRef.current.emit('reset_session');
     }
   }, []);
 
+  const startSession = () => {
+    if (!Number(userHeight) || Number(userHeight) <= 0) {
+      setInstruction('Enter a valid height to continue.');
+      return;
+    }
+
+    setSessionStarted(true);
+    setIsReviewing(false);
+    setResultsPayload(null);
+    setProcessErrors({});
+    setInstruction('Front view: stand straight, full body visible.');
+  };
+
+  const manualCapture = () => {
+    if (!webcamRef.current) {
+      return;
+    }
+    const frame = webcamRef.current.getScreenshot();
+    if (!frame) {
+      return;
+    }
+
+    setCapturedImages((prev) => ({ ...prev, [currentView]: frame }));
+    const currentIndex = VIEW_ORDER.indexOf(currentView);
+    if (currentIndex < VIEW_ORDER.length - 1) {
+      setCurrentView(VIEW_ORDER[currentIndex + 1]);
+      setInstruction('Capture complete. Rotate to next view.');
+    } else {
+      setIsReviewing(true);
+      setInstruction('All views captured. Review and process measurements.');
+    }
+  };
+
+  const retakeView = (view) => {
+    setCapturedImages((prev) => {
+      const next = { ...prev };
+      delete next[view];
+      return next;
+    });
+    setCurrentView(view);
+    setIsReviewing(false);
+    setResultsPayload(null);
+    setProcessErrors((prev) => {
+      const next = { ...prev };
+      delete next[view];
+      return next;
+    });
+    if (socketRef.current) {
+      socketRef.current.emit('retake_view', { view });
+    }
+  };
+
+  const processMeasurements = () => {
+    const missing = VIEW_ORDER.filter((v) => !capturedImages[v]);
+    if (missing.length > 0) {
+      setInstruction(`Please capture all 4 views. Missing: ${missing.join(', ')}`);
+      return;
+    }
+
+    setProcessing(true);
+    setProcessingIndex(0);
+    setProcessErrors({});
+    setInstruction('Processing all views using height-based pixel-to-scale conversion...');
+  };
+
+  const renderMeasurementsTable = (measurements) => {
+    const entries = Object.entries(measurements || {});
+    if (entries.length === 0) {
+      return <Typography variant="body2">No measurements available for this view.</Typography>;
+    }
+
+    return (
+      <div className="live-results-table-wrap">
+        <table className="live-results-table">
+          <thead>
+            <tr>
+              <th>Measurement</th>
+              <th>Value (cm)</th>
+              <th>Value (px)</th>
+              <th>Confidence</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map(([name, data]) => (
+              <tr key={name}>
+                <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
+                <td>{Number(data.value_cm || 0).toFixed(2)}</td>
+                <td>{Number(data.value_px || 0).toFixed(2)}</td>
+                <td>{`${Math.round(Number(data.confidence || 0) * 100)}%`}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
+  const renderPerViewPanels = (viewKey) => {
+    const viewData = resultsPayload?.results?.[viewKey] || {};
+
+    return (
+      <div className="live-panels-grid">
+        <Paper className="live-result-panel" sx={{ p: 2 }}>
+          <Typography variant="subtitle1" gutterBottom>Original</Typography>
+          <img
+            className="live-result-image"
+            src={viewData.original_image || capturedImages[viewKey]}
+            alt={`${viewKey} original`}
+          />
+        </Paper>
+
+        <Paper className="live-result-panel" sx={{ p: 2 }}>
+          <Typography variant="subtitle1" gutterBottom>Segmentation Mask</Typography>
+          <img
+            className="live-result-image live-mask-image"
+            src={viewData.mask}
+            alt={`${viewKey} segmentation mask`}
+          />
+          <Typography variant="caption" color="text.secondary">
+            White silhouette on black background (same upload-mode mask style).
+          </Typography>
+        </Paper>
+
+        <Paper className="live-result-panel" sx={{ p: 2 }}>
+          <Typography variant="subtitle1" gutterBottom>Landmark Detection Overlay</Typography>
+          <img
+            className="live-result-image"
+            src={viewData.visualization}
+            alt={`${viewKey} landmark overlay`}
+          />
+        </Paper>
+
+        <Paper className="live-result-panel" sx={{ p: 2 }}>
+          <Typography variant="subtitle1" gutterBottom>Measurements</Typography>
+          {renderMeasurementsTable(viewData.measurements)}
+        </Paper>
+      </div>
+    );
+  };
+
+  const renderAllMeasurements = () => {
+    const rows = [];
+    VIEW_ORDER.forEach((view) => {
+      const measurements = resultsPayload?.results?.[view]?.measurements || {};
+      Object.entries(measurements).forEach(([name, data]) => {
+        rows.push({
+          view,
+          name,
+          cm: Number(data.value_cm || 0),
+          px: Number(data.value_px || 0),
+          confidence: Number(data.confidence || 0)
+        });
+      });
+    });
+
+    return (
+      <Paper sx={{ p: 2 }}>
+        <Typography variant="h6" gutterBottom>All Measurements</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Pixel-to-scale formula used for all 4 photos: user height (cm) / detected body height (px).
+        </Typography>
+        <div className="live-results-table-wrap">
+          <table className="live-results-table">
+            <thead>
+              <tr>
+                <th>View</th>
+                <th>Measurement</th>
+                <th>Value (cm)</th>
+                <th>Value (px)</th>
+                <th>Confidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, idx) => (
+                <tr key={`${row.view}-${row.name}-${idx}`}>
+                  <td>{row.view.toUpperCase()}</td>
+                  <td>{row.name.replace(/_/g, ' ').toUpperCase()}</td>
+                  <td>{row.cm.toFixed(2)}</td>
+                  <td>{row.px.toFixed(2)}</td>
+                  <td>{`${Math.round(row.confidence * 100)}%`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Paper>
+    );
+  };
+
+  if (resultsPayload) {
+    const calibration = resultsPayload.calibration || {};
+
+    return (
+      <div className="live-container">
+        <Button startIcon={<ArrowBackIcon />} onClick={onBack} sx={{ mb: 2 }}>
+          Back to Dashboard
+        </Button>
+
+        <Typography variant="h4" gutterBottom>Live Camera Results</Typography>
+
+        <Paper sx={{ p: 2, mb: 2 }}>
+          <Typography variant="subtitle1">Height-Based Pixel-to-Scale Calibration</Typography>
+          <Typography variant="body2" color="text.secondary">
+            User height: {Number(calibration.user_height_cm || 0).toFixed(2)} cm
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Scale factor: {Number(calibration.scale_factor || 0).toFixed(6)} cm/px
+          </Typography>
+        </Paper>
+
+        <Paper sx={{ p: 1, mb: 2 }}>
+          <Tabs
+            value={selectedTab}
+            onChange={(_, v) => setSelectedTab(v)}
+            variant="scrollable"
+            scrollButtons="auto"
+          >
+            <Tab label="Front" value="front" />
+            <Tab label="Right" value="right" />
+            <Tab label="Back" value="back" />
+            <Tab label="Left" value="left" />
+            <Tab label="All Measurements" value="all" />
+          </Tabs>
+        </Paper>
+
+        {selectedTab === 'all' ? renderAllMeasurements() : renderPerViewPanels(selectedTab)}
+
+        <Box sx={{ mt: 2 }}>
+          <Button variant="outlined" onClick={resetSession}>Start New Session</Button>
+        </Box>
+      </div>
+    );
+  }
+
+  if (isReviewing) {
+    return (
+      <div className="live-container">
+        <Button startIcon={<ArrowBackIcon />} onClick={onBack} sx={{ mb: 2 }}>
+          Back to Dashboard
+        </Button>
+
+        <Typography variant="h4" gutterBottom>Review Captured Views</Typography>
+        <div className="live-review-grid">
+          {VIEW_ORDER.map((view) => (
+            <Paper key={view} sx={{ p: 1 }}>
+              <Typography variant="subtitle2" gutterBottom>{view.toUpperCase()}</Typography>
+              <img className="live-review-thumb" src={capturedImages[view]} alt={`${view} capture`} />
+              <Button size="small" sx={{ mt: 1 }} onClick={() => retakeView(view)}>
+                Retake
+              </Button>
+            </Paper>
+          ))}
+        </div>
+
+        {Object.keys(processErrors).length > 0 && (
+          <Alert severity="warning" sx={{ mt: 2 }}>
+            {Object.entries(processErrors).map(([view, msg]) => `${view}: ${msg}`).join(' | ')}
+          </Alert>
+        )}
+
+        <Box sx={{ mt: 2, display: 'flex', gap: 2 }}>
+          <Button variant="contained" onClick={processMeasurements} disabled={processing}>
+            {processing ? `Processing ${processingIndex + 1}/4...` : 'Process Measurements'}
+          </Button>
+          <Button variant="outlined" onClick={resetSession}>Restart Session</Button>
+        </Box>
+      </div>
+    );
+  }
+
   return (
     <div className="live-container">
-      <Button
-        startIcon={<ArrowBackIcon />}
-        onClick={handleBack}
-        sx={{ mb: 2 }}
-      >
+      <Button startIcon={<ArrowBackIcon />} onClick={onBack} sx={{ mb: 2 }}>
         Back to Dashboard
       </Button>
 
-      <Typography variant="h4" gutterBottom>
-        Live Camera Mode
-      </Typography>
+      <Typography variant="h4" gutterBottom>Live Camera Mode</Typography>
 
       <div className="live-grid">
         <div className="live-controls">
           <Paper sx={{ p: 2 }}>
-            <div className={`status-indicator status-${statusColor}`}>
-              {status}
-            </div>
-          </Paper>
-
-          <Paper sx={{ p: 2 }}>
-            <Typography variant="h6" gutterBottom>
-              Step 1: Capture Reference
-            </Typography>
-
+            <Typography variant="h6" gutterBottom>Setup</Typography>
             <TextField
-              label="Size (cm)"
+              label="Height"
               type="number"
-              value={referenceSize}
-              onChange={(e) => setReferenceSize(e.target.value)}
               fullWidth
               margin="normal"
-              size="small"
+              value={userHeight}
+              onChange={(e) => setUserHeight(e.target.value)}
             />
-
-            <FormControl component="fieldset" margin="normal">
-              <FormLabel component="legend">Axis</FormLabel>
-              <RadioGroup
-                value={referenceAxis}
-                onChange={(e) => setReferenceAxis(e.target.value)}
-                row
-              >
-                <FormControlLabel value="width" control={<Radio />} label="Width" />
-                <FormControlLabel value="height" control={<Radio />} label="Height" />
-              </RadioGroup>
-            </FormControl>
-
-            <Button
-              variant="contained"
+            <TextField
+              label="Unit (cm/inches/feet)"
               fullWidth
-              startIcon={<PhotoCameraIcon />}
-              onClick={captureReference}
-              disabled={!cameraActive}
-              sx={{ mt: 2 }}
-            >
-              Capture Reference
+              margin="normal"
+              value={heightUnit}
+              onChange={(e) => setHeightUnit(e.target.value)}
+            />
+            <Button variant="contained" fullWidth sx={{ mt: 1 }} onClick={startSession} disabled={!connected}>
+              Start Session
             </Button>
           </Paper>
 
           <Paper sx={{ p: 2 }}>
-            <Typography variant="h6" gutterBottom>
-              Step 2: Align & Capture
-            </Typography>
-
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Hold the reference object in your hand and align your body with the template.
-              Auto-capture will trigger after 3 seconds of perfect alignment.
-            </Typography>
-
-            {countdown !== null && countdown >= 0 && (
-              <div className="countdown">
-                {countdown}
-              </div>
-            )}
-
-            {!referenceCaptured && (
-              <Alert severity="info" sx={{ mt: 2 }}>
-                Please capture reference object first
-              </Alert>
-            )}
-
-            {referenceCaptured && (
-              <Alert severity="success" sx={{ mt: 2 }}>
-                ✓ Reference captured. Hold object in hand and align your body.
-              </Alert>
-            )}
-          </Paper>
-
-          <Paper sx={{ p: 2 }}>
-            <Typography variant="h6" gutterBottom>
-              Feedback
-            </Typography>
-
-            <div className="feedback-box">
-              {feedback.map((msg, idx) => (
-                <Typography key={idx} variant="body2" sx={{ mb: 1 }}>
-                  {msg}
-                </Typography>
-              ))}
+            <Typography variant="h6" gutterBottom>Status</Typography>
+            <div className={`status-indicator status-${alignment}`}>
+              {alignment === 'green' ? 'Aligned' : 'Adjust Position'}
             </div>
-
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={voiceEnabled}
-                  onChange={(e) => setVoiceEnabled(e.target.checked)}
-                />
-              }
-              label="Voice Guidance"
-              sx={{ mt: 2 }}
-            />
+            <Typography variant="body2" sx={{ mt: 1 }}>{instruction}</Typography>
+            {countdown !== null && countdown >= 0 && <div className="countdown">{countdown}</div>}
+            <Typography variant="body2" color="text.secondary">
+              Current view: {currentView.toUpperCase()} ({connectedViews.length}/4 captured)
+            </Typography>
           </Paper>
 
-          {error && (
-            <Alert severity="error" onClose={() => setError(null)}>
-              {error}
-            </Alert>
-          )}
+          {cameraError && <Alert severity="error">{cameraError}</Alert>}
+          {!connected && <Alert severity="warning">Backend not connected (`http://localhost:5001`).</Alert>}
         </div>
 
         <Paper sx={{ p: 2 }}>
-          <Typography variant="h6" gutterBottom>
-            Camera Feed
-          </Typography>
-          
-          <div className="camera-feed" style={{ 
-            minHeight: '480px', 
-            display: 'flex', 
-            alignItems: 'center', 
-            justifyContent: 'center',
-            background: '#000'
-          }}>
-            {currentFrame ? (
-              <canvas 
-                ref={canvasRef} 
-                style={{ 
-                  maxWidth: '100%', 
-                  maxHeight: '600px',
-                  display: 'block'
-                }} 
-              />
-            ) : (
-              <Typography variant="body1" color="text.secondary">
-                Starting camera...
-              </Typography>
-            )}
+          <Typography variant="h6" gutterBottom>Camera Feed</Typography>
+          <div className="camera-feed live-webcam-box">
+            <Webcam
+              ref={webcamRef}
+              audio={false}
+              screenshotFormat="image/jpeg"
+              onUserMedia={() => {
+                setCameraReady(true);
+                setCameraError(null);
+              }}
+              onUserMediaError={(err) => {
+                setCameraReady(false);
+                setCameraError(err?.message || 'Unable to access camera');
+              }}
+              videoConstraints={{ facingMode: 'user' }}
+              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+            />
           </div>
 
-          <Box sx={{ mt: 2 }}>
-            <Typography variant="body2" color="text.secondary">
-              🔴 Red: Adjust position | 🟡 Amber: Almost ready | 🟢 Green: Perfect!
-            </Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-              💡 Hold the reference object in your hand for auto-capture
-            </Typography>
+          <Box sx={{ mt: 2, display: 'flex', gap: 2 }}>
+            <Button variant="contained" onClick={manualCapture} disabled={!sessionStarted || !cameraReady}>
+              Capture {currentView.toUpperCase()}
+            </Button>
+            <Button variant="outlined" onClick={resetSession}>Reset</Button>
           </Box>
         </Paper>
       </div>
