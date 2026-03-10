@@ -1371,8 +1371,11 @@ def decode_image(base64_str):
         img_array = np.array(img)
         
         # Convert RGB to BGR for OpenCV
-        if len(img_array.shape) == 3 and img_array.shape[2] == 3:
-            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        if len(img_array.shape) == 3:
+            if img_array.shape[2] == 3:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+            elif img_array.shape[2] == 4:
+                img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
         
         return img_array
     except Exception as e:

@@ -12,6 +12,7 @@ import threading
 import queue
 from typing import Optional, Tuple, Dict, List
 import pyttsx3
+import time
 
 from reference_detector import ReferenceDetector
 from temporal_stabilizer import TemporalStabilizer
@@ -56,11 +57,13 @@ class BodyMeasurementDashboard:
         self.camera = None
         self.camera_running = False
         self.frame_queue = queue.Queue(maxsize=2)
+        self.latest_frame = None
         
         # Alignment state
         self.alignment_status = 'red'  # 'red', 'amber', 'green'
         self.green_start_time = None
         self.countdown_active = False
+        self.capture_cooldown_until = 0.0
         
         # Build UI
         self.build_dashboard()
@@ -518,13 +521,12 @@ class BodyMeasurementDashboard:
         while self.camera_running:
             ret, frame = self.camera.read()
             if ret:
+                self.latest_frame = frame.copy()
                 if not self.frame_queue.full():
                     self.frame_queue.put(frame)
     
     def process_camera_frames(self):
         """Process camera frames"""
-        import time
-        
         while self.camera_running:
             try:
                 frame = self.frame_queue.get(timeout=0.1)
@@ -546,7 +548,7 @@ class BodyMeasurementDashboard:
                     ref_stable = self.temporal_stabilizer.check_reference_stability(frame)
                     
                     # Check alignment
-                    alignment = self.check_alignment(landmarks, mask, ref_stable)
+                    alignment = self.check_alignment(landmarks, mask, ref_stable, frame.shape)
                     
                     # Update status
                     self.update_alignment_status(alignment)
@@ -562,6 +564,7 @@ class BodyMeasurementDashboard:
                     else:
                         self.green_start_time = None
                         self.countdown_active = False
+                        self.countdown_label.configure(text="")
                 
                 # Display frame
                 self.display_camera_frame(frame_with_overlay)
@@ -597,7 +600,7 @@ class BodyMeasurementDashboard:
         
         return frame
     
-    def check_alignment(self, landmarks, mask, ref_stable):
+    def check_alignment(self, landmarks, mask, ref_stable, frame_shape=None):
         """Check alignment status"""
         if landmarks is None or mask is None:
             return 'red'
@@ -606,11 +609,11 @@ class BodyMeasurementDashboard:
             return 'red'
         
         # Check if full body visible
-        if not self.is_full_body_visible(landmarks):
+        if not self.is_full_body_visible(landmarks, frame_shape):
             return 'red'
         
         # Check posture
-        posture_score = self.calculate_posture_score(landmarks)
+        posture_score = self.calculate_posture_score(landmarks, frame_shape)
         
         if posture_score > 0.9:
             return 'green'
@@ -619,15 +622,107 @@ class BodyMeasurementDashboard:
         else:
             return 'red'
     
-    def is_full_body_visible(self, landmarks):
+    def is_full_body_visible(self, landmarks, frame_shape=None):
         """Check if full body is visible"""
-        # Check if feet landmarks are visible
-        return landmarks is not None
+        if landmarks is None or len(landmarks) < 33:
+            return False
+
+        # Require high-confidence visibility for key landmarks.
+        required = [0, 11, 12, 23, 24, 27, 28]
+        for idx in required:
+            if landmarks[idx][2] < 0.55:
+                return False
+
+        # Ensure full body is inside frame with a small margin.
+        visible_points = landmarks[required, :2]
+        min_x, min_y = np.min(visible_points[:, 0]), np.min(visible_points[:, 1])
+        max_x, max_y = np.max(visible_points[:, 0]), np.max(visible_points[:, 1])
+        body_height = max(max_y - min_y, 1.0)
+        margin = body_height * 0.05
+
+        if min_x < margin or min_y < margin:
+            return False
+
+        if frame_shape is not None:
+            frame_h, frame_w = frame_shape[:2]
+            if max_x > frame_w - margin or max_y > frame_h - margin:
+                return False
+
+        if max_y - min_y < 0.35 * (frame_shape[0] if frame_shape is not None else 720):
+            return False
+
+        return True
     
-    def calculate_posture_score(self, landmarks):
+    def calculate_posture_score(self, landmarks, frame_shape=None):
         """Calculate posture alignment score"""
-        # Simplified scoring
-        return 0.85  # Placeholder
+        if landmarks is None or len(landmarks) < 33:
+            return 0.0
+
+        if frame_shape is None:
+            return 0.0
+
+        h, w = frame_shape[:2]
+
+        # Core pose points (MediaPipe indices) compared with a silhouette model.
+        pose_points = {
+            'head': landmarks[0],
+            'left_shoulder': landmarks[11],
+            'right_shoulder': landmarks[12],
+            'left_hip': landmarks[23],
+            'right_hip': landmarks[24],
+            'left_ankle': landmarks[27],
+            'right_ankle': landmarks[28],
+        }
+
+        if any(point[2] < 0.55 for point in pose_points.values()):
+            return 0.0
+
+        # Fixed silhouette template points from draw_template_overlay geometry.
+        template_center_x = w / 2.0
+        template_head_y = h / 4.0
+        template_shoulder_y = h / 4.0 + 60.0
+        template_hip_y = h / 2.0 + 100.0
+        template_ankle_y = h - 50.0
+        template_height = max(template_ankle_y - template_head_y, 1.0)
+
+        target_points = {
+            'head': np.array([template_center_x, template_head_y], dtype=np.float32),
+            'left_shoulder': np.array([template_center_x - 60.0, template_shoulder_y], dtype=np.float32),
+            'right_shoulder': np.array([template_center_x + 60.0, template_shoulder_y], dtype=np.float32),
+            'left_hip': np.array([template_center_x - 35.0, template_hip_y], dtype=np.float32),
+            'right_hip': np.array([template_center_x + 35.0, template_hip_y], dtype=np.float32),
+            'left_ankle': np.array([template_center_x - 50.0, template_ankle_y], dtype=np.float32),
+            'right_ankle': np.array([template_center_x + 50.0, template_ankle_y], dtype=np.float32),
+        }
+
+        # Compute normalized fit errors and convert to a score in [0, 1].
+        per_point_scores = []
+        tolerance_px = 0.08 * template_height
+        for name, target_xy in target_points.items():
+            observed_xy = pose_points[name][:2]
+            error_px = np.linalg.norm(observed_xy - target_xy)
+            point_score = max(0.0, 1.0 - (error_px / tolerance_px))
+            per_point_scores.append(point_score)
+
+        # Include scale matching against the silhouette dimensions.
+        observed_shoulder_width = np.linalg.norm(pose_points['left_shoulder'][:2] - pose_points['right_shoulder'][:2])
+        observed_height = np.linalg.norm(
+            ((pose_points['left_ankle'][:2] + pose_points['right_ankle'][:2]) / 2.0) - pose_points['head'][:2]
+        )
+        template_shoulder_width = 120.0
+        shoulder_scale_score = max(0.0, 1.0 - abs(observed_shoulder_width - template_shoulder_width) / template_shoulder_width)
+        height_scale_score = max(0.0, 1.0 - abs(observed_height - template_height) / template_height)
+
+        # Extra penalties for tilt and shoulder asymmetry.
+        shoulder_center = (pose_points['left_shoulder'][:2] + pose_points['right_shoulder'][:2]) / 2.0
+        hip_center = (pose_points['left_hip'][:2] + pose_points['right_hip'][:2]) / 2.0
+        torso_vector = hip_center - shoulder_center
+        torso_tilt = abs(float(torso_vector[0])) / max(abs(float(torso_vector[1])), 1.0)
+        shoulder_tilt = abs(float(pose_points['left_shoulder'][1] - pose_points['right_shoulder'][1])) / template_height
+
+        penalty = min(0.25, torso_tilt * 0.2 + shoulder_tilt * 0.8)
+        score = float((0.70 * np.mean(per_point_scores)) + (0.15 * shoulder_scale_score) + (0.15 * height_scale_score) - penalty)
+        return float(np.clip(score, 0.0, 1.0))
     
     def update_alignment_status(self, alignment):
         """Update status display"""
@@ -647,8 +742,11 @@ class BodyMeasurementDashboard:
     
     def handle_green_alignment(self):
         """Handle green alignment state"""
-        import time
-        
+        # Prevent immediate re-captures while user is still standing in green zone.
+        if time.time() < self.capture_cooldown_until:
+            self.countdown_label.configure(text="Captured")
+            return
+
         if self.green_start_time is None:
             self.green_start_time = time.time()
             self.countdown_active = True
@@ -664,6 +762,7 @@ class BodyMeasurementDashboard:
             self.green_start_time = None
             self.countdown_active = False
             self.countdown_label.configure(text="")
+            self.capture_cooldown_until = time.time() + 2.0
     
     def draw_feedback(self, frame, landmarks, mask, alignment):
         """Draw visual feedback on frame"""
@@ -739,14 +838,17 @@ class BodyMeasurementDashboard:
     
     def auto_capture(self):
         """Auto-capture measurement"""
-        if not self.frame_queue.empty():
-            frame = self.frame_queue.get()
-            
-            # Process and save
-            self.speak("Capturing measurement")
-            messagebox.showinfo("Captured", "Measurement captured!")
-            
-            # TODO: Process and display results
+        frame = self.latest_frame.copy() if self.latest_frame is not None else None
+        if frame is None:
+            return
+
+        # Process and save
+        self.speak("Capturing measurement")
+        self.feedback_text.insert("end", "\nAuto-capture completed after 3-second alignment.")
+        self.feedback_text.see("end")
+        self.root.after(0, lambda: messagebox.showinfo("Captured", "Measurement captured automatically!"))
+
+        # TODO: Process and display results
     
     def speak(self, text: str):
         """Text-to-speech output"""

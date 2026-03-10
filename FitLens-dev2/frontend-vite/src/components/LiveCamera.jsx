@@ -5,8 +5,9 @@ import ManualLandmarkMarker from './ManualLandmarkMarker';
 import './LiveCamera.css';
 
 // --- Silhouette Components ---
-const SilhouetteSVG = ({ view }) => {
+const SilhouetteSVG = ({ view, alignment }) => {
     const viewLabel = view ? view.charAt(0).toUpperCase() + view.slice(1) : 'Front';
+    const strokeColor = alignment === 'green' ? '#00FF88' : '#FF4444';
 
     if (viewLabel === 'Front' || viewLabel === 'Back') {
         return (
@@ -16,17 +17,17 @@ const SilhouetteSVG = ({ view }) => {
                 xmlns="http://www.w3.org/2000/svg"
                 style={{ width: '100%', height: '100%', opacity: 0.35 }}
             >
-                <ellipse cx="100" cy="44" rx="28" ry="32" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <rect x="88" y="74" width="24" height="22" rx="8" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M44 110 Q60 90 88 96 L112 96 Q140 90 156 110" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M52 110 L44 210 Q60 228 100 230 Q140 228 156 210 L148 110" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M56 210 Q100 240 144 210" stroke="#00FF88" strokeWidth="2" strokeDasharray="4 3"/>
-                <path d="M44 210 Q36 250 40 270 L60 270 Q100 280 140 270 L160 270 Q164 250 156 210" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M52 110 L30 190 Q26 210 32 230 L48 230 L58 150" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M148 110 L170 190 Q174 210 168 230 L152 230 L142 150" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M60 270 L52 380 Q50 420 56 450 L80 450 L88 350 L92 270" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M140 270 L148 380 Q150 420 144 450 L120 450 L112 350 L108 270" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                {viewLabel === 'Back' && <line x1="100" y1="96" x2="100" y2="270" stroke="#00FF88" strokeWidth="1" strokeDasharray="4 4" opacity="0.5"/>}
+                <ellipse cx="100" cy="44" rx="28" ry="32" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <rect x="88" y="74" width="24" height="22" rx="8" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M44 110 Q60 90 88 96 L112 96 Q140 90 156 110" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M52 110 L44 210 Q60 228 100 230 Q140 228 156 210 L148 110" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M56 210 Q100 240 144 210" stroke={strokeColor} strokeWidth="2" strokeDasharray="4 3"/>
+                <path d="M44 210 Q36 250 40 270 L60 270 Q100 280 140 270 L160 270 Q164 250 156 210" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M52 110 L30 190 Q26 210 32 230 L48 230 L58 150" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M148 110 L170 190 Q174 210 168 230 L152 230 L142 150" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M60 270 L52 380 Q50 420 56 450 L80 450 L88 350 L92 270" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M140 270 L148 380 Q150 420 144 450 L120 450 L112 350 L108 270" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                {viewLabel === 'Back' && <line x1="100" y1="96" x2="100" y2="270" stroke={strokeColor} strokeWidth="1" strokeDasharray="4 4" opacity="0.5"/>}
             </svg>
         );
     }
@@ -41,27 +42,27 @@ const SilhouetteSVG = ({ view }) => {
             style={{ width: '100%', height: '100%', opacity: 0.35 }}
         >
             <g transform={flipTransform}>
-                <ellipse cx="105" cy="44" rx="26" ry="32" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <rect x="96" y="74" width="18" height="22" rx="6" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M88 96 Q72 100 68 130 Q64 170 68 210 Q72 240 80 270" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M106 96 Q120 104 122 130 Q126 170 118 210 Q112 240 108 270" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M68 130 L52 200 Q48 220 54 240 L68 238 L76 170" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M80 270 Q68 290 70 310 L100 315 Q118 308 108 270" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M72 310 L68 400 Q66 430 72 455 L90 455 L96 360 L100 315" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M100 315 L104 400 Q108 430 102 455 L118 455 L116 360" stroke="#00FF88" strokeWidth="2.5" strokeDasharray="6 3"/>
+                <ellipse cx="105" cy="44" rx="26" ry="32" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <rect x="96" y="74" width="18" height="22" rx="6" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M88 96 Q72 100 68 130 Q64 170 68 210 Q72 240 80 270" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M106 96 Q120 104 122 130 Q126 170 118 210 Q112 240 108 270" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M68 130 L52 200 Q48 220 54 240 L68 238 L76 170" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M80 270 Q68 290 70 310 L100 315 Q118 308 108 270" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M72 310 L68 400 Q66 430 72 455 L90 455 L96 360 L100 315" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <path d="M100 315 L104 400 Q108 430 102 455 L118 455 L116 360" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
             </g>
         </svg>
     );
 };
 
-const SilhouetteOverlay = ({ view }) => (
+const SilhouetteOverlay = ({ view, alignment }) => (
     <div className="silhouette-wrapper-overlay">
         <div className="corner-guide top-left" />
         <div className="corner-guide top-right" />
         <div className="corner-guide bottom-left" />
         <div className="corner-guide bottom-right" />
         <div className="silhouette-svg-inner">
-            <SilhouetteSVG view={view} />
+            <SilhouetteSVG view={view} alignment={alignment} />
         </div>
     </div>
 );
@@ -859,7 +860,7 @@ const LiveCamera = () => {
                             </div>
                         )}
 
-                        <SilhouetteOverlay view={currentView} />
+                        <SilhouetteOverlay view={currentView} alignment={alignment} />
 
                         {/* Auto-capture countdown overlay */}
                         {alignment === 'green' && captureCountdown !== null && (
