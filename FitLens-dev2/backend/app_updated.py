@@ -61,17 +61,21 @@ def save_body_measurements(results):
     try:
         results_path = os.path.join(RESULTS_DIR, "results.jsonl")
         # Add metadata to the result
+        # We strip out large base64 strings if they exist to keep the file clean
+        # IMPORTANT: Do this on a copy to avoid mutating the response being sent to the frontend
+        import copy
+        results_copy = copy.deepcopy(results)
+        if 'results' in results_copy:
+            for view in results_copy['results']:
+                if isinstance(results_copy['results'][view], dict):
+                    results_copy['results'][view].pop('original_image', None)
+                    results_copy['results'][view].pop('visualization', None)
+                    results_copy['results'][view].pop('mask', None)
+
         store_data = {
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "data": results
+            "data": results_copy
         }
-        # We strip out large base64 strings if they exist to keep the file clean
-        if 'results' in results:
-            for view in results['results']:
-                if isinstance(results['results'][view], dict):
-                    results['results'][view].pop('original_image', None)
-                    results['results'][view].pop('visualization', None)
-                    results['results'][view].pop('mask', None)
 
         with open(results_path, "a") as f:
             f.write(json.dumps(store_data) + "\n")
@@ -1322,8 +1326,10 @@ def process_single_view(image, scale_factor, view_name):
             vis_image = ld.draw_landmarks(masked_image.copy(), landmarks)
         vis_base64 = encode_image(vis_image)
         
-        # Encode mask
-        mask_base64 = encode_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
+        # Encode mask (it's already 2D, but encode_image expects 3D or handles grayscale differently)
+        # Convert grayscale mask to 3-channel
+        mask_3d = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR) if len(mask.shape) == 2 else mask
+        mask_base64 = encode_image(mask_3d)
         
         # Add hybrid approach metadata
         source_summary = {
