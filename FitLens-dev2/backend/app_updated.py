@@ -56,6 +56,41 @@ os.makedirs(IMAGES_DIR, exist_ok=True)
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measurement_results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
+# Global set to track hashes of results to prevent duplicates
+saved_result_hashes = set()
+
+def load_existing_result_hashes():
+    """Load existing result hashes from results.jsonl on startup and remove duplicates."""
+    results_path = os.path.join(RESULTS_DIR, "results.jsonl")
+    if os.path.exists(results_path):
+        unique_entries = []
+        try:
+            with open(results_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            entry = json.loads(line)
+                            if 'data' in entry:
+                                data_str = json.dumps(entry['data'], sort_keys=True)
+                                digest = hashlib.md5(data_str.encode()).hexdigest()
+                                if digest not in saved_result_hashes:
+                                    saved_result_hashes.add(digest)
+                                    unique_entries.append(line.strip())
+                        except json.JSONDecodeError:
+                            continue # Skip malformed lines
+            
+            # Rewrite file with only unique entries
+            with open(results_path, 'w', encoding='utf-8') as f:
+                for entry in unique_entries:
+                    f.write(entry + '\n')
+                    
+            print(f"Loaded {len(saved_result_hashes)} unique result hashes. Removed duplicates if any.")
+        except Exception as e:
+            print(f"Error loading existing result hashes: {e}")
+
+# Load existing hashes when the app starts
+load_existing_result_hashes()
+
 def save_body_measurements(results):
     """Save the final measurement results to a JSONL file."""
     try:
@@ -72,12 +107,22 @@ def save_body_measurements(results):
                     results_copy['results'][view].pop('visualization', None)
                     results_copy['results'][view].pop('mask', None)
 
+        # Check for duplicates before saving
+        data_str = json.dumps(results_copy, sort_keys=True)
+        digest = hashlib.md5(data_str.encode()).hexdigest()
+        
+        if digest in saved_result_hashes:
+            print(f"✓ Measurement results ignored (duplicate entry)")
+            return
+            
+        saved_result_hashes.add(digest)
+
         store_data = {
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "data": results_copy
         }
 
-        with open(results_path, "a") as f:
+        with open(results_path, "a", encoding='utf-8') as f:
             f.write(json.dumps(store_data) + "\n")
         print(f"✓ Measurement results saved to {results_path}")
     except Exception as e:
