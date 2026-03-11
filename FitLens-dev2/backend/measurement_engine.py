@@ -20,6 +20,7 @@ class MeasurementEngine:
                 'arm_length': ('left_shoulder', 'left_wrist'),
                 'chest_circumference': ('left_shoulder', 'right_shoulder'),
                 'waist_circumference': ('left_hip', 'right_hip'),
+                'hip_width': ('left_hip', 'right_hip'),
                 'torso_length': ('left_shoulder', 'left_hip'),
                 'leg_length': ('left_hip', 'left_ankle'),
                 'full_height': ('nose', 'left_ankle'),
@@ -35,6 +36,7 @@ class MeasurementEngine:
             'shoulder_width',
             'chest_circumference',
             'waist_circumference',
+            'hip_width',
         }
         
         # Measurements that use MediaPipe joints
@@ -219,6 +221,9 @@ class MeasurementEngine:
         elif measurement_name == 'waist_circumference':
             left_point = edge_reference_points.get('waist_left')
             right_point = edge_reference_points.get('waist_right')
+        elif measurement_name == 'hip_width':
+            left_point = edge_reference_points.get('hip_left')
+            right_point = edge_reference_points.get('hip_right')
         
         if left_point and right_point and (left_point != (0, 0) or right_point != (0, 0)):
             left_array = np.array(left_point, dtype=np.float32)

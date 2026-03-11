@@ -26,7 +26,7 @@ from flask import Flask, request, jsonify, send_file
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from reference_detector import ReferenceDetector
-from measurement_engine import MeasurementEngine
+from backend.measurement_engine import MeasurementEngine
 from segmentation_model import SegmentationModel
 
 # LandmarkDetector will be imported and initialized on startup
@@ -38,7 +38,7 @@ def get_landmark_detector():
     if landmark_detector is None:
         try:
             print("Loading MediaPipe landmark detector...")
-            from landmark_detector import LandmarkDetector
+            from backend.landmark_detector import LandmarkDetector
             landmark_detector = LandmarkDetector()
             print("✓ LandmarkDetector loaded")
         except Exception as e:
@@ -1363,12 +1363,55 @@ def process_single_view(image, scale_factor, view_name):
         print(f"\n✓ Formatted {len(formatted_measurements)} measurements")
         print(f"Formatted measurements keys: {list(formatted_measurements.keys())}")
         
-        # Create visualization
+        # Create visualization with landmarks and edge-based width overlays
         ld = get_landmark_detector()
         if ld is None:
             vis_image = masked_image.copy()
         else:
             vis_image = ld.draw_landmarks(masked_image.copy(), landmarks)
+
+        # Draw outer edge points and true widths from YOLOv8 mask if available
+        try:
+            if edge_reference_points and edge_reference_points.get('is_valid'):
+                # Colors (BGR)
+                BLUE = (255, 0, 0)
+                ORANGE = (0, 165, 255)
+                PURPLE = (255, 0, 255)
+
+                def _draw_width_line(img, left_pt, right_pt, color):
+                    if not left_pt or not right_pt:
+                        return
+                    lx, ly = int(left_pt[0]), int(left_pt[1])
+                    rx, ry = int(right_pt[0]), int(right_pt[1])
+                    cv2.circle(img, (lx, ly), 5, color, -1)
+                    cv2.circle(img, (rx, ry), 5, color, -1)
+                    cv2.line(img, (lx, ly), (rx, ry), color, 2)
+
+                # Shoulder width (blue)
+                _draw_width_line(
+                    vis_image,
+                    edge_reference_points.get('shoulder_left'),
+                    edge_reference_points.get('shoulder_right'),
+                    BLUE,
+                )
+
+                # Waist width (orange)
+                _draw_width_line(
+                    vis_image,
+                    edge_reference_points.get('waist_left'),
+                    edge_reference_points.get('waist_right'),
+                    ORANGE,
+                )
+
+                # Hip width (purple)
+                _draw_width_line(
+                    vis_image,
+                    edge_reference_points.get('hip_left'),
+                    edge_reference_points.get('hip_right'),
+                    PURPLE,
+                )
+        except Exception as draw_err:
+            print(f"Warning: failed to draw edge-based width overlays: {draw_err}")
         vis_base64 = encode_image(vis_image)
         
         # Encode mask (it's already 2D, but encode_image expects 3D or handles grayscale differently)

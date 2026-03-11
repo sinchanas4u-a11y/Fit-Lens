@@ -956,66 +956,136 @@ class LandmarkDetector:
         mediapipe_landmarks: Optional[np.ndarray] = None
     ) -> Dict:
         """
-        Extract body edge keypoints (shoulder, waist, hip) from body mask.
-        
-        Args:
-            mask: Binary mask from YOLOv8 (255=person, 0=background)
-            mediapipe_landmarks: Optional MediaPipe landmarks for height reference
-            
-        Returns:
-            Dictionary with edge points and height info
+        Extract body edge keypoints (shoulder, waist, hip) from body mask
+        using row-wise scanning as specified:
+
+        - Shoulder width: scan exact shoulder Y-row from MediaPipe
+        - Waist width: search +/- 20 rows around interpolated waist Y and
+          pick the row with the narrowest white span
+        - Hip width: scan from hip_y down to hip_y + 20% of remaining height
+          and pick the row with the widest white span
         """
         if mask is None or mask.size == 0:
             return self._create_empty_edge_points()
-            
-        # Extract contour first
-        contour = self.extract_body_contour(mask)
-        if contour is None or len(contour) < 4:
-            return self._create_empty_edge_points()
-            
+
         image_height, image_width = mask.shape[:2]
-        
+
+        # Ensure binary mask (0 background, 255 person)
+        mask_bin = (mask > 0).astype(np.uint8)
+
         try:
-            # Flatten contour for easier processing
-            contour_points = contour.reshape(-1, 2)
-            
-            # Additional height info: head-to-toe height for scaling
-            # Use top-most (min y) and bottom-most (max y) points from contour
-            contour_y_min = contour_points[:, 1].min()
-            contour_y_max = contour_points[:, 1].max()
-            height_px = contour_y_max - contour_y_min
-            
-            # Determine reference heights
+            # If MediaPipe landmarks are available, use them for Y-levels
             if mediapipe_landmarks is not None and len(mediapipe_landmarks) > 24:
-                # Use MediaPipe landmarks for height guidance
-                # Use average of left (11) and right (12) shoulder height
-                left_shoulder_y = mediapipe_landmarks[11][1]
-                right_shoulder_y = mediapipe_landmarks[12][1]
-                shoulder_height = (left_shoulder_y + right_shoulder_y) / 2
-                
-                right_hip_y = mediapipe_landmarks[24][1]      # Right hip
-                hip_height = right_hip_y
-                waist_height = shoulder_height + (hip_height - shoulder_height) * 0.5
+                shoulder_y_left = mediapipe_landmarks[11][1]
+                shoulder_y_right = mediapipe_landmarks[12][1]
+                hip_y_left = mediapipe_landmarks[23][1]
+                hip_y_right = mediapipe_landmarks[24][1]
+
+                shoulder_y = int(round((shoulder_y_left + shoulder_y_right) / 2.0))
+                hip_y = int(round((hip_y_left + hip_y_right) / 2.0))
+
+                shoulder_y = max(0, min(image_height - 1, shoulder_y))
+                hip_y = max(0, min(image_height - 1, hip_y))
+
+                # Waist Y = shoulder_y + 0.4 * (hip_y - shoulder_y)
+                waist_y_float = shoulder_y + 0.4 * (hip_y - shoulder_y)
+                waist_y = int(round(waist_y_float))
+                waist_y = max(0, min(image_height - 1, waist_y))
             else:
-                # Divide body into thirds
-                contour_y_min = contour_points[:, 1].min()
-                contour_y_max = contour_points[:, 1].max()
-                
-                shoulder_height = contour_y_min + (contour_y_max - contour_y_min) * 0.2
-                waist_height = contour_y_min + (contour_y_max - contour_y_min) * 0.5
-                hip_height = contour_y_min + (contour_y_max - contour_y_min) * 0.8
-            
-            # Extract left-most and right-most points at each height level
-            shoulder_left, shoulder_right = self._get_extreme_points_at_height(
-                contour_points, shoulder_height, self.body_edge_tolerance
+                # Fallback: approximate from mask vertical extent
+                ys = np.where(mask_bin > 0)[0]
+                if ys.size == 0:
+                    return self._create_empty_edge_points()
+                top = int(ys.min())
+                bottom = int(ys.max())
+                height_px = bottom - top
+                if height_px <= 0:
+                    return self._create_empty_edge_points()
+
+                shoulder_y = int(round(top + 0.2 * height_px))
+                waist_y = int(round(top + 0.5 * height_px))
+                hip_y = int(round(top + 0.8 * height_px))
+
+                shoulder_y = max(0, min(image_height - 1, shoulder_y))
+                waist_y = max(0, min(image_height - 1, waist_y))
+                hip_y = max(0, min(image_height - 1, hip_y))
+
+            # Helper to find left/right white pixels on a single row
+            def _span_for_row(y: int) -> Tuple[Tuple[float, float], Tuple[float, float], int]:
+                if y < 0 or y >= image_height:
+                    return (0.0, 0.0), (0.0, 0.0), 0
+                row = mask_bin[y, :]
+                xs = np.where(row > 0)[0]
+                if xs.size == 0:
+                    return (0.0, 0.0), (0.0, 0.0), 0
+                left_x = int(xs.min())
+                right_x = int(xs.max())
+                span = right_x - left_x
+                return (float(left_x), float(y)), (float(right_x), float(y)), span
+
+            # SHOULDER WIDTH: scan exact shoulder_y row, with small vertical fallback
+            shoulder_left = (0.0, 0.0)
+            shoulder_right = (0.0, 0.0)
+            _, _, span = _span_for_row(shoulder_y)
+            if span > 0:
+                shoulder_left, shoulder_right, _ = _span_for_row(shoulder_y)
+            else:
+                # Fallback: search a narrow band around shoulder_y
+                best_span = 0
+                best_left = best_right = (0.0, 0.0)
+                for dy in range(-5, 6):
+                    y = shoulder_y + dy
+                    left, right, s = _span_for_row(y)
+                    if s > best_span:
+                        best_span = s
+                        best_left, best_right = left, right
+                if best_span > 0:
+                    shoulder_left, shoulder_right = best_left, best_right
+
+            # WAIST WIDTH: search +/- 20 rows around waist_y and pick narrowest span
+            waist_left = (0.0, 0.0)
+            waist_right = (0.0, 0.0)
+            best_span = None
+            best_y = None
+            for dy in range(-20, 21):
+                y = waist_y + dy
+                left, right, s = _span_for_row(y)
+                if s <= 0:
+                    continue
+                if best_span is None or s < best_span:
+                    best_span = s
+                    best_y = y
+                    waist_left, waist_right = left, right
+
+            # HIP WIDTH: scan from hip_y to hip_y + 20% of remaining height, pick widest span
+            hip_left = (0.0, 0.0)
+            hip_right = (0.0, 0.0)
+            remaining_height = max(1, image_height - hip_y)
+            hip_scan_end = hip_y + int(round(0.2 * remaining_height))
+            hip_scan_end = max(hip_y, min(image_height - 1, hip_scan_end))
+
+            best_hip_span = 0
+            best_hip_y = None
+            for y in range(hip_y, hip_scan_end + 1):
+                left, right, s = _span_for_row(y)
+                if s > best_hip_span:
+                    best_hip_span = s
+                    best_hip_y = y
+                    hip_left, hip_right = left, right
+
+            # Overall body height from mask for potential re-scaling
+            ys_all = np.where(mask_bin > 0)[0]
+            if ys_all.size > 0:
+                height_px = int(ys_all.max() - ys_all.min())
+            else:
+                height_px = 0
+
+            is_valid = (
+                height_px > 0
+                and shoulder_left != (0.0, 0.0)
+                and shoulder_right != (0.0, 0.0)
             )
-            waist_left, waist_right = self._get_extreme_points_at_height(
-                contour_points, waist_height, self.body_edge_tolerance
-            )
-            hip_left, hip_right = self._get_extreme_points_at_height(
-                contour_points, hip_height, self.body_edge_tolerance
-            )
-            
+
             return {
                 'shoulder_left': shoulder_left,
                 'shoulder_right': shoulder_right,
@@ -1023,14 +1093,13 @@ class LandmarkDetector:
                 'waist_right': waist_right,
                 'hip_left': hip_left,
                 'hip_right': hip_right,
-                'shoulder_height': shoulder_height,
-                'waist_height': waist_height,
-                'hip_height': hip_height,
-                'height_px': height_px,
-                'contours': [contour],
-                'is_valid': True
+                'shoulder_height': float(shoulder_y),
+                'waist_height': float(best_y if best_y is not None else waist_y),
+                'hip_height': float(best_hip_y if best_hip_y is not None else hip_y),
+                'height_px': float(height_px),
+                'is_valid': bool(is_valid),
             }
-        
+
         except Exception as e:
             print(f"Error extracting edge reference points: {e}")
             return self._create_empty_edge_points()
