@@ -122,72 +122,71 @@ class SMPLifyXReader:
         model_path: str = None,
         gender: str = 'neutral'
     ) -> dict:
-        # If measurements provided, fit betas
-        # and regenerate vertices with correct shape
-        if (measurements and model_path and
-            os.path.exists(model_path)):
+        # Always export an A-pose mesh from the body-shape model template.
+        # If beta fitting fails, use zero betas rather than falling back
+        # to the posed SMPLify-X output mesh.
+        if model_path and os.path.exists(model_path):
             try:
                 from processing.beta_calculator import (
+                    BetaCalculator,
                     compute_betas_from_measurements
                 )
-                print("Fitting betas to user measurements...")
-                fitted_betas = (
-                    compute_betas_from_measurements(
+
+                calc = BetaCalculator(model_path=model_path, gender=gender)
+                fitted_betas = np.zeros(10, dtype=float)
+                betas_fitted = False
+
+                if measurements:
+                    print("Fitting betas to user measurements...")
+                    fitted_betas = compute_betas_from_measurements(
                         measurements=measurements,
                         user_height_cm=user_height_cm,
                         model_path=model_path,
                         gender=gender
                     )
-                )
+                    betas_fitted = np.any(np.abs(fitted_betas) > 1e-6)
 
-                # Check if fitting worked
-                if np.any(np.abs(fitted_betas) > 0.05):
-                    from processing.beta_calculator import BetaCalculator
-                    
-                    calc = BetaCalculator(model_path=model_path, gender=gender)
-                    shaped_verts = calc.get_vertices(fitted_betas)
+                shaped_verts = calc.get_vertices(fitted_betas)
 
-                    # Scale to user height
-                    y_min = shaped_verts[:, 1].min()
-                    y_max = shaped_verts[:, 1].max()
-                    h_m = y_max - y_min
-                    scale = user_height_cm / (h_m * 100)
-                    v_sc = shaped_verts * scale * 100
+                y_min = shaped_verts[:, 1].min()
+                y_max = shaped_verts[:, 1].max()
+                h_m = y_max - y_min
+                if h_m <= 0:
+                    raise ValueError("Invalid template height while building A-pose")
 
-                    mid_y = (
-                        v_sc[:, 1].max() +
-                        v_sc[:, 1].min()
-                    ) / 2
-                    v_sc[:, 1] -= mid_y
+                scale = user_height_cm / (h_m * 100)
+                v_sc = shaped_verts * scale * 100
 
-                    print("Using beta-fitted vertices for 3D model")
+                mid_y = (
+                    v_sc[:, 1].max() +
+                    v_sc[:, 1].min()
+                ) / 2
+                v_sc[:, 1] -= mid_y
 
-                    f = self.faces
-                    return {
-                        "x": v_sc[:, 0].tolist(),
-                        "y": v_sc[:, 1].tolist(),
-                        "z": v_sc[:, 2].tolist(),
-                        "i": f[:, 0].tolist(),
-                        "j": f[:, 1].tolist(),
-                        "k": f[:, 2].tolist(),
-                        "metadata": {
-                            "vertex_count": int(len(v_sc)),
-                            "face_count": int(len(f)),
-                            "height_cm": float(
-                                user_height_cm
-                            ),
-                            "source": "SMPLify-X + Beta Fitting",
-                            "betas_fitted": True
-                        }
+                print("Using template A-pose vertices for 3D model")
+
+                f = self.faces
+                return {
+                    "x": v_sc[:, 0].tolist(),
+                    "y": v_sc[:, 1].tolist(),
+                    "z": v_sc[:, 2].tolist(),
+                    "i": f[:, 0].tolist(),
+                    "j": f[:, 1].tolist(),
+                    "k": f[:, 2].tolist(),
+                    "metadata": {
+                        "vertex_count": int(len(v_sc)),
+                        "face_count": int(len(f)),
+                        "height_cm": float(user_height_cm),
+                        "source": "SMPL-X Template A-Pose",
+                        "betas_fitted": bool(betas_fitted)
                     }
-
+                }
             except Exception as e:
-                print(f"Beta fitting failed: {e}")
+                print(f"A-pose generation failed, using raw mesh fallback: {e}")
                 import traceback
                 traceback.print_exc()
-                # Fall through to default export
 
-        # Default: use SMPLify-X mesh as-is
+        # Fallback: use raw SMPLify-X mesh only if model template is unavailable.
         v_sc = self.get_scaled_vertices(user_height_cm)
         f = self.faces
 
