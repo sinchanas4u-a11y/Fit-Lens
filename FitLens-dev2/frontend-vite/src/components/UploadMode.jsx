@@ -3,6 +3,7 @@ import axios from 'axios';
 import './UploadMode.css';
 import ModeSelection from './ModeSelection';
 import ManualLandmarkMarker from './ManualLandmarkMarker';
+import SMPLViewer from './SMPLViewer';
 
 const UploadMode = () => {
   const [frontImage, setFrontImage] = useState(null);
@@ -44,6 +45,41 @@ const UploadMode = () => {
     'Compute Measurements',
     'Display Results'
   ];
+
+  const formatPxValue = (value) => {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) {
+      return '—';
+    }
+    return `${Number(value).toFixed(2)} px`;
+  };
+
+  const getSourceColor = (source) => {
+    if (source === 'SMPL 3D Model') return '#2e7d32';
+    if (source === 'SMPL + MediaPipe') return '#1565c0';
+    if (source === 'Estimated') return '#b26a00';
+    return '#2196f3';
+  };
+
+  const getSmplStatusBadge = (smpl) => {
+    if (smpl?.fitted_to_user) {
+      return {
+        className: 'smpl-fitted',
+        text: smpl.status_text || '✓ Model fitted to your body'
+      };
+    }
+
+    if (smpl?.status === 'active') {
+      return {
+        className: 'smpl-active',
+        text: smpl.status_text || '3D model ready'
+      };
+    }
+
+    return {
+      className: 'smpl-estimated',
+      text: smpl?.status_text || 'Using estimated SMPL body'
+    };
+  };
 
   // Effect to trigger verification when both images are present
   useEffect(() => {
@@ -771,7 +807,7 @@ const UploadMode = () => {
                       {Object.entries(results.results.merged.measurements).map(([name, data]) => (
                         <div key={name} style={{ padding: '8px', borderBottom: '1px solid #ddd' }}>
                           <strong>{name.replace(/_/g, ' ').toUpperCase()}:</strong>{' '}
-                          {data.value_cm} cm ({data.value_px.toFixed(2)} px)
+                          {data.value_cm} cm ({formatPxValue(data.value_px)})
                           {data.label && <span style={{ color: '#666', marginLeft: '10px' }}>({data.label})</span>}
                           {/* Show view source for arm_length and leg_length */}
                           {name === 'arm_length' && <span style={{ color: '#2196f3', marginLeft: '10px', fontWeight: 'bold' }}>[Side View]</span>}
@@ -805,7 +841,7 @@ const UploadMode = () => {
                             <tr key={name}>
                               <td>{data.label || name.replace(/_/g, ' ').toUpperCase()}</td>
                               <td>{data.value_cm} cm</td>
-                              <td>{data.value_px.toFixed(2)} px</td>
+                              <td>{formatPxValue(data.value_px)}</td>
                               <td style={{
                                 fontSize: '12px',
                                 fontWeight: (name === 'arm_length' || name === 'leg_length') ? 'bold' : 'normal',
@@ -828,112 +864,186 @@ const UploadMode = () => {
           {results.mode === 'automatic' && results.results?.front && (
             <div className="view-results">
               <h3>Front View Measurements</h3>
-              
-              {/* Debug: Show front result structure */}
-              {console.log('🔍 Front result:', results.results.front)}
-              
-              {/* Mode badge */}
-              <p style={{
-                color: '#4caf50',
-                fontSize: '14px',
-                fontStyle: 'italic',
-                marginBottom: '15px'
-              }}>
-                🤖 Automatic Mode: AI-powered body measurements
-              </p>
+              {(() => {
+                // Preserve existing panels and table; only compute data used by 3D viewer.
+                const frontResult = results.results.front;
+                const frontMeshData = frontResult?.mesh_data;
+                const apiSmplxStatus = frontResult?.smplx_status || results?.smplx_status;
+                const showModelLoading = processing && frontResult?.smpl?.status === 'active';
+                const hasModel = !!frontMeshData;
+                const canShowPlaceholder = !hasModel && frontResult?.smpl?.status === 'active';
+                const frontSmplStatus = getSmplStatusBadge(frontResult?.smpl);
+                const smplStatusText = apiSmplxStatus === 'success'
+                  ? '✓ Model fitted to your body'
+                  : frontSmplStatus.text;
 
-              {/* Debug: Show raw data */}
-              {console.log('📊 Front measurements:', results.results.front.measurements)}
+                // Enhanced debug logging for mesh_data (Plotly format)
+                console.log('🔍 Front result:', frontResult);
+                console.log('📊 Front mesh_data:', frontMeshData);
+                console.log('📊 mesh_data exists:', !!frontMeshData);
+                console.log('📊 mesh_data.x length:', frontMeshData?.x?.length);
+                console.log('📊 mesh_data.y length:', frontMeshData?.y?.length);
+                console.log('📊 mesh_data.z length:', frontMeshData?.z?.length);
+                console.log('📊 mesh_data.i length:', frontMeshData?.i?.length);
+                console.log('📊 mesh_data.j length:', frontMeshData?.j?.length);
+                console.log('📊 mesh_data.k length:', frontMeshData?.k?.length);
+                console.log('📊 mesh_data.metadata:', frontMeshData?.metadata);
+                console.log('📊 SMPL status:', frontResult?.smpl);
+                console.log('📊 hasModel:', hasModel);
+                console.log('📊 showModelLoading:', showModelLoading);
+                console.log('📊 canShowPlaceholder:', canShowPlaceholder);
 
-              {/* Visualizations */}
-              <div className="visualizations">
-                {/* Original Image */}
-                {results.results.front.original_image && (
-                  <div className="vis-item">
-                    <h4>Original Image</h4>
-                    <img src={results.results.front.original_image} alt="Original front" />
-                  </div>
-                )}
-                <div className="vis-item">
-                  <h4>Segmentation Mask</h4>
-                  <img src={results.results.front.mask} alt="Front mask" />
-                </div>
-                <div className="vis-item">
-                  <h4>Landmark Detection</h4>
-                  <img src={results.results.front.visualization} alt="Front landmarks" />
-                </div>
-              </div>
-
-              {/* Hybrid Approach Info */}
-              {results.results.front.hybrid_approach && results.results.front.hybrid_approach.enabled && (
-                <div style={{
-                  background: '#e8f5e9',
-                  border: '1px solid #4caf50',
-                  padding: '12px',
-                  borderRadius: '5px',
-                  marginBottom: '20px'
-                }}>
-                  <strong>🔬 Hybrid Vision Approach:</strong>
-                  <ul style={{ margin: '8px 0 0 20px', padding: 0 }}>
-                    <li>Edge-based measurements (shoulder, chest, waist, hip widths): {results.results.front.hybrid_approach.source_summary?.segmentation_edge || 0}</li>
-                    <li>MediaPipe joint measurements: {results.results.front.hybrid_approach.source_summary?.mediapipe_landmarks || 0}</li>
-                  </ul>
-                </div>
-              )}
-
-              {/* Measurements Table */}
-              <div className="measurements-table">
-                <h4>Body Measurements ({results.results.front.measurements ? Object.keys(results.results.front.measurements).length : 0} measurements)</h4>
-
-                {/* Debug: Check if measurements exist */}
-                {!results.results.front.measurements || Object.keys(results.results.front.measurements).length === 0 ? (
-                  <div className="error-message">
-                    <strong>Debug:</strong> No measurements found in response.
-                    <pre>{JSON.stringify(results.results.front, null, 2)}</pre>
-                  </div>
-                ) : (
+                return (
                   <>
-                    {/* Simple list view as fallback */}
-                    <div style={{ marginBottom: '20px', padding: '15px', background: '#f9f9f9', borderRadius: '5px' }}>
-                      <h5>Measurements List:</h5>
-                      {Object.entries(results.results.front.measurements).map(([name, data]) => (
-                        <div key={name} style={{ padding: '8px', borderBottom: '1px solid #ddd' }}>
-                          <strong>{name.replace(/_/g, ' ').toUpperCase()}:</strong>{' '}
-                          {data.value_cm} cm ({data.value_px.toFixed(2)} px)
-                          {data.source && <span style={{ color: '#666', marginLeft: '10px', fontSize: '12px' }}>[{data.source}]</span>}
+                    {/* Mode badge */}
+                    <p style={{
+                      color: '#4caf50',
+                      fontSize: '14px',
+                      fontStyle: 'italic',
+                      marginBottom: '15px'
+                    }}>
+                      🤖 Automatic Mode: AI-powered body measurements
+                    </p>
+
+                    {/* Debug: Show raw data */}
+                    {console.log('📊 Front measurements:', frontResult.measurements)}
+
+                    {/* Visualizations */}
+                    <div className="visualizations">
+                      {/* Original Image */}
+                      {frontResult.original_image && (
+                        <div className="vis-item">
+                          <h4>Original Image</h4>
+                          <img src={frontResult.original_image} alt="Original front" />
                         </div>
-                      ))}
+                      )}
+                      <div className="vis-item">
+                        <h4>Segmentation Mask</h4>
+                        <img src={frontResult.mask} alt="Front mask" />
+                      </div>
+                      <div className="vis-item">
+                        <h4>Landmark Detection</h4>
+                        <img src={frontResult.visualization} alt="Front landmarks" />
+                      </div>
                     </div>
 
-                    {/* Table view */}
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Measurement</th>
-                          <th>Value (cm)</th>
-                          <th>Value (px)</th>
-                          <th>Source</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {Object.entries(results.results.front.measurements).map(([name, data]) => {
-                          console.log(`📏 Rendering measurement: ${name}`, data);
-                          const sourceLabel = data.source?.includes('Edge') ? 'Segmentation' : 'MediaPipe';
-                          const sourceColor = data.source?.includes('Edge') ? '#4caf50' : '#2196f3';
-                          return (
-                            <tr key={name}>
-                              <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
-                              <td>{data.value_cm} cm</td>
-                              <td>{data.value_px.toFixed(2)} px</td>
-                              <td style={{ color: sourceColor, fontSize: '12px', fontWeight: 'bold' }}>{sourceLabel}</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                    {/* NEW: Interactive 3D body model viewer */}
+                    <div style={{ marginTop: 24, marginBottom: 24 }}>
+                      {showModelLoading ? (
+                        <div style={{
+                          height: 500,
+                          background: '#1a1a2e',
+                          borderRadius: 12,
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: '#b0b6c5',
+                          border: '1px solid #333'
+                        }}>
+                          <div className="spinner" />
+                          <p style={{ marginTop: 12 }}>Building 3D body model...</p>
+                          <p style={{ fontSize: 12, marginTop: 4 }}>Fitting SMPL model to your measurements</p>
+                        </div>
+                      ) : hasModel ? (
+                        <SMPLViewer
+                          meshData={frontMeshData}
+                          statusText={smplStatusText}
+                          statusDetail={frontResult?.smpl?.pose_applied ? 'Real MediaPipe landmarks and pose applied from your photo' : 'Interactive viewer ready'}
+                        />
+                      ) : canShowPlaceholder ? (
+                        <div style={{
+                          height: 500,
+                          background: '#1a1a2e',
+                          borderRadius: 12,
+                          border: '1px solid #333',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: '#b0b6c5',
+                          fontSize: 13
+                        }}>
+                          3D body model is not available for this result.
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {/* Hybrid Approach Info */}
+                    {frontResult.hybrid_approach && frontResult.hybrid_approach.enabled && (
+                      <div style={{
+                        background: '#e8f5e9',
+                        border: '1px solid #4caf50',
+                        padding: '12px',
+                        borderRadius: '5px',
+                        marginBottom: '20px'
+                      }}>
+                        <strong>🔬 Hybrid Vision Approach:</strong>
+                        <ul style={{ margin: '8px 0 0 20px', padding: 0 }}>
+                          <li>Edge-based measurements (shoulder, chest, waist, hip widths): {frontResult.hybrid_approach.source_summary?.segmentation_edge || 0}</li>
+                          <li>MediaPipe joint measurements: {frontResult.hybrid_approach.source_summary?.mediapipe_landmarks || 0}</li>
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Measurements Table */}
+                    <div className="measurements-table">
+                      <h4>Body Measurements ({frontResult.measurements ? Object.keys(frontResult.measurements).length : 0} measurements)</h4>
+                      <div className={`smpl-status-badge ${frontSmplStatus.className}`}>
+                        {smplStatusText}
+                      </div>
+
+                      {/* Debug: Check if measurements exist */}
+                      {!frontResult.measurements || Object.keys(frontResult.measurements).length === 0 ? (
+                        <div className="error-message">
+                          <strong>Debug:</strong> No measurements found in response.
+                          <pre>{JSON.stringify(frontResult, null, 2)}</pre>
+                        </div>
+                      ) : (
+                        <>
+                          {/* Simple list view as fallback */}
+                          <div style={{ marginBottom: '20px', padding: '15px', background: '#f9f9f9', borderRadius: '5px' }}>
+                            <h5>Measurements List:</h5>
+                            {Object.entries(frontResult.measurements).map(([name, data]) => (
+                              <div key={name} style={{ padding: '8px', borderBottom: '1px solid #ddd' }}>
+                                <strong>{name.replace(/_/g, ' ').toUpperCase()}:</strong>{' '}
+                                {data.value_cm} cm ({formatPxValue(data.value_px)})
+                                {data.source && <span style={{ color: '#666', marginLeft: '10px', fontSize: '12px' }}>[{data.source}]</span>}
+                              </div>
+                            ))}
+                          </div>
+
+                          {/* Table view */}
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Measurement</th>
+                                <th>Value (cm)</th>
+                                <th>Value (px)</th>
+                                <th>Source</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {Object.entries(frontResult.measurements).map(([name, data]) => {
+                                console.log(`📏 Rendering measurement: ${name}`, data);
+                                const sourceLabel = data.source || 'MediaPipe';
+                                const sourceColor = getSourceColor(sourceLabel);
+                                return (
+                                  <tr key={name}>
+                                    <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
+                                    <td>{data.value_cm} cm</td>
+                                    <td>{formatPxValue(data.value_px)}</td>
+                                    <td style={{ color: sourceColor, fontSize: '12px', fontWeight: 'bold' }}>{sourceLabel}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </>
+                      )}
+                    </div>
                   </>
-                )}
-              </div>
+                );
+              })()}
             </div>
           )}
 
@@ -991,6 +1101,9 @@ const UploadMode = () => {
               {/* Measurements Table */}
               <div className="measurements-table">
                 <h4>Body Measurements ({results.results.side.measurements ? Object.keys(results.results.side.measurements).length : 0})</h4>
+                <div className={`smpl-status-badge ${getSmplStatusBadge(results.results.side.smpl).className}`}>
+                  {getSmplStatusBadge(results.results.side.smpl).text}
+                </div>
                 
                 {!results.results.side.measurements || Object.keys(results.results.side.measurements).length === 0 ? (
                   <div className="error-message">
@@ -1008,13 +1121,13 @@ const UploadMode = () => {
                     </thead>
                     <tbody>
                       {Object.entries(results.results.side.measurements).map(([name, data]) => {
-                        const sourceLabel = data.source?.includes('Edge') ? 'Segmentation' : 'MediaPipe';
-                        const sourceColor = data.source?.includes('Edge') ? '#4caf50' : '#2196f3';
+                        const sourceLabel = data.source || 'MediaPipe';
+                        const sourceColor = getSourceColor(sourceLabel);
                         return (
                           <tr key={name}>
                             <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
                             <td>{data.value_cm} cm</td>
-                            <td>{data.value_px.toFixed(2)} px</td>
+                            <td>{formatPxValue(data.value_px)}</td>
                             <td style={{ color: sourceColor, fontSize: '12px', fontWeight: 'bold' }}>{sourceLabel}</td>
                           </tr>
                         );

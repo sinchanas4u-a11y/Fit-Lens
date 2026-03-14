@@ -956,10 +956,11 @@ class LandmarkDetector:
         mediapipe_landmarks: Optional[np.ndarray] = None
     ) -> Dict:
         """
-        Extract body edge keypoints (shoulder, waist, hip) from body mask
+                Extract body edge keypoints (shoulder, chest, waist, hip) from body mask
         using row-wise scanning as specified:
 
         - Shoulder width: scan exact shoulder Y-row from MediaPipe
+                - Chest width: scan chest Y-row between shoulder and hip
         - Waist width: search +/- 20 rows around interpolated waist Y and
           pick the row with the narrowest white span
         - Hip width: scan from hip_y down to hip_y + 20% of remaining height
@@ -987,8 +988,13 @@ class LandmarkDetector:
                 shoulder_y = max(0, min(image_height - 1, shoulder_y))
                 hip_y = max(0, min(image_height - 1, hip_y))
 
-                # Waist Y = shoulder_y + 0.4 * (hip_y - shoulder_y)
-                waist_y_float = shoulder_y + 0.4 * (hip_y - shoulder_y)
+                # Chest Y at midpoint between shoulder and hip rows.
+                chest_y = int(round((shoulder_y + hip_y) / 2.0))
+                chest_y = max(0, min(image_height - 1, chest_y))
+
+                # Waist Y = shoulder_y + 0.7 * (hip_y - shoulder_y)
+                # (equivalent to hip_y - 0.3 * (hip_y - shoulder_y)).
+                waist_y_float = shoulder_y + 0.7 * (hip_y - shoulder_y)
                 waist_y = int(round(waist_y_float))
                 waist_y = max(0, min(image_height - 1, waist_y))
             else:
@@ -1003,10 +1009,12 @@ class LandmarkDetector:
                     return self._create_empty_edge_points()
 
                 shoulder_y = int(round(top + 0.2 * height_px))
-                waist_y = int(round(top + 0.5 * height_px))
+                chest_y = int(round(top + 0.5 * height_px))
+                waist_y = int(round(top + 0.7 * height_px))
                 hip_y = int(round(top + 0.8 * height_px))
 
                 shoulder_y = max(0, min(image_height - 1, shoulder_y))
+                chest_y = max(0, min(image_height - 1, chest_y))
                 waist_y = max(0, min(image_height - 1, waist_y))
                 hip_y = max(0, min(image_height - 1, hip_y))
 
@@ -1023,24 +1031,27 @@ class LandmarkDetector:
                 span = right_x - left_x
                 return (float(left_x), float(y)), (float(right_x), float(y)), span
 
-            # SHOULDER WIDTH: scan exact shoulder_y row, with small vertical fallback
+            # SHOULDER WIDTH: scan exact shoulder_y row.
             shoulder_left = (0.0, 0.0)
             shoulder_right = (0.0, 0.0)
-            _, _, span = _span_for_row(shoulder_y)
-            if span > 0:
-                shoulder_left, shoulder_right, _ = _span_for_row(shoulder_y)
-            else:
-                # Fallback: search a narrow band around shoulder_y
-                best_span = 0
-                best_left = best_right = (0.0, 0.0)
-                for dy in range(-5, 6):
-                    y = shoulder_y + dy
-                    left, right, s = _span_for_row(y)
-                    if s > best_span:
-                        best_span = s
-                        best_left, best_right = left, right
-                if best_span > 0:
-                    shoulder_left, shoulder_right = best_left, best_right
+            shoulder_left, shoulder_right, shoulder_span = _span_for_row(shoulder_y)
+
+            # Fallback to MediaPipe shoulder x when mask row is empty,
+            # but keep the same shoulder_y row so dots and line always align.
+            if shoulder_span <= 0 and mediapipe_landmarks is not None and len(mediapipe_landmarks) > 12:
+                left_x = int(round(mediapipe_landmarks[11][0]))
+                right_x = int(round(mediapipe_landmarks[12][0]))
+                left_x = max(0, min(image_width - 1, left_x))
+                right_x = max(0, min(image_width - 1, right_x))
+                if left_x <= right_x:
+                    shoulder_left = (float(left_x), float(shoulder_y))
+                    shoulder_right = (float(right_x), float(shoulder_y))
+                else:
+                    shoulder_left = (float(right_x), float(shoulder_y))
+                    shoulder_right = (float(left_x), float(shoulder_y))
+
+            # CHEST WIDTH: scan exact chest row.
+            chest_left, chest_right, _ = _span_for_row(chest_y)
 
             # WAIST WIDTH: search +/- 20 rows around waist_y and pick narrowest span
             waist_left = (0.0, 0.0)
@@ -1089,11 +1100,14 @@ class LandmarkDetector:
             return {
                 'shoulder_left': shoulder_left,
                 'shoulder_right': shoulder_right,
+                'chest_left': chest_left,
+                'chest_right': chest_right,
                 'waist_left': waist_left,
                 'waist_right': waist_right,
                 'hip_left': hip_left,
                 'hip_right': hip_right,
                 'shoulder_height': float(shoulder_y),
+                'chest_height': float(chest_y),
                 'waist_height': float(best_y if best_y is not None else waist_y),
                 'hip_height': float(best_hip_y if best_hip_y is not None else hip_y),
                 'height_px': float(height_px),
@@ -1145,11 +1159,14 @@ class LandmarkDetector:
         return {
             'shoulder_left': (0.0, 0.0),
             'shoulder_right': (0.0, 0.0),
+            'chest_left': (0.0, 0.0),
+            'chest_right': (0.0, 0.0),
             'waist_left': (0.0, 0.0),
             'waist_right': (0.0, 0.0),
             'hip_left': (0.0, 0.0),
             'hip_right': (0.0, 0.0),
             'shoulder_height': 0.0,
+            'chest_height': 0.0,
             'waist_height': 0.0,
             'hip_height': 0.0,
             'is_valid': False

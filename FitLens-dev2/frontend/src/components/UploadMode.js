@@ -35,6 +35,96 @@ function UploadMode({ onBack }) {
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
 
+  const render3DModel = (meshData) => {
+    const section = document.getElementById(
+      'smpl-viewer-section'
+    );
+    const div = document.getElementById(
+      'smpl-3d-viewer'
+    );
+    const statusEl = document.getElementById(
+      'smpl-status-text'
+    );
+
+    if (!meshData ||
+        !meshData.x ||
+        meshData.x.length === 0) {
+      if (statusEl) {
+        statusEl.textContent =
+          '3D model unavailable';
+      }
+      return;
+    }
+
+    // Show the section
+    if (section) {
+      section.style.display = 'block';
+    }
+
+    // @ts-ignore
+    if (window.Plotly) {
+      // @ts-ignore
+      window.Plotly.newPlot(div, [{
+        type:        'mesh3d',
+        x:           meshData.x,
+        y:           meshData.y,
+        z:           meshData.z,
+        i:           meshData.i,
+        j:           meshData.j,
+        k:           meshData.k,
+        color:       '#e8b89a',
+        opacity:     1.0,
+        flatshading: false,
+        lighting: {
+          ambient:   0.7,
+          diffuse:   0.8,
+          specular:  0.3,
+          roughness: 0.5,
+          fresnel:   0.2
+        },
+        lightposition: {
+          x: 100, y: 200, z: 150
+        }
+      }], {
+        paper_bgcolor: '#1a1a2e',
+        margin: { l:0, r:0, t:0, b:0 },
+        scene: {
+          bgcolor:    '#1a1a2e',
+          aspectmode: 'data',
+          camera: {
+            eye: { x:0.0, y:0.3, z:2.2 },
+            up:  { x:0,   y:1,   z:0   }
+          },
+          xaxis: {
+            visible:false, showgrid:false,
+            showbackground:false
+          },
+          yaxis: {
+            visible:false, showgrid:false,
+            showbackground:false
+          },
+          zaxis: {
+            visible:false, showgrid:false,
+            showbackground:false
+          }
+        }
+      }, {
+        responsive:  true,
+        displaylogo: false
+      });
+    }
+
+    if (statusEl) {
+      statusEl.textContent =
+        '3D model from SMPLify-X · '
+        + (meshData.metadata?.height_cm
+           ? `Height: ${meshData.metadata.height_cm}cm`
+           : '');
+    }
+
+    console.log('3D model rendered OK');
+  };
+
   const handleImageUpload = (type, event) => {
     const file = event.target.files[0];
     if (file) {
@@ -66,6 +156,9 @@ function UploadMode({ onBack }) {
       });
 
       setResults(response.data);
+      if (response.data.mesh_data) {
+        setTimeout(() => render3DModel(response.data.mesh_data), 100);
+      }
     } catch (err) {
       setError(err.response?.data?.error || 'Processing failed');
     } finally {
@@ -276,6 +369,46 @@ function UploadMode({ onBack }) {
                       />
                     </div>
                   )}
+
+                  {/* 3D Body Model */}
+                  <div id="smpl-viewer-section"
+                       style={{display:'none', marginTop:'24px'}}>
+
+                    <div style={{background:'#1a1a2e',
+                                borderRadius:'12px',
+                                overflow:'hidden',
+                                border:'1px solid #333'}}>
+
+                      <div style={{padding:'12px 16px',
+                                  color:'#fff',
+                                  fontWeight:'600',
+                                  fontSize:'14px',
+                                  borderBottom:'1px solid #333',
+                                  display:'flex',
+                                  justifyContent:'space-between'}}>
+                        <span>3D BODY MODEL</span>
+                        <span style={{color:'#888',
+                                     fontSize:'12px',
+                                     fontWeight:'400'}}>
+                          Drag to rotate · Scroll to zoom
+                        </span>
+                      </div>
+
+                      <div id="smpl-3d-viewer"
+                           style={{width:'100%', height:'520px',
+                                  background:'#1a1a2e'}}>
+                      </div>
+
+                      <div style={{textAlign:'center',
+                                  padding:'8px',
+                                  fontSize:'12px',
+                                  color:'#888',
+                                  borderTop:'1px solid #333'}}>
+                        <span id="smpl-status-text"></span>
+                      </div>
+
+                    </div>
+                  </div>
                 </>
               )}
             </Paper>

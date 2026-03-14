@@ -189,3 +189,15 @@ site/
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+smplify-x/
+smplify-x-new/
+*.pkl
+*.pt
+*.onnx
+*.obj
+output/
+.venv/
+FitLens-dev2/models/*.pkl
+FitLens-dev2/models/**/*.pkl
+FitLens-dev2/models/**/*.npz
+FitLens-dev2/models/*.npz

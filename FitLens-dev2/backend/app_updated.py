@@ -28,6 +28,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from reference_detector import ReferenceDetector
 from backend.measurement_engine import MeasurementEngine
 from segmentation_model import SegmentationModel
+from smpl.smpl_pipeline import run_smpl_pipeline
+from smpl.smpl_estimator import SMPLEstimator
+from processing.smplifyx_runner import run_smplifyx
+from processing.smplifyx_reader import SMPLifyXReader
 
 # LandmarkDetector will be imported and initialized on startup
 landmark_detector = None
@@ -434,23 +438,26 @@ def handle_process_selection(data):
                         live_session.scale_factor = scale
 
             engine_view = _normalize_engine_view(view)
-            auto_visuals = process_single_view(img, scale, engine_view)
+            auto_visuals = process_single_view(img, scale, engine_view, user_height_cm=user_height_cm)
             visualization_b64 = auto_visuals.get('visualization') if auto_visuals.get('success') else results.get('visualization')
             mask_b64 = auto_visuals.get('mask') if auto_visuals.get('success') else results.get('mask')
+            smpl_meta = auto_visuals.get('smpl') if auto_visuals.get('success') else None
 
             # Store in session using normalized payload (base64 strings)
             live_session.processed_results[view] = {
                 'measurements': results.get('measurements', {}),
                 'visualization': visualization_b64,
                 'original_image': image_data,
-                'mask': mask_b64
+                'mask': mask_b64,
+                'smpl': smpl_meta,
             }
             
             emit('selection_processed', {
                 'view': view,
                 'next_view': get_next_view(view),
                 'visualization': visualization_b64,
-                'measurements': results.get('measurements', {})
+                'measurements': results.get('measurements', {}),
+                'smpl': smpl_meta,
             })
 
         else: # auto
@@ -476,9 +483,9 @@ def handle_process_selection(data):
                             cm_value, confidence, source = data
                             px_value = cm_value / scale_factor if scale_factor and scale_factor > 0 else 0
                             formatted[name] = {
-                                'value_cm': round(float(cm_value), 2),
-                                'value_px': round(float(px_value), 2),
-                                'confidence': round(float(confidence), 3),
+                                'value_cm': round(float(cm_value or 0), 2),
+                                'value_px': round(float(px_value or 0), 2),
+                                'confidence': round(float(confidence or 0), 3),
                                 'source': source,
                                 'label': name.replace('_', ' ').title(),
                             }
@@ -497,7 +504,7 @@ def handle_process_selection(data):
                     live_session.scale_factor = scale
 
             engine_view = _normalize_engine_view(view)
-            auto_results = process_single_view(img, scale, engine_view)
+            auto_results = process_single_view(img, scale, engine_view, user_height_cm=user_height_cm)
             if not auto_results.get('success'):
                 emit('selection_processed', {
                     'error': auto_results.get('error', 'Auto processing failed'),
@@ -509,7 +516,8 @@ def handle_process_selection(data):
                 'measurements': auto_results.get('measurements', {}),
                 'visualization': auto_results.get('visualization'),
                 'original_image': image_data,
-                'mask': auto_results.get('mask')
+                'mask': auto_results.get('mask'),
+                'smpl': auto_results.get('smpl'),
             }
             live_session.processed_results[view] = res
             
@@ -517,7 +525,8 @@ def handle_process_selection(data):
                 'view': view,
                 'next_view': get_next_view(view),
                 'visualization': res.get('visualization'),
-                'measurements': res.get('measurements', {})
+                'measurements': res.get('measurements', {}),
+                'smpl': res.get('smpl'),
             })
 
     except Exception as e:
@@ -549,6 +558,242 @@ def _normalize_engine_view(view_name):
     return 'front' if view_name == 'back' else view_name
 
 
+def _estimate_height_from_landmarks_px(landmarks):
+    """Estimate body height in pixels using nose-to-ankle span."""
+    if landmarks is None or len(landmarks) < 29:
+        return 0.0
+    try:
+        nose = landmarks[0]
+        left_ankle = landmarks[27]
+        right_ankle = landmarks[28]
+        return float(max(left_ankle[1], right_ankle[1]) - nose[1])
+    except Exception:
+        return 0.0
+
+
+def _landmarks_to_smpl_list(landmarks, image_shape):
+    """Convert landmarks to SMPL input format (33 dict entries with normalized x/y)."""
+    if landmarks is None or len(landmarks) < 33:
+        return []
+
+    h, w = image_shape[:2]
+    smpl_landmarks = []
+    for idx in range(33):
+        lm = landmarks[idx]
+        x = float(lm[0] or 0.0) if lm is not None and len(lm) > 0 else 0.0
+        y = float(lm[1] or 0.0) if lm is not None and len(lm) > 1 else 0.0
+        visibility = float(lm[2] or 1.0) if lm is not None and len(lm) > 2 else 1.0
+
+        # Normalize only when x/y appear to be in pixels.
+        if x > 1.5 or y > 1.5:
+            x = x / float(w or 1) if w > 0 else 0.0
+            y = y / float(h or 1) if h > 0 else 0.0
+
+        smpl_landmarks.append({
+            'x': float(max(0.0, min(1.0, x or 0.0))),
+            'y': float(max(0.0, min(1.0, y or 0.0))),
+            'visibility': float(max(0.0, min(1.0, visibility or 0.0))),
+        })
+
+    return smpl_landmarks
+
+
+def run_gender_detection(image):
+    """Best-effort gender detection. Returns male/female/neutral."""
+    try:
+        if face_verifier is None or not getattr(face_verifier, 'is_ready', False):
+            return 'neutral'
+        if not hasattr(face_verifier, 'app') or face_verifier.app is None:
+            return 'neutral'
+
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        faces = face_verifier.app.get(rgb)
+        if not faces:
+            return 'neutral'
+
+        face = max(
+            faces,
+            key=lambda f: float((f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+        )
+
+        raw_gender = getattr(face, 'sex', None)
+        if raw_gender is None:
+            raw_gender = getattr(face, 'gender', None)
+
+        if isinstance(raw_gender, str):
+            g = raw_gender.strip().lower()
+            if g in ('male', 'm', 'man'):
+                return 'male'
+            if g in ('female', 'f', 'woman'):
+                return 'female'
+
+        if isinstance(raw_gender, (int, float)):
+            return 'male' if float(raw_gender or 0) >= 0.5 else 'female'
+    except Exception:
+        pass
+
+    return 'neutral'
+
+
+def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success):
+    """Merge MediaPipe and SMPL measurements with graceful fallback behavior."""
+
+    def _mp_entry(name):
+        return mp_measurements.get(name, {}) if isinstance(mp_measurements, dict) else {}
+
+    def _mp_cm(name, fallback=None):
+        val = _mp_entry(name).get('value_cm')
+        return val if val is not None else fallback
+
+    def _mp_px(name, fallback=None):
+        val = _mp_entry(name).get('value_px')
+        return val if val is not None else fallback
+
+    chest_width_cm = _mp_cm('chest_width', _mp_cm('chest_circumference'))
+    waist_width_cm = _mp_cm('waist_width', _mp_cm('waist_circumference'))
+    hip_width_cm = _mp_cm('hip_width')
+
+    if smpl_success:
+        chest_circ = smpl_m.get('chest_circumference', chest_width_cm)
+        waist_circ = smpl_m.get('waist_circumference', waist_width_cm)
+        hip_circ = smpl_m.get('hip_circumference', hip_width_cm)
+        circ_source = 'SMPL 3D Model'
+    else:
+        chest_circ = round(chest_width_cm * 3.0, 2) if chest_width_cm is not None else None
+        waist_circ = round(waist_width_cm * 3.0, 2) if waist_width_cm is not None else None
+        hip_circ = round(hip_width_cm * 3.0, 2) if hip_width_cm is not None else None
+        circ_source = 'Estimated'
+
+    merged = {
+        'full_height': {
+            'value_cm': _mp_cm('full_height'),
+            'value_px': _mp_px('full_height'),
+            'source': 'MediaPipe',
+            'label': 'Full Height',
+        },
+        'arm_length': {
+            'value_cm': _mp_cm('arm_length'),
+            'value_px': _mp_px('arm_length'),
+            'source': 'MediaPipe',
+            'label': 'Arm Length',
+        },
+        'leg_length': {
+            'value_cm': _mp_cm('leg_length'),
+            'value_px': _mp_px('leg_length'),
+            'source': 'MediaPipe',
+            'label': 'Leg Length',
+        },
+        'torso_length': {
+            'value_cm': _mp_cm('torso_length'),
+            'value_px': _mp_px('torso_length'),
+            'source': 'MediaPipe',
+            'label': 'Torso Length',
+        },
+        'chest_circumference': {
+            'value_cm': chest_circ,
+            'value_px': None,
+            'source': circ_source,
+            'label': 'Chest Circumference',
+        },
+        'waist_circumference': {
+            'value_cm': waist_circ,
+            'value_px': None,
+            'source': circ_source,
+            'label': 'Waist Circumference',
+        },
+        'hip_circumference': {
+            'value_cm': hip_circ,
+            'value_px': None,
+            'source': circ_source,
+            'label': 'Hip Circumference',
+        },
+        'shoulder_width': {
+            'value_cm': smpl_m.get('shoulder_width', _mp_cm('shoulder_width')),
+            'value_px': _mp_px('shoulder_width'),
+            'source': 'SMPL + MediaPipe',
+            'label': 'Shoulder Width',
+        },
+        'chest_width': {
+            'value_cm': smpl_m.get('chest_width', chest_width_cm),
+            'value_px': _mp_px('chest_width', _mp_px('chest_circumference')),
+            'source': 'SMPL + MediaPipe',
+            'label': 'Chest Width',
+        },
+        'waist_width': {
+            'value_cm': smpl_m.get('waist_width', waist_width_cm),
+            'value_px': _mp_px('waist_width', _mp_px('waist_circumference')),
+            'source': 'SMPL + MediaPipe',
+            'label': 'Waist Width',
+        },
+        'hip_width': {
+            'value_cm': smpl_m.get('hip_width', hip_width_cm),
+            'value_px': _mp_px('hip_width'),
+            'source': 'SMPL + MediaPipe',
+            'label': 'Hip Width',
+        },
+    }
+
+    # Keep any additional MediaPipe values that are not part of the merged schema.
+    for key, value in mp_measurements.items():
+        if key not in merged:
+            merged[key] = value
+
+    cleaned = {}
+    for key, value in merged.items():
+        if not isinstance(value, dict):
+            continue
+        cm = value.get('value_cm')
+        px = value.get('value_px')
+        if cm is None and px is None:
+            continue
+        cleaned[key] = value
+
+    return cleaned, circ_source
+
+
+def _build_smpl_mesh_data(smpl_result, user_height_cm, gender='neutral'):
+    """Build frontend-ready mesh data from fitted SMPL betas."""
+    try:
+        if not smpl_result or not smpl_result.get('success'):
+            return None
+
+        betas = smpl_result.get('betas')
+        if betas is None or user_height_cm is None or float(user_height_cm) <= 0:
+            return None
+
+        estimator = SMPLEstimator(gender=gender or 'neutral')
+        betas_arr = np.array(betas, dtype=np.float32)
+
+        vertices = estimator.get_vertices(betas_arr)
+        faces = np.asarray(estimator.faces, dtype=np.int32)
+
+        y_min = float(vertices[:, 1].min() or 0.0)
+        y_max = float(vertices[:, 1].max() or 0.0)
+        smpl_height_cm = (y_max - y_min) * 100.0
+        if smpl_height_cm <= 0:
+            return None
+
+        try:
+            scale = float(user_height_cm or 0) / smpl_height_cm
+        except (TypeError, ValueError, ZeroDivisionError):
+            scale = 0.0
+        vertices_cm = vertices * 100.0 * scale
+
+        return {
+            'vertices': vertices_cm.astype(np.float32).reshape(-1).tolist(),
+            'faces': faces.reshape(-1).tolist(),
+            'metadata': {
+                'vertex_count': int(vertices_cm.shape[0]),
+                'face_count': int(faces.shape[0]),
+                'height_cm': float(user_height_cm or 0),
+                'gender': gender or 'neutral',
+            },
+        }
+    except Exception as mesh_err:
+        print(f"Warning: failed to build SMPL mesh data: {mesh_err}")
+        return None
+
+
 def _ensure_pixel_landmarks(landmarks, image_shape):
     """
     Ensure landmarks are in pixel coordinates.
@@ -563,13 +808,13 @@ def _ensure_pixel_landmarks(landmarks, image_shape):
     h, w = image_shape[:2]
     lm = np.array(landmarks, dtype=np.float32).copy()
 
-    max_x = float(np.max(np.abs(lm[:, 0]))) if lm.shape[1] >= 1 else 0.0
-    max_y = float(np.max(np.abs(lm[:, 1]))) if lm.shape[1] >= 2 else 0.0
+    max_x = float(np.max(np.abs(lm[:, 0])) or 0.0) if lm.shape[1] >= 1 else 0.0
+    max_y = float(np.max(np.abs(lm[:, 1])) or 0.0) if lm.shape[1] >= 2 else 0.0
 
     # Normalized landmarks are typically <= 1.0 (allow small tolerance).
     if max_x <= 1.5 and max_y <= 1.5:
-        lm[:, 0] = lm[:, 0] * float(w)
-        lm[:, 1] = lm[:, 1] * float(h)
+        lm[:, 0] = lm[:, 0] * float(w or 1)
+        lm[:, 1] = lm[:, 1] * float(h or 1)
 
     return lm
 
@@ -628,9 +873,9 @@ def compute_measurements(image, landmarks, scale_factor, view_name):
             cm_value, confidence, source = data
             px_value = cm_value / scale_factor if scale_factor and scale_factor > 0 else 0
             formatted[name] = {
-                'value_cm': round(float(cm_value), 2),
-                'value_px': round(float(px_value), 2),
-                'confidence': round(float(confidence), 3),
+                'value_cm': round(float(cm_value or 0), 2),
+                'value_px': round(float(px_value or 0), 2),
+                'confidence': round(float(confidence or 0), 3),
                 'source': source,
                 'label': name.replace('_', ' ').title(),
             }
@@ -799,37 +1044,41 @@ def process_all_captured_images():
                 visualization_b64 = res.get('visualization')
                 mask_b64 = res.get('mask')
                 measurements = res.get('measurements', {})
+                smpl_meta = res.get('smpl')
 
                 # If any output is missing, rebuild from the same upload-mode pipeline.
                 if (not visualization_b64 or not mask_b64 or not measurements) and v in live_session.captured_images:
                     img = decode_image(live_session.captured_images[v])
                     if img is not None:
                         engine_view = _normalize_engine_view(v)
-                        rebuilt = process_single_view(img, scale, engine_view)
+                        rebuilt = process_single_view(img, scale, engine_view, user_height_cm=live_session.user_height_cm)
                         if rebuilt.get('success'):
                             visualization_b64 = visualization_b64 or rebuilt.get('visualization')
                             mask_b64 = mask_b64 or rebuilt.get('mask')
                             measurements = measurements or rebuilt.get('measurements', {})
+                            smpl_meta = smpl_meta or rebuilt.get('smpl')
                 
                 # Results are stored in normalized base64 format
                 final_results[v] = {
                     'measurements': measurements,
                     'visualization': visualization_b64,
                     'original_image': res.get('original_image') or live_session.captured_images.get(v),
-                    'mask': mask_b64
+                    'mask': mask_b64,
+                    'smpl': smpl_meta,
                 }
             elif v in live_session.captured_images:
                 # Fallback to auto-processing if not already processed
                 img = decode_image(live_session.captured_images[v])
                 if img is not None:
                     engine_view = _normalize_engine_view(v)
-                    auto_results = process_single_view(img, scale, engine_view)
+                    auto_results = process_single_view(img, scale, engine_view, user_height_cm=live_session.user_height_cm)
                     if auto_results.get('success'):
                         final_results[v] = {
                             'measurements': auto_results.get('measurements', {}),
                             'visualization': auto_results.get('visualization'),
                             'original_image': live_session.captured_images.get(v),
-                            'mask': auto_results.get('mask')
+                            'mask': auto_results.get('mask'),
+                            'smpl': auto_results.get('smpl'),
                         }
 
         # 3. Emit final complete payload
@@ -945,8 +1194,8 @@ def verify_identity():
         response_data = {
             'success': True,
             'verified': verified,
-            'similarity': float(similarity),
-            'threshold': float(threshold),
+            'similarity': float(similarity or 0),
+            'threshold': float(threshold or 0.65),
             'issues': issues
         }
         
@@ -1102,12 +1351,28 @@ def process_images():
             save_measurement_image(data.get('side_image'), 'side', source='upload')
         
         # Get user's height
-        user_height_cm = float(data.get('user_height', 0))
+        # Get user's height safely
+        try:
+            # Priority 1: request.json.get('user_height')
+            user_height_cm = float(data.get('user_height') or 0)
+            
+            # Priority 2: if still 0, check request.json.get('height')
+            if user_height_cm <= 0:
+                user_height_cm = float(data.get('height') or 0)
+                
+            # Priority 3: check form data if available
+            if user_height_cm <= 0 and request.form.get('height'):
+                user_height_cm = float(request.form.get('height') or 0)
+                
+            # Fallback
+            if user_height_cm <= 0:
+                user_height_cm = 170.0
+                print("⚠ User height missing or invalid, using default 170.0 cm")
+        except (TypeError, ValueError):
+            user_height_cm = 170.0
+            print("⚠ User height parse error, using default 170.0 cm")
         
-        if user_height_cm <= 0:
-            return jsonify({'error': 'User height is required', 'step': 1}), 400
-        
-        print(f"✓ User height: {user_height_cm} cm")
+        print(f"✓ Final user height for processing: {user_height_cm} cm")
         
         print("\n" + "="*60)
         print("STEP 2: CALCULATING SCALE USING USER HEIGHT")
@@ -1160,7 +1425,7 @@ def process_images():
         print("="*60)
         
         front_results = process_single_view(
-            front_img, scale_factor, 'front'
+            front_img, scale_factor, 'front', user_height_cm=user_height_cm
         )
         
         results = {
@@ -1174,15 +1439,105 @@ def process_images():
             print("="*60)
             
             side_results = process_single_view(
-                side_img, scale_factor, 'side'
+                side_img, scale_factor, 'side', user_height_cm=user_height_cm
             )
             results['side'] = side_results
+
+        # Run SMPLify-X and merge mesh + key circumference measurements.
+        mesh_data = None
+        smplx_status = 'unavailable'
+        smplx_error = None
+        smplx_meas = {}
+        front_tmp_path = None
+        side_tmp_path = None
+        try:
+            print("\n" + "=" * 60)
+            print("STEP 5.5: RUNNING SMPLIFY-X")
+            print("=" * 60)
+
+            with tempfile.NamedTemporaryFile(suffix='_front.jpg', delete=False) as tf:
+                front_tmp_path = tf.name
+            cv2.imwrite(front_tmp_path, front_img)
+
+            if side_img is not None:
+                with tempfile.NamedTemporaryFile(suffix='_side.jpg', delete=False) as ts:
+                    side_tmp_path = ts.name
+                cv2.imwrite(side_tmp_path, side_img)
+
+            smplifyx_result = run_smplifyx(
+                front_image_path=front_tmp_path,
+                side_image_path=side_tmp_path if side_tmp_path else None,
+                timeout_seconds=120,
+            )
+
+            if smplifyx_result.get('success') and smplifyx_result.get('mesh_path'):
+                reader = SMPLifyXReader(smplifyx_result['mesh_path'])
+                smplx_meas = reader.extract_measurements(user_height_cm)
+                mesh_data = reader.export_for_plotly(user_height_cm)
+                smplx_status = 'success'
+                print("✓ SMPLify-X mesh + measurements ready")
+            else:
+                smplx_status = 'failed'
+                smplx_error = smplifyx_result.get('error')
+                print(f"✗ SMPLify-X failed: {smplx_error}")
+
+        except Exception as smplx_exc:
+            smplx_status = 'error'
+            smplx_error = str(smplx_exc)
+            print(f"✗ SMPLify-X exception: {smplx_exc}")
+        finally:
+            for tmp_path in (front_tmp_path, side_tmp_path):
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+        # Merge SMPLify-X circumferences into the existing measurement schema.
+        if front_results.get('success') and front_results.get('measurements'):
+            source_label = 'SMPLify-X' if smplx_status == 'success' else 'MediaPipe'
+            for key in ('chest_circumference', 'waist_circumference', 'hip_circumference'):
+                smplx_val = smplx_meas.get(key)
+                if smplx_status == 'success' and smplx_val is not None and key in front_results['measurements']:
+                    current    = front_results['measurements'][key]
+                    value_px   = current.get('value_px')   or 0
+                    confidence = current.get('confidence') or 1.0
+                    try:
+                        front_results['measurements'][key] = {
+                            **current,
+                            'value_cm':   round(float(smplx_val),  2),
+                            'value_px':   round(float(value_px),   2),
+                            'confidence': round(float(confidence), 4),
+                            'source':       source_label,
+                            'source_raw':   source_label,
+                            'source_group': source_label,
+                            'formula': (
+                              f"SMPLify-X mesh fit "
+                              f"({smplx_val:.2f} cm)"
+                            ),
+                        }
+                    except (TypeError, ValueError) as e:
+                        print(f"  Skipping {key} merge: {e}")
+                        continue
+
+            if mesh_data is not None:
+                front_results['mesh_data'] = mesh_data
+
+            front_results['smplx_status'] = smplx_status
+            front_results['smplx_error'] = smplx_error
+            front_results['smplx_measurements'] = smplx_meas
         
         # Prepare final response
         print("\n" + "="*60)
         print("STEP 6: RETURNING MEASUREMENTS AS JSON")
         print("="*60)
-        
+
+        # Debug: Log mesh_data availability
+        print(f"\n🔍 DEBUG: mesh_data in front_results: {'mesh_data' in front_results if isinstance(front_results, dict) else 'N/A'}")
+        if isinstance(front_results, dict) and front_results.get('mesh_data'):
+            print(f"🔍 DEBUG: front_results['mesh_data'] vertices count: {len(front_results['mesh_data'].get('vertices', []))}")
+            print(f"🔍 DEBUG: front_results['mesh_data'] faces count: {len(front_results['mesh_data'].get('faces', []))}")
+
         # Add original images to results for display
         if front_results.get('success'):
             front_results['original_image'] = data.get('front_image')
@@ -1194,14 +1549,31 @@ def process_images():
             'mode': 'automatic',  # Set mode for frontend display
             'calibration': {
                 'user_height_cm': user_height_cm,
-                'height_in_image_px': float(height_px),
-                'scale_factor': float(scale_factor),
+                'height_in_image_px': float(height_px or 0),
+                'scale_factor': float(scale_factor or 0),
                 'formula': f'{user_height_cm} cm ÷ {height_px:.2f} px = {scale_factor:.4f} cm/px',
                 'description': f'1 pixel = {scale_factor:.4f} cm'
             },
-            'results': results
+            'results': results,
+            'mesh_data': mesh_data if mesh_data is not None else (front_results.get('mesh_data') if isinstance(front_results, dict) else None),
+            'smplx_status': smplx_status,
+            'smplx_error': smplx_error,
         }
-        
+
+        # Debug: Log response structure
+        print(f"\n🔍 DEBUG: Response structure:")
+        print(f"  - results.front exists: {'front' in results}")
+        print(f"  - results.front.mesh_data exists: {'mesh_data' in results.get('front', {})}")
+        print(f"  - Top-level mesh_data exists: {response['mesh_data'] is not None}")
+        if response['mesh_data']:
+            md = response['mesh_data']
+            print(f"  - Top-level mesh_data x length: {len(md.get('x', []))}")
+            print(f"  - Top-level mesh_data y length: {len(md.get('y', []))}")
+            print(f"  - Top-level mesh_data z length: {len(md.get('z', []))}")
+            print(f"  - Top-level mesh_data i length: {len(md.get('i', []))}")
+            print(f"  - Top-level mesh_data j length: {len(md.get('j', []))}")
+            print(f"  - Top-level mesh_data k length: {len(md.get('k', []))}")
+
         # Store results persistently
         save_body_measurements(response)
         
@@ -1219,7 +1591,7 @@ def process_images():
         }), 500
 
 
-def process_single_view(image, scale_factor, view_name):
+def process_single_view(image, scale_factor, view_name, user_height_cm=None):
     """
     Process a single view through the complete pipeline:
     Step 3: YOLOv8 segmentation
@@ -1270,6 +1642,50 @@ def process_single_view(image, scale_factor, view_name):
             }
         
         print(f"✓ Detected {len(landmarks)} body landmarks")
+
+        # SMPL integration: run immediately after MediaPipe landmarks are available.
+        detected_gender = run_gender_detection(image)
+        landmarks_list = _landmarks_to_smpl_list(landmarks, image.shape)
+        
+        # Guard effective_height_cm against None
+        try:
+            effective_height_cm = float(user_height_cm) if user_height_cm and float(user_height_cm) > 0 else 0.0
+        except (TypeError, ValueError):
+            effective_height_cm = 0.0
+
+        if effective_height_cm <= 0 and scale_factor:
+            try:
+                if float(scale_factor or 0) > 0:
+                    estimated_height_px = _estimate_height_from_landmarks_px(landmarks)
+                    if estimated_height_px > 0:
+                        effective_height_cm = float(scale_factor or 0) * float(estimated_height_px or 0)
+            except (TypeError, ValueError):
+                pass
+
+        smpl_success = False
+        smpl_m = {}
+        smpl_error = None
+        smpl_mesh_data = None
+        smpl_fit_info = {}
+        if len(landmarks_list) == 33 and effective_height_cm > 0:
+            h, w = image.shape[:2]
+            smpl_result = run_smpl_pipeline(
+                landmarks_2d=landmarks_list,
+                image_width=w,
+                image_height=h,
+                user_height_cm=effective_height_cm,
+                gender=detected_gender or 'neutral'
+            )
+            smpl_success = bool(smpl_result.get('success'))
+            if smpl_success:
+                smpl_m = smpl_result.get('measurements', {}) or {}
+                smpl_fit_info = smpl_result.get('fit', {}) or {}
+                # Use mesh_data directly from SMPL pipeline (already computed and scaled)
+                smpl_mesh_data = smpl_result.get('mesh_data')
+            else:
+                smpl_error = smpl_result.get('error')
+        else:
+            smpl_error = 'Insufficient data for SMPL (height or landmarks unavailable)'
         
         # Extract edge reference points from segmentation mask for hybrid approach
         edge_reference_points = None
@@ -1333,8 +1749,8 @@ def process_single_view(image, scale_factor, view_name):
         if measurements:
             print(f"✓ Measurement keys: {list(measurements.keys())[:5]}...")  # Show first 5
         
-        # Format measurements for JSON response
-        formatted_measurements = {}
+        # Format MediaPipe measurements first, then merge with SMPL outputs.
+        mp_measurements = {}
         print(f"\n📊 Raw measurements received: {len(measurements)} items")
         print(f"Measurements type: {type(measurements)}")
         print(f"Measurements keys: {list(measurements.keys()) if measurements else 'None'}")
@@ -1345,22 +1761,38 @@ def process_single_view(image, scale_factor, view_name):
             print(f"    Data value: {data}")
             
             if isinstance(data, tuple) and len(data) == 3:
-                cm_value, confidence, source = data
-                pixel_distance = cm_value / scale_factor if scale_factor > 0 else 0
-                
-                formatted_measurements[name] = {
-                    'value_cm': round(float(cm_value), 2),
-                    'value_px': round(float(pixel_distance), 2),
-                    'confidence': round(float(confidence), 3),
-                    'source': source,
-                    'formula': f"{pixel_distance:.2f} px × {scale_factor:.4f} cm/px = {cm_value:.2f} cm"
-                }
-                
-                print(f"  ✓ {name}: {cm_value:.2f} cm (confidence: {confidence:.2f})")
+                try:
+                    cm_value, confidence, source = data
+                    # Guard scale_factor and cm_value
+                    sf = float(scale_factor) if scale_factor else 0.0
+                    cm = float(cm_value) if cm_value is not None else 0.0
+                    
+                    pixel_distance = cm / sf if sf > 0 else 0
+                    
+                    mp_measurements[name] = {
+                        'value_cm': round(cm, 2),
+                        'value_px': round(float(pixel_distance or 0), 2),
+                        'confidence': round(float(confidence or 0), 3),
+                        'source': source,
+                        'source_raw': source,
+                        'source_group': 'MediaPipe',
+                        'formula': f"{pixel_distance:.2f} px × {sf:.4f} cm/px = {cm:.2f} cm"
+                    }
+                    
+                    print(f"  ✓ {name}: {cm:.2f} cm (confidence: {float(confidence or 0):.2f})")
+                except (TypeError, ValueError) as fe:
+                    print(f"  ⚠ Measurement parse error for {name}: {fe}")
+                    continue
             else:
                 print(f"  ⚠️ Unexpected data format for {name}: {data}")
         
-        print(f"\n✓ Formatted {len(formatted_measurements)} measurements")
+        formatted_measurements, smpl_source_label = _build_smpl_merged_measurements(
+            mp_measurements,
+            smpl_m,
+            smpl_success,
+        )
+
+        print(f"\n✓ Formatted {len(formatted_measurements)} merged measurements")
         print(f"Formatted measurements keys: {list(formatted_measurements.keys())}")
         
         # Create visualization with landmarks and edge-based width overlays
@@ -1376,16 +1808,20 @@ def process_single_view(image, scale_factor, view_name):
                 # Colors (BGR)
                 BLUE = (255, 0, 0)
                 ORANGE = (0, 165, 255)
-                PURPLE = (255, 0, 255)
+                GREEN = (0, 255, 0)
 
-                def _draw_width_line(img, left_pt, right_pt, color):
+                def _draw_width_line(img, left_pt, right_pt, color, radius):
                     if not left_pt or not right_pt:
                         return
                     lx, ly = int(left_pt[0]), int(left_pt[1])
                     rx, ry = int(right_pt[0]), int(right_pt[1])
-                    cv2.circle(img, (lx, ly), 5, color, -1)
-                    cv2.circle(img, (rx, ry), 5, color, -1)
+                    if (lx == 0 and ly == 0) or (rx == 0 and ry == 0):
+                        return
+
+                    # Draw using the exact same endpoints so dots and line are always aligned.
                     cv2.line(img, (lx, ly), (rx, ry), color, 2)
+                    cv2.circle(img, (lx, ly), radius, color, -1)
+                    cv2.circle(img, (rx, ry), radius, color, -1)
 
                 # Shoulder width (blue)
                 _draw_width_line(
@@ -1393,22 +1829,25 @@ def process_single_view(image, scale_factor, view_name):
                     edge_reference_points.get('shoulder_left'),
                     edge_reference_points.get('shoulder_right'),
                     BLUE,
+                    8,
                 )
 
-                # Waist width (orange)
+                # Chest width (orange)
+                _draw_width_line(
+                    vis_image,
+                    edge_reference_points.get('chest_left'),
+                    edge_reference_points.get('chest_right'),
+                    ORANGE,
+                    6,
+                )
+
+                # Waist width (green)
                 _draw_width_line(
                     vis_image,
                     edge_reference_points.get('waist_left'),
                     edge_reference_points.get('waist_right'),
-                    ORANGE,
-                )
-
-                # Hip width (purple)
-                _draw_width_line(
-                    vis_image,
-                    edge_reference_points.get('hip_left'),
-                    edge_reference_points.get('hip_right'),
-                    PURPLE,
+                    GREEN,
+                    6,
                 )
         except Exception as draw_err:
             print(f"Warning: failed to draw edge-based width overlays: {draw_err}")
@@ -1421,10 +1860,11 @@ def process_single_view(image, scale_factor, view_name):
         
         # Add hybrid approach metadata
         source_summary = {
-            'segmentation_edge': len([m for m in formatted_measurements.values() 
-                                      if m.get('source') in ['Canny+findContours Edge', 'Segmentation Edge']]),
-            'mediapipe_landmarks': len([m for m in formatted_measurements.values() 
-                                        if m.get('source') == 'MediaPipe Landmarks (33 points)'])
+            'segmentation_edge': len([m for m in mp_measurements.values() if 'Edge' in str(m.get('source', ''))]),
+            'mediapipe_landmarks': len([m for m in formatted_measurements.values() if m.get('source') == 'MediaPipe']),
+            'smpl_model': len([m for m in formatted_measurements.values() if m.get('source') == 'SMPL 3D Model']),
+            'smpl_mediapipe': len([m for m in formatted_measurements.values() if m.get('source') == 'SMPL + MediaPipe']),
+            'estimated': len([m for m in formatted_measurements.values() if m.get('source') == 'Estimated']),
         }
         
         return {
@@ -1434,6 +1874,23 @@ def process_single_view(image, scale_factor, view_name):
             'visualization': vis_base64,
             'mask': mask_base64,
             'bbox': bbox if bbox else None,
+            'smpl': {
+                'enabled': True,
+                'success': smpl_success,
+                'status': 'active' if smpl_success else 'estimated',
+                'source': smpl_source_label,
+                'gender': detected_gender or 'neutral',
+                'error': smpl_error,
+                'fit_status': smpl_fit_info.get('fit_status', 'fitted' if smpl_success else 'estimated'),
+                'status_text': smpl_fit_info.get('status_text', '✓ Model fitted to your body' if smpl_success else 'Estimated from default body'),
+                'fitted_to_user': bool(smpl_fit_info.get('fitted_to_user', smpl_success)),
+                'landmarks_source': smpl_fit_info.get('landmarks_source', 'mediapipe'),
+                'landmarks_mode': smpl_fit_info.get('landmarks_mode', 'real' if smpl_success else 'unavailable'),
+                'landmark_count': int(smpl_fit_info.get('landmark_count', len(landmarks_list))),
+                'visible_landmark_count': int(smpl_fit_info.get('visible_landmark_count', 0)),
+                'pose_applied': bool(smpl_fit_info.get('pose_applied', False)),
+            },
+            'mesh_data': smpl_mesh_data,
             'hybrid_approach': {
                 'enabled': True,
                 'edge_points_available': edge_reference_points is not None and edge_reference_points.get('is_valid', False),
@@ -1604,11 +2061,12 @@ def process_manual_landmarks():
         print("MANUAL LANDMARK PROCESSING")
         print("="*60)
         
-        # Get user height for scaling
-        user_height_cm = data.get('user_height')
-        if user_height_cm is None:
+        # Get user height for scaling safely
+        try:
+            user_height_cm = float(data.get('user_height') or 0)
+        except (TypeError, ValueError):
             user_height_cm = 0
-        user_height_cm = float(user_height_cm)
+            
         if user_height_cm <= 0:
             return jsonify({'error': 'User height is required'}), 400
         
@@ -1976,16 +2434,16 @@ def process_manual_view(landmarks_data, user_height_cm, view_name, image=None):
                 cm_dist = pixel_dist * scale_factor
                 
                 measurements[landmark_type] = {
-                    'value_cm': round(float(cm_dist), 2),
-                    'value_px': round(float(pixel_dist), 2),
+                    'value_cm': round(float(cm_dist or 0), 2),
+                    'value_px': round(float(pixel_dist or 0), 2),
                     'confidence': 0.95,  # High confidence due to edge snapping
                     'source': 'Manual (Edge-Refined)',
                     'label': landmark_label,
                     'formula': f"{pixel_dist:.2f} px × {scale_factor:.4f} cm/px = {cm_dist:.2f} cm",
                     'refinement': {
-                        'original_px': round(float(pixel_dist_orig), 2),
-                        'refined_px': round(float(pixel_dist), 2),
-                        'improvement_px': round(float(improvement), 2),
+                        'original_px': round(float(pixel_dist_orig or 0), 2),
+                        'refined_px': round(float(pixel_dist or 0), 2),
+                        'improvement_px': round(float(improvement or 0), 2),
                         'edge_snapped': True
                     }
                 }
@@ -2029,8 +2487,8 @@ def process_manual_view(landmarks_data, user_height_cm, view_name, image=None):
         return {
             'success': True,
             'measurements': measurements,
-            'scale_factor': float(scale_factor),
-            'height_px': float(height_px),
+            'scale_factor': float(scale_factor or 0),
+            'height_px': float(height_px or 0),
             'visualization': vis_base64,
             'mask': mask_base64,
             'total_landmarks': len(landmarks)

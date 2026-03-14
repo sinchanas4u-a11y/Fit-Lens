@@ -545,6 +545,13 @@ const LiveCamera = () => {
         }
     };
 
+    const formatPxValue = (value) => {
+        if (value === null || value === undefined || Number.isNaN(Number(value))) {
+            return '—';
+        }
+        return `${Number(value).toFixed(2)} px`;
+    };
+
     if (results && !isEditingMarkings) {
         return (
             <div className="live-camera-results">
@@ -579,6 +586,9 @@ const LiveCamera = () => {
                             {data.measurements && (
                                 <div className="measurements-list">
                                     <h4>Measurements</h4>
+                                    <div className={`smpl-status-badge ${data.smpl?.status === 'active' ? 'smpl-active' : 'smpl-estimated'}`}>
+                                        3D Body Model: {data.smpl?.status === 'active' ? 'Active' : 'Estimated'}
+                                    </div>
                                     <table className="measurements-table">
                                         <thead>
                                             <tr>
@@ -593,7 +603,7 @@ const LiveCamera = () => {
                                                 <tr key={key}>
                                                     <td>{m.label || key.replace(/_/g, ' ')}</td>
                                                     <td>{m.value_cm} cm</td>
-                                                    <td>{m.value_px} px</td>
+                                                    <td>{formatPxValue(m.value_px)}</td>
                                                     <td>{m.source || 'Auto'}</td>
                                                 </tr>
                                             ))}

@@ -883,6 +883,27 @@
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
+  .smpl-status-badge {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 999px;
+    margin-bottom: 10px;
+  }
+
+  .smpl-active {
+    background: #e8f5e9;
+    color: #2e7d32;
+    border: 1px solid #81c784;
+  }
+
+  .smpl-estimated {
+    background: #fff8e1;
+    color: #b26a00;
+    border: 1px solid #ffd54f;
+  }
+
 .measurements-table th, 
 .measurements-table td {
     padding: 12px 15px;
