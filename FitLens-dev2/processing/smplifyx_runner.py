@@ -60,6 +60,8 @@ def _ensure_keypoints(timeout_seconds: int) -> None:
     )
 
 
+from make_keypoints import generate_keypoints_for_smplifyx
+
 def run_smplifyx(
     front_image_path: str,
     side_image_path: str = None,
@@ -68,6 +70,26 @@ def run_smplifyx(
     """Run SMPLify-X and return most recent mesh path."""
     try:
         prepare_input(front_image_path, side_image_path)
+
+        # Step 2: Generate 25-point keypoints from MediaPipe BEFORE running SMPLify-X
+        print("Generating keypoints...")
+        kp_dir = os.path.join(DATA_DIR, 'keypoints')
+
+        kp_ok = generate_keypoints_for_smplifyx(
+            front_image_path = os.path.join(DATA_DIR, 'images', 'front.jpg'),
+            side_image_path  = os.path.join(DATA_DIR, 'images', 'side.jpg') if side_image_path else None,
+            keypoints_dir    = kp_dir
+        )
+
+        if not kp_ok:
+            print("Keypoint generation failed")
+            return {
+                "success": False,
+                "mesh_path": None,
+                "error": "Keypoint generation failed"
+            }
+
+        print(f"Keypoints saved to: {kp_dir}")
 
         mesh_dir = os.path.join(OUTPUT_DIR, "meshes")
         if os.path.exists(mesh_dir):
@@ -110,14 +132,27 @@ def run_smplifyx(
                 "error": f"SMPLify-X failed: {result.stderr[-500:]}",
             }
 
-        mesh_files = glob.glob(os.path.join(mesh_dir, "**", "*.ply"), recursive=True)
-        if not mesh_files:
-            mesh_files = glob.glob(os.path.join(mesh_dir, "**", "*.obj"), recursive=True)
+        # Always prefer front/000.obj (front-view fit gives correct upright pose).
+        # Fall back to any newest mesh only when the front mesh doesn't exist.
+        front_obj = os.path.join(mesh_dir, "front", "000.obj")
+        front_ply = os.path.join(mesh_dir, "front", "000.ply")
+        if os.path.isfile(front_obj):
+            mesh_path = front_obj
+        elif os.path.isfile(front_ply):
+            mesh_path = front_ply
+        else:
+            mesh_files = glob.glob(os.path.join(mesh_dir, "front", "**", "*.ply"), recursive=True)
+            if not mesh_files:
+                mesh_files = glob.glob(os.path.join(mesh_dir, "front", "**", "*.obj"), recursive=True)
+            # Last resort: any mesh in the output directory
+            if not mesh_files:
+                mesh_files = glob.glob(os.path.join(mesh_dir, "**", "*.ply"), recursive=True)
+            if not mesh_files:
+                mesh_files = glob.glob(os.path.join(mesh_dir, "**", "*.obj"), recursive=True)
+            if not mesh_files:
+                return {"success": False, "mesh_path": None, "error": "No mesh file generated"}
+            mesh_path = max(mesh_files, key=os.path.getmtime)
 
-        if not mesh_files:
-            return {"success": False, "mesh_path": None, "error": "No mesh file generated"}
-
-        mesh_path = max(mesh_files, key=os.path.getmtime)
         print(f"Mesh generated: {mesh_path}")
 
         return {"success": True, "mesh_path": mesh_path, "error": None}

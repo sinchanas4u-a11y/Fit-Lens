@@ -1473,7 +1473,23 @@ def process_images():
             if smplifyx_result.get('success') and smplifyx_result.get('mesh_path'):
                 reader = SMPLifyXReader(smplifyx_result['mesh_path'])
                 smplx_meas = reader.extract_measurements(user_height_cm)
-                mesh_data = reader.export_for_plotly(user_height_cm)
+                
+                # Find model path
+                model_path = os.path.join(
+                    os.path.dirname(
+                        os.path.dirname(
+                            os.path.abspath(__file__)
+                        )
+                    ),
+                    'models', 'smplx'
+                )
+
+                mesh_data = reader.export_for_plotly(
+                    user_height_cm=user_height_cm,
+                    measurements=smplx_meas,
+                    model_path=model_path,
+                    gender=data.get('gender', 'neutral') or 'neutral'
+                )
                 smplx_status = 'success'
                 print("✓ SMPLify-X mesh + measurements ready")
             else:
@@ -2796,4 +2812,4 @@ if __name__ == '__main__':
     print("\n" + "="*60 + "\n")
     
     # Use socketio.run instead of app.run
-    socketio.run(app, host='0.0.0.0', port=5001, debug=True)
+    socketio.run(app, host='0.0.0.0', port=5001, debug=True, use_reloader=False)

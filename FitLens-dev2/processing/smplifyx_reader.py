@@ -55,7 +55,7 @@ class SMPLifyXReader:
             vh = pts[hull.vertices]
             n = len(vh)
             perim = sum(np.linalg.norm(vh[(i + 1) % n] - vh[i]) for i in range(n))
-            return round(perim * 100.0, 2)
+            return round(float(perim * 100.0), 2)
         except Exception:
             return None
 
@@ -115,7 +115,79 @@ class SMPLifyXReader:
 
         return meas
 
-    def export_for_plotly(self, user_height_cm: float) -> dict:
+    def export_for_plotly(
+        self,
+        user_height_cm: float,
+        measurements: dict = None,
+        model_path: str = None,
+        gender: str = 'neutral'
+    ) -> dict:
+        # If measurements provided, fit betas
+        # and regenerate vertices with correct shape
+        if (measurements and model_path and
+            os.path.exists(model_path)):
+            try:
+                from processing.beta_calculator import (
+                    compute_betas_from_measurements
+                )
+                print("Fitting betas to user measurements...")
+                fitted_betas = (
+                    compute_betas_from_measurements(
+                        measurements=measurements,
+                        user_height_cm=user_height_cm,
+                        model_path=model_path,
+                        gender=gender
+                    )
+                )
+
+                # Check if fitting worked
+                if np.any(np.abs(fitted_betas) > 0.05):
+                    from processing.beta_calculator import BetaCalculator
+                    
+                    calc = BetaCalculator(model_path=model_path, gender=gender)
+                    shaped_verts = calc.get_vertices(fitted_betas)
+
+                    # Scale to user height
+                    y_min = shaped_verts[:, 1].min()
+                    y_max = shaped_verts[:, 1].max()
+                    h_m = y_max - y_min
+                    scale = user_height_cm / (h_m * 100)
+                    v_sc = shaped_verts * scale * 100
+
+                    mid_y = (
+                        v_sc[:, 1].max() +
+                        v_sc[:, 1].min()
+                    ) / 2
+                    v_sc[:, 1] -= mid_y
+
+                    print("Using beta-fitted vertices for 3D model")
+
+                    f = self.faces
+                    return {
+                        "x": v_sc[:, 0].tolist(),
+                        "y": v_sc[:, 1].tolist(),
+                        "z": v_sc[:, 2].tolist(),
+                        "i": f[:, 0].tolist(),
+                        "j": f[:, 1].tolist(),
+                        "k": f[:, 2].tolist(),
+                        "metadata": {
+                            "vertex_count": int(len(v_sc)),
+                            "face_count": int(len(f)),
+                            "height_cm": float(
+                                user_height_cm
+                            ),
+                            "source": "SMPLify-X + Beta Fitting",
+                            "betas_fitted": True
+                        }
+                    }
+
+            except Exception as e:
+                print(f"Beta fitting failed: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fall through to default export
+
+        # Default: use SMPLify-X mesh as-is
         v_sc = self.get_scaled_vertices(user_height_cm)
         f = self.faces
 
@@ -131,5 +203,6 @@ class SMPLifyXReader:
                 "face_count": int(len(f)),
                 "height_cm": float(user_height_cm),
                 "source": "SMPLify-X",
+                "betas_fitted": False
             },
         }

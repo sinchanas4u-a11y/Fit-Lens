@@ -299,7 +299,7 @@ const UploadMode = () => {
       });
 
       const response = await axios.post('/api/process-manual', requestData, {
-        timeout: 120000
+          timeout: 180000
       });
 
       console.log('📥 Received response from backend:', response.data);
@@ -361,7 +361,7 @@ const UploadMode = () => {
 
       // Send to backend
       const response = await axios.post('/api/process', requestData, {
-        timeout: 120000
+          timeout: 180000
       });
 
       console.log('📥 Received response from backend');
