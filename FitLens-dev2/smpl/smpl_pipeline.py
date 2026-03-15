@@ -7,10 +7,12 @@ def run_smpl_pipeline(
   image_width: int,
   image_height: int,
   user_height_cm: float,
-  gender: str = 'neutral'
+  gender: str = 'neutral',
+  view_type: str = 'front',
+  use_neutral_pose: bool = True
 ) -> dict:
 
-  print("Running SMPL pipeline...")
+  print(f"Running SMPL pipeline (Neutral Pose: {use_neutral_pose})...")
 
   try:
     # Step 1: Fit shape to landmarks
@@ -19,7 +21,9 @@ def run_smpl_pipeline(
       landmarks_2d   = landmarks_2d,
       image_width    = image_width,
       image_height   = image_height,
-      user_height_cm = user_height_cm
+      user_height_cm = user_height_cm,
+      view_type      = view_type,
+      use_neutral_pose = use_neutral_pose
     )
     fitted_betas = fit_result['betas']
     fitted_pose  = fit_result['body_pose']

@@ -84,19 +84,27 @@ class SMPLEstimator:
             betas[:n_betas],
         )
 
-    def get_vertices(self, betas: np.ndarray, pose: np.ndarray = None) -> np.ndarray:
+    def get_vertices(self, betas: np.ndarray, pose: np.ndarray = None, global_orient: np.ndarray = None) -> np.ndarray:
         v_shaped = self._shape_vertices(np.asarray(betas, dtype=np.float64))
-        if pose is None or self.posedirs is None or self.weights.size == 0:
-            return v_shaped
-
-        pose = np.asarray(pose, dtype=np.float64).reshape(-1, 3)
-        if pose.shape[0] < len(self.parents):
-            padded = np.zeros((len(self.parents), 3), dtype=np.float64)
+        if pose is None:
+            pose = np.zeros((24, 3), dtype=np.float64)
+        else:
+            pose = np.asarray(pose, dtype=np.float64).reshape(-1, 3)
+            
+        if pose.shape[0] < 24:
+            padded = np.zeros((24, 3), dtype=np.float64)
             padded[:pose.shape[0]] = pose
             pose = padded
+            
+        # Apply global orientation if provided
+        if global_orient is not None:
+            pose[0] = np.asarray(global_orient, dtype=np.float64).reshape(3)
+
+        if self.posedirs is None or self.weights.size == 0:
+            return v_shaped
 
         joints = self.get_joints(v_shaped)
-        rotations = self._rodrigues_batch(pose[: len(self.parents)])
+        rotations = self._rodrigues_batch(pose[:24])
         identity = np.eye(3, dtype=np.float64)
         pose_feature = (rotations[1:] - identity).reshape(-1)
 
@@ -106,9 +114,9 @@ class SMPLEstimator:
         else:
             v_posed = v_shaped
 
-        transforms = np.zeros((len(self.parents), 4, 4), dtype=np.float64)
+        transforms = np.zeros((24, 4, 4), dtype=np.float64)
         transforms[0] = self._with_zeros(np.hstack((rotations[0], joints[0].reshape(3, 1))))
-        for joint_idx in range(1, len(self.parents)):
+        for joint_idx in range(1, 24):
             parent_idx = int(self.parents[joint_idx])
             rel_joint = joints[joint_idx] - joints[parent_idx]
             local_transform = self._with_zeros(
@@ -117,9 +125,9 @@ class SMPLEstimator:
             transforms[joint_idx] = transforms[parent_idx] @ local_transform
 
         joint_h = np.concatenate(
-            (joints[: len(self.parents)], np.zeros((len(self.parents), 1), dtype=np.float64)),
+            (joints[:24], np.zeros((24, 1), dtype=np.float64)),
             axis=1,
-        ).reshape(len(self.parents), 4, 1)
+        ).reshape(24, 4, 1)
         transforms = transforms - self._pack(np.matmul(transforms, joint_h))
 
         blend_transforms = np.tensordot(self.weights, transforms, axes=[[1], [0]])
@@ -133,7 +141,7 @@ class SMPLEstimator:
     def get_joints(self, vertices: np.ndarray) -> np.ndarray:
         return self.J_regressor @ vertices
 
-    def fit_to_landmarks(self, landmarks_2d, image_width, image_height, user_height_cm):
+    def fit_to_landmarks(self, landmarks_2d, image_width, image_height, user_height_cm, view_type='front', use_neutral_pose=False):
         targets = self._prepare_landmark_targets(landmarks_2d)
         if len(targets) < 4:
             raise ValueError("Not enough visible MediaPipe landmarks for SMPL fitting")
@@ -153,7 +161,7 @@ class SMPLEstimator:
         )
 
         betas = np.asarray(result.x, dtype=np.float64)
-        pose = self.estimate_pose_from_landmarks(landmarks_2d, betas)
+        pose = self.estimate_pose_from_landmarks(landmarks_2d, betas, view_type=view_type, use_neutral=use_neutral_pose)
         visibility_values = np.array([item["visibility"] for item in targets.values()], dtype=np.float64)
 
         print(f"SMPL fit loss: {result.fun:.6f}")
@@ -162,8 +170,8 @@ class SMPLEstimator:
             "body_pose": pose,
             "fit_status": "fitted",
             "fitted_to_user": True,
-            "pose_applied": bool(np.any(np.linalg.norm(pose.reshape(-1, 3)[1:], axis=1) > 1e-3)),
-            "status_text": "✓ Model fitted to your body",
+            "pose_applied": not use_neutral_pose and bool(np.any(np.linalg.norm(pose.reshape(-1, 3)[1:], axis=1) > 1e-3)),
+            "status_text": "✓ Model fitted to your body (Neutral Pose)" if use_neutral_pose else "✓ Model fitted to your body",
             "landmarks_source": "mediapipe",
             "landmarks_mode": "real",
             "landmark_count": len(landmarks_2d),
@@ -174,18 +182,34 @@ class SMPLEstimator:
             "image_width": int(image_width),
             "image_height": int(image_height),
             "user_height_cm": float(user_height_cm),
+            "view_type": view_type
         }
 
-    def estimate_pose_from_landmarks(self, landmarks_2d, betas):
+    def estimate_pose_from_landmarks(self, landmarks_2d, betas, view_type='front', use_neutral=False):
         pose = np.zeros((24, 3), dtype=np.float64)
+        
+        if use_neutral:
+            # Return neutral standing pose (all zeros)
+            # pose[0] is global orientation; [0,0,0] is neutral upright in standard SMPL
+            return pose.reshape(-1)
+
         joints = self.get_joints(self._shape_vertices(np.asarray(betas, dtype=np.float64)))
+        
+        # Set global orientation based on view
+        if view_type == 'side':
+            pose[0, 1] = np.pi / 2.0  # Rotate 90 degrees for side view
+        elif view_type == 'back':
+            pose[0, 1] = np.pi
+            
         rest_xy = np.stack((joints[:, 0], -joints[:, 1]), axis=1)
 
         hip_center = self._average_target_point(landmarks_2d, (23, 24))
         shoulder_center = self._average_target_point(landmarks_2d, (11, 12))
+        
         if hip_center is not None and shoulder_center is not None:
             target_torso = self._target_vector(hip_center, shoulder_center)
             rest_torso = (rest_xy[16] + rest_xy[17]) * 0.5 - (rest_xy[1] + rest_xy[2]) * 0.5
+            # Root rotation (global z)
             pose[0, 2] = self._clamp_angle(self._signed_angle(rest_torso, target_torso), limit=0.8)
 
         cumulative_z = {0: pose[0, 2]}
@@ -199,7 +223,10 @@ class SMPLEstimator:
             rest_vec = rest_xy[smpl_child] - rest_xy[smpl_parent]
             desired_global = self._vector_angle(target_vec)
             rest_global = self._vector_angle(rest_vec)
-            parent_global = cumulative_z.get(int(self.parents[joint_idx]), cumulative_z.get(0, 0.0))
+            
+            p_idx = int(self.parents[joint_idx])
+            parent_global = cumulative_z.get(p_idx, cumulative_z.get(0, 0.0))
+            
             local_angle = self._wrap_angle(desired_global - rest_global - parent_global)
             pose[joint_idx, 2] = self._clamp_angle(local_angle)
             cumulative_z[joint_idx] = parent_global + pose[joint_idx, 2]

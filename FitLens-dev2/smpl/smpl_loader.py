@@ -85,7 +85,9 @@ def load_smpl_model(gender: str = 'neutral') -> dict:
     'female':  'SMPL_FEMALE.pkl'
   }
   fname    = gender_map.get(gender, 'SMPL_NEUTRAL.pkl')
-  pkl_path = os.path.join('models', 'smpl', fname)
+  # Project root is the parent of the folder containing this file
+  root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+  pkl_path = os.path.join(root, 'models', 'smpl', fname)
 
   if not os.path.exists(pkl_path):
     raise FileNotFoundError(

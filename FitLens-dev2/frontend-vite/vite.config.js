@@ -13,6 +13,11 @@ export default defineConfig({
         secure: false,
         timeout: 300000,
         proxyTimeout: 300000
+      },
+      '/mesh': {
+        target: 'http://localhost:5001',
+        changeOrigin: true,
+        secure: false
       }
     }
   },

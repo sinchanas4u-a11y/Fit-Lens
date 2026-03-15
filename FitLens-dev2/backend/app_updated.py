@@ -69,6 +69,38 @@ os.makedirs(IMAGES_DIR, exist_ok=True)
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "measurement_results")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
+# Directory for storing generated 3D meshes
+MESHES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_meshes")
+os.makedirs(MESHES_DIR, exist_ok=True)
+
+def save_mesh_as_obj(mesh_data, view_name='front'):
+    """Save mesh data (Plotly format) as a Wavefront OBJ file."""
+    if not mesh_data or 'x' not in mesh_data:
+        return None
+    
+    view_dir = os.path.join(MESHES_DIR, view_name)
+    os.makedirs(view_dir, exist_ok=True)
+    obj_path = os.path.join(view_dir, "000.obj")
+    
+    try:
+        with open(obj_path, 'w') as f:
+            f.write("# SMPL Mesh OBJ export\n")
+            # Write vertices
+            for x, y, z in zip(mesh_data['x'], mesh_data['y'], mesh_data['z']):
+                # Standard OBJ uses meters, Plotly data is often cm.
+                # The user requested upright, neutral pose.
+                f.write(f"v {x/100:.6f} {y/100:.6f} {z/100:.6f}\n")
+            
+            # Write faces (OBJ is 1-indexed)
+            for i, j, k in zip(mesh_data['i'], mesh_data['j'], mesh_data['k']):
+                f.write(f"f {i+1} {j+1} {k+1}\n")
+        
+        print(f"✓ Saved mesh to {obj_path}")
+        return obj_path
+    except Exception as e:
+        print(f"Error saving OBJ: {e}")
+        return None
+
 # Global set to track hashes of results to prevent duplicates
 saved_result_hashes = set()
 
@@ -1216,6 +1248,16 @@ print("✓ Models initialized")
 
 # --- Existing API Routes ---
 
+@app.route('/mesh/<view>/000.obj')
+def serve_mesh_obj(view):
+    """Serve the 000.obj file for the specified view."""
+    obj_path = os.path.join(MESHES_DIR, view, "000.obj")
+    if os.path.exists(obj_path):
+        return send_file(obj_path, mimetype='text/plain')
+    else:
+        # Fallback to neutral if front doesn't exist yet
+        return jsonify({"error": "Mesh not found"}), 404
+
 @app.route('/api/verify-identity', methods=['POST'])
 def verify_identity():
     """
@@ -1504,73 +1546,11 @@ def process_images():
         print(f"✓ Scale factor: {scale_factor:.4f} cm/px")
         print(f"✓ Formula: {user_height_cm} cm ÷ {height_px:.2f} px = {scale_factor:.4f} cm/px")
         
-        # Run SMPLify-X and merge mesh + key circumference measurements.
-        mesh_data = None
+        # Prepare for SMPL results (now integrated into process_single_view)
         smplx_status = 'unavailable'
         smplx_error = None
         smplx_meas = {}
-        front_tmp_path = None
-        side_tmp_path = None
-        try:
-            print("\n" + "=" * 60)
-            print("STEP 5.5: RUNNING SMPLIFY-X")
-            print("=" * 60)
-
-            with tempfile.NamedTemporaryFile(suffix='_front.jpg', delete=False) as tf:
-                front_tmp_path = tf.name
-            cv2.imwrite(front_tmp_path, front_img)
-
-            if side_img is not None:
-                with tempfile.NamedTemporaryFile(suffix='_side.jpg', delete=False) as ts:
-                    side_tmp_path = ts.name
-                cv2.imwrite(side_tmp_path, side_img)
-
-            smplifyx_result = run_smplifyx(
-                front_image_path=front_tmp_path,
-                side_image_path=side_tmp_path if side_tmp_path else None,
-                timeout_seconds=120,
-            )
-
-            if smplifyx_result.get('success') and smplifyx_result.get('mesh_path'):
-                reader = SMPLifyXReader(smplifyx_result['mesh_path'])
-                smplx_meas = reader.extract_measurements(user_height_cm)
-                
-                # Find model path
-                model_path = os.path.join(
-                    os.path.dirname(
-                        os.path.dirname(
-                            os.path.abspath(__file__)
-                        )
-                    ),
-                    'models', 'smplx'
-                )
-
-                mesh_data = reader.export_for_plotly(
-                    user_height_cm=user_height_cm,
-                    measurements=smplx_meas,
-                    model_path=model_path,
-                    gender=data.get('gender', 'neutral') or 'neutral'
-                )
-                smplx_status = 'success'
-                print("✓ SMPLify-X mesh + measurements ready")
-                print("SMPLify-X mesh available for "
-                      "frontend rendering")
-            else:
-                smplx_status = 'failed'
-                smplx_error = smplifyx_result.get('error')
-                print(f"✗ SMPLify-X failed: {smplx_error}")
-
-        except Exception as smplx_exc:
-            smplx_status = 'error'
-            smplx_error = str(smplx_exc)
-            print(f"✗ SMPLify-X exception: {smplx_exc}")
-        finally:
-            for tmp_path in (front_tmp_path, side_tmp_path):
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.remove(tmp_path)
-                    except OSError:
-                        pass
+        mesh_data = None
 
         # Process front view
         print("\n" + "="*60)
@@ -1596,50 +1576,49 @@ def process_images():
             )
             results['side'] = side_results
 
-        # Merge SMPLify-X circumferences into the existing measurement schema.
-        if front_results.get('success') and front_results.get('measurements'):
-            source_label = 'SMPLify-X' if smplx_status == 'success' else 'MediaPipe'
-            for key in ('chest_circumference', 'waist_circumference', 'hip_circumference'):
-                smplx_val = smplx_meas.get(key)
-                if smplx_status == 'success' and smplx_val is not None and key in front_results['measurements']:
-                    current    = front_results['measurements'][key]
-                    value_px   = current.get('value_px')   or 0
-                    confidence = current.get('confidence') or 1.0
-                    try:
-                        front_results['measurements'][key] = {
-                            **current,
-                            'value_cm':   round(float(smplx_val),  2),
-                            'value_px':   round(float(value_px),   2),
-                            'confidence': round(float(confidence), 4),
-                            'source':       source_label,
-                            'source_raw':   source_label,
-                            'source_group': source_label,
-                            'formula': (
-                              f"SMPLify-X mesh fit "
-                              f"({smplx_val:.2f} cm)"
-                            ),
-                        }
-                    except (TypeError, ValueError) as e:
-                        print(f"  Skipping {key} merge: {e}")
-                        continue
-
-            if mesh_data is not None:
-                front_results['mesh_data'] = mesh_data
-
+        # Integrate SMPL results from front view
+        if front_results.get('success'):
+            smpl_info = front_results.get('smpl', {})
+            if smpl_info.get('success'):
+                smplx_status = 'success'
+                smplx_meas = front_results.get('measurements', {}) # Measurements include SMPL values
+                mesh_data = front_results.get('mesh_data')
+                print("✓ Internal SMPL posed mesh + measurements integrated from Front View")
+            else:
+                smplx_status = 'failed'
+                smplx_error = smpl_info.get('error')
+            
+            # Additional metadata for backward compatibility or debugging
             front_results['smplx_status'] = smplx_status
             front_results['smplx_error'] = smplx_error
             front_results['smplx_measurements'] = smplx_meas
+            if mesh_data:
+                front_results['mesh_data'] = mesh_data
         
         # Prepare final response
         print("\n" + "="*60)
         print("STEP 6: RETURNING MEASUREMENTS AS JSON")
         print("="*60)
 
-        # Debug: Log mesh_data availability
-        print(f"\n🔍 DEBUG: mesh_data in front_results: {'mesh_data' in front_results if isinstance(front_results, dict) else 'N/A'}")
+        # Prepare final response
+        print("\n" + "="*60)
+        print("STEP 6: RETURNING MEASUREMENTS AS JSON")
+        print("="*60)
+
+        # Force use of front mesh data if available
+        front_results = results.get('front', {})
         if isinstance(front_results, dict) and front_results.get('mesh_data'):
-            print(f"🔍 DEBUG: front_results['mesh_data'] x count: {len(front_results['mesh_data'].get('x', []))}")
-            print(f"🔍 DEBUG: front_results['mesh_data'] i count: {len(front_results['mesh_data'].get('i', []))}")
+            mesh_data = front_results.get('mesh_data')
+            smplx_status = 'success'
+            
+            # Export front mesh as OBJ for the frontend
+            try:
+                save_mesh_as_obj(mesh_data, 'front')
+            except Exception as e:
+                print(f"Warning: Failed to export OBJ: {e}")
+        else:
+            mesh_data = None
+            smplx_status = 'unavailable'
 
         # Add original images to results for display
         if front_results.get('success'):
@@ -1663,19 +1642,7 @@ def process_images():
             'smplx_error': smplx_error,
         }
 
-        # Debug: Log response structure
-        print(f"\n🔍 DEBUG: Response structure:")
-        print(f"  - results.front exists: {'front' in results}")
-        print(f"  - results.front.mesh_data exists: {'mesh_data' in results.get('front', {})}")
-        print(f"  - Top-level mesh_data exists: {response['mesh_data'] is not None}")
-        if response['mesh_data']:
-            md = response['mesh_data']
-            print(f"  - Top-level mesh_data x length: {len(md.get('x', []))}")
-            print(f"  - Top-level mesh_data y length: {len(md.get('y', []))}")
-            print(f"  - Top-level mesh_data z length: {len(md.get('z', []))}")
-            print(f"  - Top-level mesh_data i length: {len(md.get('i', []))}")
-            print(f"  - Top-level mesh_data j length: {len(md.get('j', []))}")
-            print(f"  - Top-level mesh_data k length: {len(md.get('k', []))}")
+        # Prepare final response metadata
 
         # Store results persistently
         save_body_measurements(response)
@@ -1748,8 +1715,17 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
 
         # SMPL integration: run immediately after MediaPipe landmarks are available.
         detected_gender = run_gender_detection(image)
-        landmarks_list = _landmarks_to_smpl_list(landmarks, image.shape)
         
+        # Convert landmarks to format expected by run_smpl_pipeline
+        # MediaPipe landmarks are 33 x 3 (x, y, visibility)
+        landmarks_formatted = []
+        for i in range(len(landmarks)):
+            landmarks_formatted.append({
+                'x': landmarks[i][0] / image.shape[1],
+                'y': landmarks[i][1] / image.shape[0],
+                'visibility': landmarks[i][2] if len(landmarks[i]) > 2 else 1.0
+            })
+
         # Guard effective_height_cm against None
         try:
             effective_height_cm = float(user_height_cm) if user_height_cm and float(user_height_cm) > 0 else 0.0
@@ -1770,26 +1746,30 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
         smpl_error = None
         smpl_mesh_data = None
         smpl_fit_info = {}
+        
         if effective_height_cm > 0:
-            print("Building SMPL mesh from "
-                  "SMPLify-X output...")
-            smpl_mesh_data = _build_smpl_mesh_data(
-                None,
-                effective_height_cm,
-                detected_gender or 'neutral'
+            print(f"Running SMPL pipeline for {view_name} view...")
+            smpl_res = run_smpl_pipeline(
+                landmarks_2d   = landmarks_formatted,
+                image_width    = image.shape[1],
+                image_height   = image.shape[0],
+                user_height_cm = effective_height_cm,
+                gender         = detected_gender or 'neutral',
+                view_type      = view_name,
+                use_neutral_pose = True
             )
-            smpl_m        = {}
-            smpl_error    = None
-            smpl_fit_info = {}
-            if smpl_mesh_data:
-                print("✓ SMPL mesh ready: "
-                      f"{len(smpl_mesh_data['x'])}"
-                      " vertices")
+            
+            if smpl_res.get('success'):
+                smpl_success = True
+                smpl_mesh_data = smpl_res.get('mesh_data')
+                smpl_m = smpl_res.get('measurements', {})
+                smpl_fit_info = smpl_res.get('fit', {})
+                print(f"✓ SMPL mesh ready: {len(smpl_mesh_data['x']) if smpl_mesh_data else 0} vertices")
             else:
-                smpl_error = "No SMPLify-X mesh available"
+                smpl_error = smpl_res.get('error', "SMPL fitting failed")
                 print(f"✗ {smpl_error}")
         else:
-            smpl_error = 'Insufficient data for SMPL (height or landmarks unavailable)'
+            smpl_error = 'Insufficient data for SMPL (height unavailable)'
         
         # Extract edge reference points from segmentation mask for hybrid approach
         edge_reference_points = None
@@ -1990,7 +1970,7 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
                 'fitted_to_user': bool(smpl_fit_info.get('fitted_to_user', smpl_success)),
                 'landmarks_source': smpl_fit_info.get('landmarks_source', 'mediapipe'),
                 'landmarks_mode': smpl_fit_info.get('landmarks_mode', 'real' if smpl_success else 'unavailable'),
-                'landmark_count': int(smpl_fit_info.get('landmark_count', len(landmarks_list))),
+                'landmark_count': int(smpl_fit_info.get('landmark_count', len(landmarks_formatted))),
                 'visible_landmark_count': int(smpl_fit_info.get('visible_landmark_count', 0)),
                 'pose_applied': bool(smpl_fit_info.get('pose_applied', False)),
             },

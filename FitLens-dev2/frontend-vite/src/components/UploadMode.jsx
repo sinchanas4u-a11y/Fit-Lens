@@ -956,7 +956,7 @@ const UploadMode = () => {
                         <SMPLViewer
                           meshData={frontMeshData}
                           statusText={smplStatusText}
-                          statusDetail={frontResult?.smpl?.pose_applied ? 'Real MediaPipe landmarks and pose applied from your photo' : 'Interactive viewer ready'}
+                          statusDetail="Neutral standing pose matching your body shape"
                         />
                       ) : canShowPlaceholder ? (
                         <div style={{
