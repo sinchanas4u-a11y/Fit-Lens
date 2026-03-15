@@ -28,7 +28,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from reference_detector import ReferenceDetector
 from backend.measurement_engine import MeasurementEngine
 from segmentation_model import SegmentationModel
-from smpl.smpl_pipeline import run_smpl_pipeline
+try:
+    from smpl.smpl_pipeline import (
+        run_smpl_pipeline
+    )
+except Exception as smpl_import_err:
+    print(f"SMPL pipeline not available: "
+          f"{smpl_import_err}")
+    def run_smpl_pipeline(*a, **kw):
+        return {"success": False,
+                "error": "SMPL unavailable"}
 from smpl.smpl_estimator import SMPLEstimator
 from processing.smplifyx_runner import run_smplifyx
 from processing.smplifyx_reader import SMPLifyXReader
@@ -752,45 +761,121 @@ def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success):
 
 
 def _build_smpl_mesh_data(smpl_result, user_height_cm, gender='neutral'):
-    """Build frontend-ready mesh data from fitted SMPL betas."""
+    """
+    Build mesh data from SMPLify-X output.
+    Uses output/meshes/front/000.obj
+    """
     try:
-        if not smpl_result or not smpl_result.get('success'):
+        if not user_height_cm or float(
+            user_height_cm
+        ) <= 0:
             return None
 
-        betas = smpl_result.get('betas')
-        if betas is None or user_height_cm is None or float(user_height_cm) <= 0:
+        import glob
+        import os
+        import sys
+
+        # Find project root
+        project_root = os.path.dirname(
+            os.path.dirname(
+                os.path.abspath(__file__)
+            )
+        )
+
+        # Always use front mesh — best pose
+        mesh_candidates = [
+            os.path.join(
+                project_root,
+                'output', 'meshes',
+                'front', '000.obj'
+            ),
+            os.path.join(
+                project_root,
+                'output', 'meshes',
+                'front', '000.ply'
+            ),
+        ]
+
+        # Also search recursively
+        found = glob.glob(
+            os.path.join(
+                project_root,
+                'output', 'meshes',
+                '**', '*.obj'
+            ),
+            recursive=True
+        )
+
+        mesh_path = None
+        # Prefer front mesh
+        for c in mesh_candidates:
+            if os.path.exists(c):
+                mesh_path = c
+                break
+
+        # Fallback to any found mesh
+        if not mesh_path and found:
+            # Prefer front in name
+            front_meshes = [
+                f for f in found
+                if 'front' in f.lower()
+            ]
+            mesh_path = (
+                front_meshes[0]
+                if front_meshes
+                else found[0]
+            )
+
+        if not mesh_path:
+            print("No SMPLify-X mesh found")
             return None
 
-        estimator = SMPLEstimator(gender=gender or 'neutral')
-        betas_arr = np.array(betas, dtype=np.float32)
+        print(f"Loading mesh: {mesh_path}")
 
-        vertices = estimator.get_vertices(betas_arr)
-        faces = np.asarray(estimator.faces, dtype=np.int32)
+        # Add processing to path
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
 
-        y_min = float(vertices[:, 1].min() or 0.0)
-        y_max = float(vertices[:, 1].max() or 0.0)
-        smpl_height_cm = (y_max - y_min) * 100.0
-        if smpl_height_cm <= 0:
-            return None
+        from processing.smplifyx_reader import (
+            SMPLifyXReader
+        )
 
-        try:
-            scale = float(user_height_cm or 0) / smpl_height_cm
-        except (TypeError, ValueError, ZeroDivisionError):
-            scale = 0.0
-        vertices_cm = vertices * 100.0 * scale
+        reader = SMPLifyXReader(mesh_path)
 
-        return {
-            'vertices': vertices_cm.astype(np.float32).reshape(-1).tolist(),
-            'faces': faces.reshape(-1).tolist(),
-            'metadata': {
-                'vertex_count': int(vertices_cm.shape[0]),
-                'face_count': int(faces.shape[0]),
-                'height_cm': float(user_height_cm or 0),
-                'gender': gender or 'neutral',
-            },
-        }
-    except Exception as mesh_err:
-        print(f"Warning: failed to build SMPL mesh data: {mesh_err}")
+        # Get measurements for beta fitting
+        smplx_meas = reader.extract_measurements(
+            float(user_height_cm)
+        )
+
+        # Find SMPL model path for beta fitting
+        smpl_model_path = os.path.join(
+            project_root, 'models', 'smpl'
+        )
+
+        # Export with beta fitting if models exist
+        mesh_data = reader.export_for_plotly(
+            user_height_cm = float(
+                user_height_cm
+            ),
+            measurements   = smplx_meas,
+            model_path     = smpl_model_path
+            if os.path.exists(smpl_model_path)
+            else None,
+            gender         = gender or 'neutral'
+        )
+
+        if mesh_data:
+            print(f"Mesh ready: "
+                  f"{len(mesh_data['x'])} "
+                  f"vertices")
+
+        return mesh_data
+
+    except Exception as e:
+        print(f"_build_smpl_mesh_data "
+              f"error: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -1419,30 +1504,6 @@ def process_images():
         print(f"✓ Scale factor: {scale_factor:.4f} cm/px")
         print(f"✓ Formula: {user_height_cm} cm ÷ {height_px:.2f} px = {scale_factor:.4f} cm/px")
         
-        # Process front view
-        print("\n" + "="*60)
-        print("PROCESSING FRONT VIEW")
-        print("="*60)
-        
-        front_results = process_single_view(
-            front_img, scale_factor, 'front', user_height_cm=user_height_cm
-        )
-        
-        results = {
-            'front': front_results
-        }
-        
-        # Process side view if provided
-        if side_img is not None:
-            print("\n" + "="*60)
-            print("PROCESSING SIDE VIEW")
-            print("="*60)
-            
-            side_results = process_single_view(
-                side_img, scale_factor, 'side', user_height_cm=user_height_cm
-            )
-            results['side'] = side_results
-
         # Run SMPLify-X and merge mesh + key circumference measurements.
         mesh_data = None
         smplx_status = 'unavailable'
@@ -1492,6 +1553,8 @@ def process_images():
                 )
                 smplx_status = 'success'
                 print("✓ SMPLify-X mesh + measurements ready")
+                print("SMPLify-X mesh available for "
+                      "frontend rendering")
             else:
                 smplx_status = 'failed'
                 smplx_error = smplifyx_result.get('error')
@@ -1508,6 +1571,30 @@ def process_images():
                         os.remove(tmp_path)
                     except OSError:
                         pass
+
+        # Process front view
+        print("\n" + "="*60)
+        print("PROCESSING FRONT VIEW")
+        print("="*60)
+
+        front_results = process_single_view(
+            front_img, scale_factor, 'front', user_height_cm=user_height_cm
+        )
+
+        results = {
+            'front': front_results
+        }
+
+        # Process side view if provided
+        if side_img is not None:
+            print("\n" + "="*60)
+            print("PROCESSING SIDE VIEW")
+            print("="*60)
+
+            side_results = process_single_view(
+                side_img, scale_factor, 'side', user_height_cm=user_height_cm
+            )
+            results['side'] = side_results
 
         # Merge SMPLify-X circumferences into the existing measurement schema.
         if front_results.get('success') and front_results.get('measurements'):
@@ -1551,8 +1638,8 @@ def process_images():
         # Debug: Log mesh_data availability
         print(f"\n🔍 DEBUG: mesh_data in front_results: {'mesh_data' in front_results if isinstance(front_results, dict) else 'N/A'}")
         if isinstance(front_results, dict) and front_results.get('mesh_data'):
-            print(f"🔍 DEBUG: front_results['mesh_data'] vertices count: {len(front_results['mesh_data'].get('vertices', []))}")
-            print(f"🔍 DEBUG: front_results['mesh_data'] faces count: {len(front_results['mesh_data'].get('faces', []))}")
+            print(f"🔍 DEBUG: front_results['mesh_data'] x count: {len(front_results['mesh_data'].get('x', []))}")
+            print(f"🔍 DEBUG: front_results['mesh_data'] i count: {len(front_results['mesh_data'].get('i', []))}")
 
         # Add original images to results for display
         if front_results.get('success'):
@@ -1683,23 +1770,24 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
         smpl_error = None
         smpl_mesh_data = None
         smpl_fit_info = {}
-        if len(landmarks_list) == 33 and effective_height_cm > 0:
-            h, w = image.shape[:2]
-            smpl_result = run_smpl_pipeline(
-                landmarks_2d=landmarks_list,
-                image_width=w,
-                image_height=h,
-                user_height_cm=effective_height_cm,
-                gender=detected_gender or 'neutral'
+        if effective_height_cm > 0:
+            print("Building SMPL mesh from "
+                  "SMPLify-X output...")
+            smpl_mesh_data = _build_smpl_mesh_data(
+                None,
+                effective_height_cm,
+                detected_gender or 'neutral'
             )
-            smpl_success = bool(smpl_result.get('success'))
-            if smpl_success:
-                smpl_m = smpl_result.get('measurements', {}) or {}
-                smpl_fit_info = smpl_result.get('fit', {}) or {}
-                # Use mesh_data directly from SMPL pipeline (already computed and scaled)
-                smpl_mesh_data = smpl_result.get('mesh_data')
+            smpl_m        = {}
+            smpl_error    = None
+            smpl_fit_info = {}
+            if smpl_mesh_data:
+                print("✓ SMPL mesh ready: "
+                      f"{len(smpl_mesh_data['x'])}"
+                      " vertices")
             else:
-                smpl_error = smpl_result.get('error')
+                smpl_error = "No SMPLify-X mesh available"
+                print(f"✗ {smpl_error}")
         else:
             smpl_error = 'Insufficient data for SMPL (height or landmarks unavailable)'
         

@@ -867,11 +867,18 @@ const UploadMode = () => {
               {(() => {
                 // Preserve existing panels and table; only compute data used by 3D viewer.
                 const frontResult = results.results.front;
-                const frontMeshData = frontResult?.mesh_data;
+                const frontMeshData = frontResult?.mesh_data || results.mesh_data;
                 const apiSmplxStatus = frontResult?.smplx_status || results?.smplx_status;
-                const showModelLoading = processing && frontResult?.smpl?.status === 'active';
-                const hasModel = !!frontMeshData;
-                const canShowPlaceholder = !hasModel && frontResult?.smpl?.status === 'active';
+                const showModelLoading = processing && (frontResult?.smpl?.status === 'active' || frontResult?.smpl?.status === 'estimated');
+                const hasModel = !!(
+                  frontMeshData?.x?.length &&
+                  frontMeshData?.y?.length &&
+                  frontMeshData?.z?.length &&
+                  frontMeshData?.i?.length &&
+                  frontMeshData?.j?.length &&
+                  frontMeshData?.k?.length
+                );
+                const canShowPlaceholder = !hasModel && (frontResult?.smpl?.status === 'active' || frontResult?.smpl?.status === 'estimated' || !!frontResult?.smpl);
                 const frontSmplStatus = getSmplStatusBadge(frontResult?.smpl);
                 const smplStatusText = apiSmplxStatus === 'success'
                   ? '✓ Model fitted to your body'
@@ -963,9 +970,28 @@ const UploadMode = () => {
                           color: '#b0b6c5',
                           fontSize: 13
                         }}>
-                          3D body model is not available for this result.
+                          <div style={{ textAlign: 'center' }}>
+                            <p>3D body model is not available for this result.</p>
+                            <p style={{ fontSize: 11, color: '#666', marginTop: 4 }}>
+                              (Status: {frontResult?.smpl?.status || 'N/A'}, Mesh: {hasModel ? 'Yes' : 'No'})
+                            </p>
+                          </div>
                         </div>
-                      ) : null}
+                      ) : (
+                        <div style={{
+                          height: 500,
+                          background: '#1a1a2e',
+                          borderRadius: 12,
+                          border: '1px solid #333',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: '#b0b6c5',
+                          fontSize: 13
+                        }}>
+                          No SMPL data found in response.
+                        </div>
+                      )}
                     </div>
 
                     {/* Hybrid Approach Info */}

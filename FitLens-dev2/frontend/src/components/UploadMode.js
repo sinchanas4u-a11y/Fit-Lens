@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Typography,
   Button,
@@ -33,97 +33,163 @@ function UploadMode({ onBack }) {
   const [previews, setPreviews] = useState({});
   const [processing, setProcessing] = useState(false);
   const [results, setResults] = useState(null);
+  const [meshData, setMeshData] = useState(null);
+  const [modelStatus, setModelStatus] = useState('');
+  const [show3DModel] = useState(true); // Always show 3D model when available
+  const plotlyRef = useRef(null);
   const [error, setError] = useState(null);
 
-  const render3DModel = (meshData) => {
-    const section = document.getElementById(
-      'smpl-viewer-section'
-    );
-    const div = document.getElementById(
-      'smpl-3d-viewer'
-    );
-    const statusEl = document.getElementById(
-      'smpl-status-text'
-    );
+  const normalizeMeshData = (rawMesh) => {
+    if (!rawMesh) return null;
 
-    if (!meshData ||
-        !meshData.x ||
-        meshData.x.length === 0) {
-      if (statusEl) {
-        statusEl.textContent =
-          '3D model unavailable';
+    if (rawMesh.x && rawMesh.y && rawMesh.z && rawMesh.i && rawMesh.j && rawMesh.k) {
+      return rawMesh;
+    }
+
+    if (Array.isArray(rawMesh.vertices) && Array.isArray(rawMesh.faces)) {
+      const vertices = rawMesh.vertices;
+      const faces = rawMesh.faces;
+      if (vertices.length % 3 !== 0 || faces.length % 3 !== 0) {
+        return null;
       }
-      return;
+
+      const x = [];
+      const y = [];
+      const z = [];
+      for (let n = 0; n < vertices.length; n += 3) {
+        x.push(vertices[n]);
+        y.push(vertices[n + 1]);
+        z.push(vertices[n + 2]);
+      }
+
+      const i = [];
+      const j = [];
+      const k = [];
+      for (let n = 0; n < faces.length; n += 3) {
+        i.push(faces[n]);
+        j.push(faces[n + 1]);
+        k.push(faces[n + 2]);
+      }
+
+      return {
+        x,
+        y,
+        z,
+        i,
+        j,
+        k,
+        metadata: rawMesh.metadata || {}
+      };
     }
 
-    // Show the section
-    if (section) {
-      section.style.display = 'block';
-    }
+    return null;
+  };
 
-    // @ts-ignore
-    if (window.Plotly) {
-      // @ts-ignore
+  useEffect(() => {
+    if (!window.Plotly) {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.plot.ly/plotly-2.27.0.min.js';
+      script.async = true;
+      document.head.appendChild(script);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!meshData) return;
+
+    let retryTimer = null;
+    let renderTimer = null;
+    let plottedDiv = null;
+
+    const tryRender = () => {
+      const div = plotlyRef.current;
+      if (!div) return;
+      if (!window.Plotly) {
+        retryTimer = setTimeout(tryRender, 500);
+        return;
+      }
+
+      plottedDiv = div;
+
       window.Plotly.newPlot(div, [{
-        type:        'mesh3d',
-        x:           meshData.x,
-        y:           meshData.y,
-        z:           meshData.z,
-        i:           meshData.i,
-        j:           meshData.j,
-        k:           meshData.k,
-        color:       '#e8b89a',
-        opacity:     1.0,
+        type: 'mesh3d',
+        x: meshData.x,
+        y: meshData.y,
+        z: meshData.z,
+        i: meshData.i,
+        j: meshData.j,
+        k: meshData.k,
+        color: '#e8b89a',
+        opacity: 1.0,
         flatshading: false,
         lighting: {
-          ambient:   0.7,
-          diffuse:   0.8,
-          specular:  0.3,
+          ambient: 0.7,
+          diffuse: 0.8,
+          specular: 0.3,
           roughness: 0.5,
-          fresnel:   0.2
+          fresnel: 0.2
         },
         lightposition: {
           x: 100, y: 200, z: 150
         }
       }], {
         paper_bgcolor: '#1a1a2e',
-        margin: { l:0, r:0, t:0, b:0 },
+        margin: { l: 0, r: 0, t: 0, b: 0 },
         scene: {
-          bgcolor:    '#1a1a2e',
+          bgcolor: '#1a1a2e',
           aspectmode: 'data',
           camera: {
-            eye: { x:0.0, y:0.3, z:2.2 },
-            up:  { x:0,   y:1,   z:0   }
+            eye: { x: 0.0, y: 0.3, z: 2.2 },
+            up: { x: 0, y: 1, z: 0 }
           },
           xaxis: {
-            visible:false, showgrid:false,
-            showbackground:false
+            visible: false,
+            showgrid: false,
+            showbackground: false
           },
           yaxis: {
-            visible:false, showgrid:false,
-            showbackground:false
+            visible: false,
+            showgrid: false,
+            showbackground: false
           },
           zaxis: {
-            visible:false, showgrid:false,
-            showbackground:false
+            visible: false,
+            showgrid: false,
+            showbackground: false
           }
         }
       }, {
-        responsive:  true,
+        responsive: true,
         displaylogo: false
       });
-    }
 
-    if (statusEl) {
-      statusEl.textContent =
-        '3D model from SMPLify-X · '
-        + (meshData.metadata?.height_cm
-           ? `Height: ${meshData.metadata.height_cm}cm`
-           : '');
-    }
+      const src = meshData.metadata?.source || 'SMPL';
+      const h = meshData.metadata?.height_cm || '';
+      const fitted = meshData.metadata?.betas_fitted;
+      setModelStatus(
+        `${fitted
+          ? '✓ Model fitted to your body'
+          : '3D model generated'
+        } · ${src}${h ? ` · Height: ${h}cm` : ''}`
+      );
+      console.log('3D model rendered OK');
+    };
 
-    console.log('3D model rendered OK');
-  };
+    renderTimer = setTimeout(tryRender, 300);
+
+    return () => {
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+      }
+      if (renderTimer) {
+        clearTimeout(renderTimer);
+      }
+
+      if (plottedDiv && window.Plotly) {
+        window.Plotly.purge(plottedDiv);
+      }
+    };
+  }, [meshData]);
 
   const handleImageUpload = (type, event) => {
     const file = event.target.files[0];
@@ -156,8 +222,22 @@ function UploadMode({ onBack }) {
       });
 
       setResults(response.data);
-      if (response.data.mesh_data) {
-        setTimeout(() => render3DModel(response.data.mesh_data), 100);
+      console.log('Full API response keys:', Object.keys(response.data));
+      console.log('mesh_data present:', !!response.data.mesh_data);
+      console.log('mesh_data x length:', response.data.mesh_data?.x?.length);
+      const rawMesh = response.data.mesh_data || response.data.results?.front?.mesh_data;
+      const normalizedMesh = normalizeMeshData(rawMesh);
+
+      if (normalizedMesh &&
+          normalizedMesh.x &&
+          normalizedMesh.x.length > 0) {
+        setMeshData(normalizedMesh);
+        console.log('mesh_data received:',
+          normalizedMesh.x.length,
+          'vertices');
+      } else {
+        console.log('No mesh_data in response');
+        setMeshData(null);
       }
     } catch (err) {
       setError(err.response?.data?.error || 'Processing failed');
@@ -370,43 +450,56 @@ function UploadMode({ onBack }) {
                     </div>
                   )}
 
-                  {/* 3D Body Model */}
-                  <div id="smpl-viewer-section"
-                       style={{display:'none', marginTop:'24px'}}>
-
-                    <div style={{background:'#1a1a2e',
-                                borderRadius:'12px',
-                                overflow:'hidden',
-                                border:'1px solid #333'}}>
-
-                      <div style={{padding:'12px 16px',
-                                  color:'#fff',
-                                  fontWeight:'600',
-                                  fontSize:'14px',
-                                  borderBottom:'1px solid #333',
-                                  display:'flex',
-                                  justifyContent:'space-between'}}>
+                  {/* 3D Body Model - Hidden via React state and CSS display: none */}
+                  <div style={{
+                    marginTop: '24px',
+                    display: (meshData && show3DModel) ? 'block' : 'none'
+                  }}>
+                    <div style={{
+                      background:'#1a1a2e',
+                      borderRadius:'12px',
+                      overflow:'hidden',
+                      border:'1px solid #333'
+                    }}>
+                      <div style={{
+                        padding:'12px 16px',
+                        color:'#fff',
+                        fontWeight:'600',
+                        fontSize:'14px',
+                        borderBottom:'1px solid #333',
+                        display:'flex',
+                        justifyContent:'space-between',
+                        alignItems:'center'
+                      }}>
                         <span>3D BODY MODEL</span>
-                        <span style={{color:'#888',
-                                     fontSize:'12px',
-                                     fontWeight:'400'}}>
+                        <span style={{
+                          color:'#888',
+                          fontSize:'12px',
+                          fontWeight:'400'
+                        }}>
                           Drag to rotate · Scroll to zoom
                         </span>
                       </div>
 
-                      <div id="smpl-3d-viewer"
-                           style={{width:'100%', height:'520px',
-                                  background:'#1a1a2e'}}>
-                      </div>
+                      <div
+                        id="smpl-3d-viewer"
+                        ref={plotlyRef}
+                        style={{
+                          width:'100%',
+                          height:'520px',
+                          background:'#1a1a2e'
+                        }}
+                      />
 
-                      <div style={{textAlign:'center',
-                                  padding:'8px',
-                                  fontSize:'12px',
-                                  color:'#888',
-                                  borderTop:'1px solid #333'}}>
-                        <span id="smpl-status-text"></span>
+                      <div style={{
+                        textAlign:'center',
+                        padding:'8px',
+                        fontSize:'12px',
+                        color:'#888',
+                        borderTop:'1px solid #333'
+                      }}>
+                        {modelStatus || 'Loading 3D model...'}
                       </div>
-
                     </div>
                   </div>
                 </>

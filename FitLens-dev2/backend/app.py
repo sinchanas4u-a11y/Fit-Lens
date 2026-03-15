@@ -259,14 +259,17 @@ def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success):
 
 
 def _build_smpl_mesh_data(smpl_result, user_height_cm, gender='neutral'):
-    """Build frontend-ready mesh data from fitted SMPL betas."""
+    """Build Plotly-ready mesh data from fitted SMPL betas or default body."""
     try:
-        if not smpl_result or not smpl_result.get('success'):
+        if user_height_cm is None or float(user_height_cm) <= 0:
             return None
 
-        betas = smpl_result.get('betas')
-        if betas is None or user_height_cm is None or float(user_height_cm) <= 0:
-            return None
+        if smpl_result and smpl_result.get('success') and smpl_result.get('betas') is not None:
+            betas = smpl_result.get('betas')
+            is_fitted = True
+        else:
+            betas = [0.0] * 10
+            is_fitted = False
 
         estimator = SMPLEstimator(gender=gender or 'neutral')
         betas_arr = np.array(betas, dtype=np.float32)
@@ -283,14 +286,26 @@ def _build_smpl_mesh_data(smpl_result, user_height_cm, gender='neutral'):
         scale = float(user_height_cm) / smpl_height_cm
         vertices_cm = vertices * 100.0 * scale
 
+        # Keep model centered for stable 3D viewer framing.
+        mid_y = (vertices_cm[:, 1].max() + vertices_cm[:, 1].min()) / 2.0
+        vertices_cm[:, 1] -= mid_y
+
         return {
-            'vertices': vertices_cm.astype(np.float32).reshape(-1).tolist(),
-            'faces': faces.reshape(-1).tolist(),
+            'x': vertices_cm[:, 0].tolist(),
+            'y': vertices_cm[:, 1].tolist(),
+            'z': vertices_cm[:, 2].tolist(),
+            'i': faces[:, 0].tolist(),
+            'j': faces[:, 1].tolist(),
+            'k': faces[:, 2].tolist(),
             'metadata': {
                 'vertex_count': int(vertices_cm.shape[0]),
                 'face_count': int(faces.shape[0]),
                 'height_cm': float(user_height_cm),
                 'gender': gender or 'neutral',
+                'fitted_to_user': is_fitted,
+                'betas_fitted': is_fitted,
+                'pose_applied': False,
+                'source': 'SMPL Fitted A-Pose' if is_fitted else 'SMPL Default A-Pose',
             },
         }
     except Exception as mesh_err:
@@ -613,10 +628,18 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
             if smpl_success:
                 smpl_m = smpl_result.get('measurements', {}) or {}
                 smpl_fit_info = smpl_result.get('fit', {}) or {}
-                # Use mesh_data directly from SMPL pipeline (already computed and scaled)
-                smpl_mesh_data = smpl_result.get('mesh_data')
             else:
                 smpl_error = smpl_result.get('error')
+
+            # Always provide mesh data when height is available.
+            # If fitting failed, this becomes a default-body A-pose mesh.
+            smpl_mesh_data = _build_smpl_mesh_data(
+                smpl_result if smpl_success else None,
+                effective_height_cm,
+                smpl_gender or 'neutral'
+            )
+            if smpl_mesh_data is None and smpl_success:
+                smpl_mesh_data = smpl_result.get('mesh_data')
         else:
             smpl_error = 'Insufficient data for SMPL (height or landmarks unavailable)'
         
@@ -728,7 +751,7 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
                 'landmarks_mode': smpl_fit_info.get('landmarks_mode', 'real' if smpl_success else 'unavailable'),
                 'landmark_count': int(smpl_fit_info.get('landmark_count', len(landmarks_list))),
                 'visible_landmark_count': int(smpl_fit_info.get('visible_landmark_count', 0)),
-                'pose_applied': bool(smpl_fit_info.get('pose_applied', False)),
+                'pose_applied': bool(smpl_mesh_data.get('metadata', {}).get('pose_applied', smpl_fit_info.get('pose_applied', False))) if isinstance(smpl_mesh_data, dict) else bool(smpl_fit_info.get('pose_applied', False)),
             },
             'mesh_data': smpl_mesh_data,
             'scale_info': {
