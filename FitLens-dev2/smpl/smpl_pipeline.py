@@ -9,10 +9,11 @@ def run_smpl_pipeline(
   user_height_cm: float,
   gender: str = 'neutral',
   view_type: str = 'front',
-  use_neutral_pose: bool = True
+  use_neutral_pose: bool = True,
+  target_measurements: dict = None
 ) -> dict:
 
-  print(f"Running SMPL pipeline (Neutral Pose: {use_neutral_pose})...")
+  print(f"Running SMPL pipeline (Neutral Pose: {use_neutral_pose}, Personalized: {target_measurements is not None})...")
 
   try:
     # Step 1: Fit shape to landmarks
@@ -25,7 +26,15 @@ def run_smpl_pipeline(
       view_type      = view_type,
       use_neutral_pose = use_neutral_pose
     )
-    fitted_betas = fit_result['betas']
+    
+    if target_measurements:
+        print("Refining SMPL betas with personal measurements...")
+        fitted_betas = estimator.fit_to_measurements(target_measurements, user_height_cm)
+        fit_result['betas'] = fitted_betas
+        fit_result['status_text'] = "✓ Model personalized to your measurements"
+    else:
+        fitted_betas = fit_result['betas']
+        
     fitted_pose  = fit_result['body_pose']
 
     # Step 2: Get 3D vertices

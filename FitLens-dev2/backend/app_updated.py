@@ -73,29 +73,31 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 MESHES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_meshes")
 os.makedirs(MESHES_DIR, exist_ok=True)
 
-def save_mesh_as_obj(mesh_data, view_name='front'):
+def save_mesh_as_obj(mesh_data, view_name='front', session_id=None):
     """Save mesh data (Plotly format) as a Wavefront OBJ file."""
     if not mesh_data or 'x' not in mesh_data:
         return None
     
-    view_dir = os.path.join(MESHES_DIR, view_name)
+    # Use session_id for unique mesh generation per user session
+    subdir = session_id if session_id else view_name
+    view_dir = os.path.join(MESHES_DIR, subdir)
     os.makedirs(view_dir, exist_ok=True)
+    
+    # We'll stick to 000.obj for the route, but the directory is unique
     obj_path = os.path.join(view_dir, "000.obj")
     
     try:
         with open(obj_path, 'w') as f:
-            f.write("# SMPL Mesh OBJ export\n")
+            f.write(f"# SMPL Mesh OBJ export - Session: {session_id or 'default'}\n")
             # Write vertices
             for x, y, z in zip(mesh_data['x'], mesh_data['y'], mesh_data['z']):
-                # Standard OBJ uses meters, Plotly data is often cm.
-                # The user requested upright, neutral pose.
                 f.write(f"v {x/100:.6f} {y/100:.6f} {z/100:.6f}\n")
             
             # Write faces (OBJ is 1-indexed)
             for i, j, k in zip(mesh_data['i'], mesh_data['j'], mesh_data['k']):
                 f.write(f"f {i+1} {j+1} {k+1}\n")
         
-        print(f"✓ Saved mesh to {obj_path}")
+        print(f"✓ Saved personalized mesh to {obj_path}")
         return obj_path
     except Exception as e:
         print(f"Error saving OBJ: {e}")
@@ -1249,14 +1251,19 @@ print("✓ Models initialized")
 # --- Existing API Routes ---
 
 @app.route('/mesh/<view>/000.obj')
-def serve_mesh_obj(view):
-    """Serve the 000.obj file for the specified view."""
-    obj_path = os.path.join(MESHES_DIR, view, "000.obj")
-    if os.path.exists(obj_path):
-        return send_file(obj_path, mimetype='text/plain')
-    else:
-        # Fallback to neutral if front doesn't exist yet
-        return jsonify({"error": "Mesh not found"}), 404
+@app.route('/mesh/<session_id>/<view>/000.obj')
+def serve_mesh_obj(view, session_id=None):
+    """Serve the 000.obj file for the specified session and view."""
+    if session_id:
+        obj_path = os.path.join(MESHES_DIR, session_id, "000.obj")
+        if os.path.exists(obj_path):
+            return send_file(obj_path, mimetype='text/plain')
+            
+    legacy_path = os.path.join(MESHES_DIR, view, "000.obj")
+    if os.path.exists(legacy_path):
+         return send_file(legacy_path, mimetype='text/plain')
+         
+    return jsonify({"error": "Mesh not found"}), 404
 
 @app.route('/api/verify-identity', methods=['POST'])
 def verify_identity():
@@ -1605,17 +1612,32 @@ def process_images():
         print("STEP 6: RETURNING MEASUREMENTS AS JSON")
         print("="*60)
 
+        # Generate a unique session ID for this request to ensure fresh mesh
+        session_id = f"{int(time.time() * 1000)}"
+        mesh_url = f"/mesh/{session_id}/front/000.obj"
+
         # Force use of front mesh data if available
         front_results = results.get('front', {})
         if isinstance(front_results, dict) and front_results.get('mesh_data'):
             mesh_data = front_results.get('mesh_data')
             smplx_status = 'success'
             
-            # Export front mesh as OBJ for the frontend
+            # Inject session_id into mesh_data so frontend SMPLViewer finds it
+            mesh_data['session_id'] = session_id
+            mesh_metadata = mesh_data.setdefault('metadata', {})
+            mesh_metadata['session_id'] = session_id
+            mesh_metadata['mesh_url'] = mesh_url
+            mesh_metadata['mesh_format'] = 'obj'
+            
+            # Export front mesh as OBJ with unique session ID
             try:
-                save_mesh_as_obj(mesh_data, 'front')
+                obj_path = save_mesh_as_obj(mesh_data, 'front', session_id=session_id)
+                mesh_metadata['mesh_file_exists'] = bool(obj_path and os.path.exists(obj_path))
+                mesh_metadata['mesh_file_path'] = obj_path
             except Exception as e:
                 print(f"Warning: Failed to export OBJ: {e}")
+                mesh_metadata['mesh_file_exists'] = False
+                mesh_metadata['mesh_file_path'] = None
         else:
             mesh_data = None
             smplx_status = 'unavailable'
@@ -1638,8 +1660,10 @@ def process_images():
             },
             'results': results,
             'mesh_data': mesh_data if mesh_data is not None else (front_results.get('mesh_data') if isinstance(front_results, dict) else None),
+            'mesh_url': mesh_url if mesh_data is not None else None,
             'smplx_status': smplx_status,
             'smplx_error': smplx_error,
+            'session_id': session_id
         }
 
         # Prepare final response metadata
@@ -1713,11 +1737,7 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
         
         print(f"✓ Detected {len(landmarks)} body landmarks")
 
-        # SMPL integration: run immediately after MediaPipe landmarks are available.
-        detected_gender = run_gender_detection(image)
-        
-        # Convert landmarks to format expected by run_smpl_pipeline
-        # MediaPipe landmarks are 33 x 3 (x, y, visibility)
+        # Step 4.1: Pose formatting for SMPL
         landmarks_formatted = []
         for i in range(len(landmarks)):
             landmarks_formatted.append({
@@ -1726,7 +1746,10 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
                 'visibility': landmarks[i][2] if len(landmarks[i]) > 2 else 1.0
             })
 
-        # Guard effective_height_cm against None
+        # Step 4.2: Gender detection
+        detected_gender = run_gender_detection(image)
+
+        # Step 4.3: Effective height calculation
         try:
             effective_height_cm = float(user_height_cm) if user_height_cm and float(user_height_cm) > 0 else 0.0
         except (TypeError, ValueError):
@@ -1734,13 +1757,59 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
 
         if effective_height_cm <= 0 and scale_factor:
             try:
-                if float(scale_factor or 0) > 0:
-                    estimated_height_px = _estimate_height_from_landmarks_px(landmarks)
-                    if estimated_height_px > 0:
-                        effective_height_cm = float(scale_factor or 0) * float(estimated_height_px or 0)
-            except (TypeError, ValueError):
+                estimated_height_px = _estimate_height_from_landmarks_px(landmarks)
+                if estimated_height_px > 0:
+                    effective_height_cm = float(scale_factor or 0) * float(estimated_height_px or 0)
+            except:
                 pass
 
+        # Step 4.5: Edge points extraction (MOVED UP)
+        edge_reference_points = None
+        print(f"\nSTEP 4.5: EXTRACTING EDGE REFERENCE POINTS ({view_name.upper()} VIEW)")
+        print("-" * 60)
+        
+        if mask is not None:
+            try:
+                edge_reference_points = ld.extract_body_edge_keypoints(mask, landmarks)
+                if edge_reference_points and edge_reference_points.get('is_valid'):
+                    print("✓ Edge reference points extracted successfully")
+            except Exception as e:
+                print(f"Warning: Could not extract edge points: {e}")
+                edge_reference_points = None
+
+        # Step 5: Computing measurements (MOVED UP)
+        print(f"\nSTEP 5: COMPUTING MEASUREMENTS ({view_name.upper()} VIEW)")
+        print("-" * 60)
+        
+        if scale_factor is None or scale_factor <= 0:
+            try:
+                nose = landmarks[0]
+                left_ankle = landmarks[27]
+                right_ankle = landmarks[28]
+                height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
+                scale_factor = user_height_cm / height_px if height_px > 0 else 1.0
+            except:
+                scale_factor = 1.0
+
+        try:
+            measurements = measurement_engine.calculate_measurements_with_confidence(
+                landmarks, scale_factor, view_name, edge_reference_points=edge_reference_points
+            )
+        except Exception as e:
+            print(f"⚠ Measurement error: {e}")
+            measurements = {}
+
+        # Prepare target measurements for SMPL personalization
+        target_measurements = {}
+        if measurements:
+            for name, m_data in measurements.items():
+                if isinstance(m_data, tuple) and len(m_data) == 3:
+                     target_measurements[name] = m_data[0] # cm value
+        
+        # Step 5.5: SMPL integration
+        print(f"\nSTEP 5.5: GENERATING PERSONALIZED 3D BODY MODEL ({view_name.upper()} VIEW)")
+        print("-" * 60)
+        
         smpl_success = False
         smpl_m = {}
         smpl_error = None
@@ -1748,7 +1817,7 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
         smpl_fit_info = {}
         
         if effective_height_cm > 0:
-            print(f"Running SMPL pipeline for {view_name} view...")
+            print(f"Running personalized SMPL pipeline for {view_name} view...")
             smpl_res = run_smpl_pipeline(
                 landmarks_2d   = landmarks_formatted,
                 image_width    = image.shape[1],
@@ -1756,7 +1825,8 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
                 user_height_cm = effective_height_cm,
                 gender         = detected_gender or 'neutral',
                 view_type      = view_name,
-                use_neutral_pose = True
+                use_neutral_pose = True,
+                target_measurements = target_measurements
             )
             
             if smpl_res.get('success'):
@@ -1764,74 +1834,35 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
                 smpl_mesh_data = smpl_res.get('mesh_data')
                 smpl_m = smpl_res.get('measurements', {})
                 smpl_fit_info = smpl_res.get('fit', {})
-                print(f"✓ SMPL mesh ready: {len(smpl_mesh_data['x']) if smpl_mesh_data else 0} vertices")
+                print(f"✓ SMPL mesh refined: {len(smpl_mesh_data['x']) if smpl_mesh_data else 0} vertices")
+                
+                # Export OBJ file immediately so the viewer can fetch it
+                if smpl_mesh_data.get('session_id') is None:
+                    temp_session_id = f"{int(time.time() * 1000)}"
+                    mesh_url = f"/mesh/{temp_session_id}/{view_name}/000.obj"
+                    
+                    smpl_mesh_data['session_id'] = temp_session_id
+                    mesh_metadata = smpl_mesh_data.setdefault('metadata', {})
+                    mesh_metadata['session_id'] = temp_session_id
+                    mesh_metadata['mesh_url'] = mesh_url
+                    mesh_metadata['mesh_format'] = 'obj'
+                    
+                    try:
+                        obj_path = save_mesh_as_obj(smpl_mesh_data, view_name, session_id=temp_session_id)
+                        mesh_metadata['mesh_file_exists'] = bool(obj_path and os.path.exists(obj_path))
+                        mesh_metadata['mesh_file_path'] = obj_path
+                    except Exception as e:
+                        print(f"Warning: Failed to export OBJ in process_single_view: {e}")
+                        mesh_metadata['mesh_file_exists'] = False
+                        mesh_metadata['mesh_file_path'] = None
+
             else:
                 smpl_error = smpl_res.get('error', "SMPL fitting failed")
                 print(f"✗ {smpl_error}")
         else:
             smpl_error = 'Insufficient data for SMPL (height unavailable)'
-        
-        # Extract edge reference points from segmentation mask for hybrid approach
-        edge_reference_points = None
-        print(f"\nSTEP 4.5: EXTRACTING EDGE REFERENCE POINTS ({view_name.upper()} VIEW)")
-        print("-" * 60)
-        
-        if mask is not None:
-            try:
-                # Use the landmark detector to extract edge points from the segmentation mask
-                edge_reference_points = ld.extract_body_edge_keypoints(mask, landmarks)
-                
-                if edge_reference_points and edge_reference_points.get('is_valid'):
-                    print("✓ Edge reference points extracted successfully:")
-                    print(f"  Shoulder width: {edge_reference_points.get('shoulder_right', (0,0))[0] - edge_reference_points.get('shoulder_left', (0,0))[0]:.1f} px")
-                    print(f"  Hip width: {edge_reference_points.get('hip_right', (0,0))[0] - edge_reference_points.get('hip_left', (0,0))[0]:.1f} px")
-                    print(f"  Height: {edge_reference_points.get('height_px', 0):.1f} px")
-                else:
-                    print("⚠ Edge extraction returned invalid points, using MediaPipe fallback")
-            except Exception as e:
-                print(f"Warning: Could not extract edge points: {e}")
-                edge_reference_points = None
-        
-        print(f"\nSTEP 5: COMPUTING MEASUREMENTS ({view_name.upper()} VIEW)")
-        print("-" * 60)
-        
-        print(f"Calling measurement_engine.calculate_measurements_with_confidence")
-        print(f"  Landmarks shape: {landmarks.shape if hasattr(landmarks, 'shape') else 'N/A'}")
-        print(f"  Scale factor: {scale_factor}")
-        print(f"  View: {view_name}")
-        print(f"  Edge points available: {edge_reference_points is not None and edge_reference_points.get('is_valid', False)}")
 
-        # Guard against missing/invalid scale factor by recomputing from height in this frame.
-        if scale_factor is None or scale_factor <= 0:
-            nose = landmarks[0]
-            left_ankle = landmarks[27]
-            right_ankle = landmarks[28]
-            height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
-            scale_factor = _compute_scale_from_height_px(
-                live_session.user_height_cm,
-                height_px,
-                fallback=1.0
-            )
-            print(f"  Recomputed scale factor: {scale_factor}")
-        
-        # Calculate measurements with pixel distances using hybrid approach
-        # Uses edge points for width measurements, MediaPipe for others
-        try:
-            measurements = measurement_engine.calculate_measurements_with_confidence(
-                landmarks, scale_factor, view_name, edge_reference_points=edge_reference_points
-            )
-        except TypeError as e:
-            # Fallback: measurement engine doesn't support edge_reference_points
-            print(f"⚠ Measurement engine doesn't support edge_reference_points: {e}")
-            print("  Falling back to MediaPipe-only measurements")
-            measurements = measurement_engine.calculate_measurements_with_confidence(
-                landmarks, scale_factor, view_name
-            )
-        
-        print(f"\n✓ Measurement engine returned: {type(measurements)}")
-        print(f"✓ Number of measurements: {len(measurements) if measurements else 0}")
-        if measurements:
-            print(f"✓ Measurement keys: {list(measurements.keys())[:5]}...")  # Show first 5
+        print(f"\n✓ Measurement engine results processed")
         
         # Format MediaPipe measurements first, then merge with SMPL outputs.
         mp_measurements = {}

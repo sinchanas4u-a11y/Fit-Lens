@@ -141,6 +141,94 @@ class SMPLEstimator:
     def get_joints(self, vertices: np.ndarray) -> np.ndarray:
         return self.J_regressor @ vertices
 
+    def fit_to_measurements(self, target_measurements, user_height_cm, n_betas=10):
+        """Fit body shape (betas) to specific circumference and width measurements."""
+        print(f"Fitting SMPL betas to measurements: {target_measurements}")
+        
+        # Height-based percentage levels for circumferences
+        levels = {
+            'chest_circumference': 0.27,
+            'waist_circumference': 0.40,
+            'hip_circumference': 0.52,
+        }
+        
+        def objective(betas):
+            betas = np.asarray(betas, dtype=np.float64)
+            v = self._shape_vertices(betas)
+            loss = 0.0
+            
+            # Circumference losses
+            for name, y_pct in levels.items():
+                target = target_measurements.get(name)
+                if target:
+                    val = self._calculate_mesh_circumference(v, y_pct, user_height_cm)
+                    if val:
+                        loss += 2.0 * ((val - target) / target)**2
+            
+            # Shoulder width loss
+            if 'shoulder_width' in target_measurements:
+                target = target_measurements['shoulder_width']
+                joints = self.get_joints(v)
+                # Scale joints to cm
+                y_min, y_max = v[:, 1].min(), v[:, 1].max()
+                scale = user_height_cm / ((y_max - y_min) * 100.0)
+                # Joint 16/17 are shoulders
+                sh_dist = np.linalg.norm(joints[16] - joints[17]) * 100.0 * scale
+                loss += 1.0 * ((sh_dist - target) / target)**2
+                
+            # Regularization
+            loss += 0.05 * np.sum(betas**2)
+            return float(loss)
+
+        result = minimize(
+            objective,
+            x0=np.zeros(n_betas, dtype=np.float64),
+            method="L-BFGS-B",
+            bounds=[(-4, 4)] * n_betas,
+            options={"maxiter": 100, "ftol": 1e-6},
+        )
+        
+        fitted_betas = np.asarray(result.x, dtype=np.float64)
+        print(f"Personalized fit loss: {result.fun:.6f}")
+        return fitted_betas
+
+    def _calculate_mesh_circumference(self, vertices, y_pct, user_height_cm):
+        """Helper to calculate mesh circumference at a relative height percentage."""
+        y_min, y_max = vertices[:, 1].min(), vertices[:, 1].max()
+        h_m = y_max - y_min
+        if h_m <= 0: return None
+        
+        scale = user_height_cm / (h_m * 100.0)
+        v_cm = vertices * 100.0 * scale
+        
+        y_max_cm = v_cm[:, 1].max()
+        h_cm = user_height_cm
+        y_level = y_max_cm - h_cm * y_pct
+        
+        # Vertical slice with 2cm tolerance
+        mask = np.abs(v_cm[:, 1] - y_level) < 1.0
+        section = v_cm[mask]
+        
+        if len(section) < 15: return None
+        
+        # Use 2D convex hull for circumference approximation
+        from scipy.spatial import ConvexHull
+        try:
+            pts = section[:, [0, 2]] # X, Z plane
+            # Remove arms by x proximity
+            center_x = pts[:, 0].mean()
+            pts = pts[np.abs(pts[:, 0] - center_x) < 30.0]
+            
+            if len(pts) < 10: return None
+            
+            hull = ConvexHull(pts)
+            vh = pts[hull.vertices]
+            n = len(vh)
+            perim = sum(np.linalg.norm(vh[(i+1)%n] - vh[i]) for i in range(n))
+            return float(perim)
+        except:
+            return None
+
     def fit_to_landmarks(self, landmarks_2d, image_width, image_height, user_height_cm, view_type='front', use_neutral_pose=False):
         targets = self._prepare_landmark_targets(landmarks_2d)
         if len(targets) < 4:
