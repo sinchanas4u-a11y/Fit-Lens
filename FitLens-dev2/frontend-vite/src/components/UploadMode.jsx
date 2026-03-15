@@ -880,9 +880,8 @@ const UploadMode = () => {
                 );
                 const canShowPlaceholder = !hasModel && (frontResult?.smpl?.status === 'active' || frontResult?.smpl?.status === 'estimated' || !!frontResult?.smpl);
                 const frontSmplStatus = getSmplStatusBadge(frontResult?.smpl);
-                const smplStatusText = apiSmplxStatus === 'success'
-                  ? '✓ Model fitted to your body'
-                  : frontSmplStatus.text;
+                const smplStatusText = frontResult?.smpl?.status_text || 
+                  (apiSmplxStatus === 'success' ? '✓ Model fitted to your body' : frontSmplStatus.text);
 
                 // Enhanced debug logging for mesh_data (Plotly format)
                 console.log('🔍 Front result:', frontResult);

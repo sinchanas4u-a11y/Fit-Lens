@@ -1837,7 +1837,7 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
                 print(f"✓ SMPL mesh refined: {len(smpl_mesh_data['x']) if smpl_mesh_data else 0} vertices")
                 
                 # Export OBJ file immediately so the viewer can fetch it
-                if smpl_mesh_data.get('session_id') is None:
+                if smpl_mesh_data is not None and smpl_mesh_data.get('session_id') is None:
                     temp_session_id = f"{int(time.time() * 1000)}"
                     mesh_url = f"/mesh/{temp_session_id}/{view_name}/000.obj"
                     
@@ -1857,8 +1857,53 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
                         mesh_metadata['mesh_file_path'] = None
 
             else:
-                smpl_error = smpl_res.get('error', "SMPL fitting failed")
-                print(f"✗ {smpl_error}")
+                smpl_error = smpl_res.get('error', 'SMPL fitting failed')
+                print(f'SMPL pipeline failed: {smpl_error} — generating default neutral body model...')
+                # Fallback: always provide a body model even when landmark fitting fails
+                try:
+                    fallback_est = SMPLEstimator(gender=detected_gender or 'neutral')
+                    fb_betas = np.zeros(10, dtype=np.float64)
+                    fb_verts = fallback_est.get_vertices(fb_betas)
+                    fb_faces = np.asarray(fallback_est.faces, dtype=np.int32)
+                    fb_y_span = (float(fb_verts[:, 1].max()) - float(fb_verts[:, 1].min())) * 100.0
+                    if fb_y_span > 0 and effective_height_cm > 0:
+                        fb_scale = effective_height_cm / fb_y_span
+                        fb_cm = fb_verts * 100.0 * fb_scale
+                        fb_cm[:, 1] -= (fb_cm[:, 1].max() + fb_cm[:, 1].min()) / 2.0
+                        smpl_mesh_data = {
+                            'x': fb_cm[:, 0].tolist(),
+                            'y': fb_cm[:, 1].tolist(),
+                            'z': fb_cm[:, 2].tolist(),
+                            'i': fb_faces[:, 0].tolist(),
+                            'j': fb_faces[:, 1].tolist(),
+                            'k': fb_faces[:, 2].tolist(),
+                            'metadata': {
+                                'vertex_count': int(fb_cm.shape[0]),
+                                'face_count': int(fb_faces.shape[0]),
+                                'height_cm': float(effective_height_cm),
+                                'gender': detected_gender or 'neutral',
+                                'fitted_to_user': False,
+                                'fit_status': 'default',
+                                'status_text': 'Default body model (estimated from height)',
+                                'pose_applied': False,
+                                'landmarks_source': 'none',
+                            }
+                        }
+                        smpl_success = True
+                        smpl_error = None
+                        smpl_fit_info = {
+                            'fit_status': 'default',
+                            'status_text': 'Default body model (estimated from height)',
+                            'fitted_to_user': False,
+                            'landmarks_source': 'none',
+                            'landmarks_mode': 'unavailable',
+                            'visible_landmark_count': 0,
+                            'landmark_count': len(landmarks_formatted),
+                            'pose_applied': False,
+                        }
+                        print(f'Fallback SMPL: generated ({len(fb_cm)} vertices)')
+                except Exception as fb_err:
+                    print(f'Fallback SMPL failed: {fb_err}')
         else:
             smpl_error = 'Insufficient data for SMPL (height unavailable)'
 
