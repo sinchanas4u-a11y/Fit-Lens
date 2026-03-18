@@ -160,65 +160,71 @@ class BetaCalculator:
     n_iterations:     int   = 200
   ) -> np.ndarray:
     """
-    Optimize betas to match target
-    body measurements.
+    Analytically compute betas directly from
+    target measurements using a Jacobian 
+    pseudo-inverse mapping.
     """
-    from scipy.optimize import minimize
-
     targets = {
       'chest': target_chest_cm,
       'waist': target_waist_cm,
       'hip':   target_hip_cm,
     }
 
-    print(f"Fitting betas to measurements:")
+    print(f"Analytically fitting betas to measurements:")
     print(f"  Target chest : {target_chest_cm} cm")
     print(f"  Target waist : {target_waist_cm} cm")
     print(f"  Target hip   : {target_hip_cm} cm")
 
-    def objective(betas):
-      verts = self.get_vertices(betas)
-      meas  = self.measure_mesh(
-        verts, user_height_cm
-      )
-      loss  = 0.0
-      for key, target in targets.items():
-        val = meas.get(key)
-        if val is not None and target:
-          loss += ((val - target) / target)**2
-      # Regularization
-      loss += 0.01 * np.sum(betas**2)
-      return float(loss)
+    # 1. Base measurements at beta = 0
+    base_betas = np.zeros(n_betas)
+    base_verts = self.get_vertices(base_betas)
+    base_meas = self.measure_mesh(base_verts, user_height_cm)
 
-    result = minimize(
-      objective,
-      x0      = np.zeros(n_betas),
-      method  = 'L-BFGS-B',
-      bounds  = [(-3, 3)] * n_betas,
-      options = {
-        'maxiter': n_iterations,
-        'ftol':    1e-8,
-        'gtol':    1e-6
-      }
-    )
+    # Use only valid keys
+    keys = [k for k in ['chest', 'waist', 'hip'] if targets.get(k) and base_meas.get(k)]
+    if not keys:
+      print("No valid measurements found. Returning zero betas.")
+      return base_betas
 
-    fitted_betas = result.x
-    print(f"Fit converged : {result.success}")
-    print(f"Fit loss      : {result.fun:.6f}")
-    print(f"Fitted betas  : "
-          f"{np.round(fitted_betas, 3)}")
+    # 2. Compute Jacobian matrix J (num_measurements x n_betas)
+    J = np.zeros((len(keys), n_betas))
+    delta = 1.0  # 1 standard deviation step for finite differences
+    
+    for j in range(n_betas):
+      betas_j = np.zeros(n_betas)
+      betas_j[j] = delta
+      verts_j = self.get_vertices(betas_j)
+      meas_j = self.measure_mesh(verts_j, user_height_cm)
+      
+      for i, k in enumerate(keys):
+        if meas_j.get(k) is not None:
+          J[i, j] = (meas_j[k] - base_meas[k]) / delta
+
+    # 3. Compute delta measurements
+    delta_m = np.array([targets[k] - base_meas[k] for k in keys])
+    
+    # 4. Direct analytic solution: beta = J^T (J J^T + lambda I)^-1 delta_m
+    # We use Tikhonov regularization (lambda) to avoid extreme shapes
+    l2_reg = 0.5
+    J_T = J.T
+    matrix_to_inv = J @ J_T + l2_reg * np.eye(len(keys))
+    
+    try:
+      fitted_betas = J_T @ np.linalg.solve(matrix_to_inv, delta_m)
+    except np.linalg.LinAlgError:
+      print("Singular matrix encountered, returning zero betas.")
+      fitted_betas = np.zeros(n_betas)
+
+    print(f"Fitted betas  : {np.round(fitted_betas, 3)}")
 
     # Verify
     verts = self.get_vertices(fitted_betas)
-    final = self.measure_mesh(
-      verts, user_height_cm
-    )
+    final = self.measure_mesh(verts, user_height_cm)
     print(f"Final measurements:")
     for k, v in final.items():
       t = targets.get(k, 0)
       if v:
-        print(f"  {k:8s}: {v:.1f} cm "
-              f"(target: {t:.1f} cm)")
+        print(f"  {k:8s}: {v:.1f} cm (target: {t:.1f} cm)")
 
     return fitted_betas
 

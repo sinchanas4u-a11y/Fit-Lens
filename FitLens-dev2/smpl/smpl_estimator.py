@@ -142,8 +142,8 @@ class SMPLEstimator:
         return self.J_regressor @ vertices
 
     def fit_to_measurements(self, target_measurements, user_height_cm, n_betas=10):
-        """Fit body shape (betas) to specific circumference and width measurements."""
-        print(f"Fitting SMPL betas to measurements: {target_measurements}")
+        """Fit body shape (betas) analytically to specific circumference and width measurements."""
+        print(f"Analytically fitting SMPL betas to measurements: {target_measurements}")
         
         # Height-based percentage levels for circumferences
         levels = {
@@ -152,44 +152,69 @@ class SMPLEstimator:
             'hip_circumference': 0.52,
         }
         
-        def objective(betas):
-            betas = np.asarray(betas, dtype=np.float64)
-            v = self._shape_vertices(betas)
-            loss = 0.0
-            
-            # Circumference losses
-            for name, y_pct in levels.items():
-                target = target_measurements.get(name)
-                if target:
-                    val = self._calculate_mesh_circumference(v, y_pct, user_height_cm)
-                    if val:
-                        loss += 2.0 * ((val - target) / target)**2
-            
-            # Shoulder width loss
-            if 'shoulder_width' in target_measurements:
-                target = target_measurements['shoulder_width']
-                joints = self.get_joints(v)
-                # Scale joints to cm
-                y_min, y_max = v[:, 1].min(), v[:, 1].max()
-                scale = user_height_cm / ((y_max - y_min) * 100.0)
-                # Joint 16/17 are shoulders
-                sh_dist = np.linalg.norm(joints[16] - joints[17]) * 100.0 * scale
-                loss += 1.0 * ((sh_dist - target) / target)**2
+        # 1. Base measurements at beta = 0
+        base_betas = np.zeros(n_betas, dtype=np.float64)
+        base_v = self._shape_vertices(base_betas)
+        base_meas = {}
+        for name, y_pct in levels.items():
+            if name in target_measurements:
+                val = self._calculate_mesh_circumference(base_v, y_pct, user_height_cm)
+                if val: base_meas[name] = val
                 
-            # Regularization
-            loss += 0.05 * np.sum(betas**2)
-            return float(loss)
-
-        result = minimize(
-            objective,
-            x0=np.zeros(n_betas, dtype=np.float64),
-            method="L-BFGS-B",
-            bounds=[(-4, 4)] * n_betas,
-            options={"maxiter": 100, "ftol": 1e-6},
-        )
+        if 'shoulder_width' in target_measurements:
+            y_min, y_max = base_v[:, 1].min(), base_v[:, 1].max()
+            scale = user_height_cm / ((y_max - y_min) * 100.0)
+            joints = self.get_joints(base_v)
+            sh_dist = np.linalg.norm(joints[16] - joints[17]) * 100.0 * scale
+            base_meas['shoulder_width'] = sh_dist
+            
+        keys = list(base_meas.keys())
+        if not keys:
+            print("No valid measurements found. Returning base betas.")
+            return base_betas
+            
+        # 2. Compute Jacobian matrix J (num_measurements x n_betas)
+        J = np.zeros((len(keys), n_betas), dtype=np.float64)
+        delta = 1.0 # beta units are roughly standard deviations, 1.0 is a good scale
         
-        fitted_betas = np.asarray(result.x, dtype=np.float64)
-        print(f"Personalized fit loss: {result.fun:.6f}")
+        for j in range(n_betas):
+            betas_j = np.zeros(n_betas, dtype=np.float64)
+            betas_j[j] = delta
+            v_j = self._shape_vertices(betas_j)
+            
+            meas_j = {}
+            for name, y_pct in levels.items():
+                if name in target_measurements:
+                    val = self._calculate_mesh_circumference(v_j, y_pct, user_height_cm)
+                    if val: meas_j[name] = val
+                    
+            if 'shoulder_width' in target_measurements:
+                y_min, y_max = v_j[:, 1].min(), v_j[:, 1].max()
+                scale = user_height_cm / ((y_max - y_min) * 100.0)
+                joints_j = self.get_joints(v_j)
+                sh_dist = np.linalg.norm(joints_j[16] - joints_j[17]) * 100.0 * scale
+                meas_j['shoulder_width'] = sh_dist
+                
+            for i, k in enumerate(keys):
+                if k in meas_j:
+                    J[i, j] = (meas_j[k] - base_meas[k]) / delta
+                    
+        # 3. Compute delta measurements between target and base
+        delta_m = np.array([target_measurements[k] - base_meas[k] for k in keys], dtype=np.float64)
+        
+        # 4. Solves for betas: beta = J^T (J J^T + lambda I)^-1 delta_m
+        # We use a small regularization parameter lambda to avoid extreme localized deformations
+        l2_reg = 0.5 
+        J_T = J.T
+        matrix_to_inv = J @ J_T + l2_reg * np.eye(len(keys), dtype=np.float64)
+        
+        try:
+            fitted_betas = J_T @ np.linalg.solve(matrix_to_inv, delta_m)
+        except np.linalg.LinAlgError:
+            print("Singular matrix encountered, falling back to zero betas.")
+            fitted_betas = np.zeros(n_betas, dtype=np.float64)
+            
+        print(f"Personalized fit betas: {np.round(fitted_betas, 3)}")
         return fitted_betas
 
     def _calculate_mesh_circumference(self, vertices, y_pct, user_height_cm):
