@@ -1,0 +1,8 @@
+mediapipe==0.10.14
+protobuf==4.25.3
+onnxruntime==1.20.1
+onnx==1.20.1
+opencv-python==4.8.0
+numpy==1.23.5
+ultralytics
+insightface
