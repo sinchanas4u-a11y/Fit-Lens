@@ -97,12 +97,14 @@ const frameCameraToObject = (camera, controls, object, lights) => {
   const center = box.getCenter(new THREE.Vector3());
   const maxDim = Math.max(size.x, size.y, size.z, 1);
   const fov = THREE.MathUtils.degToRad(camera.fov);
-  const distance = (maxDim / (2 * Math.tan(fov / 2))) * 1.35;
-  const target = new THREE.Vector3(center.x, size.y * 0.45, center.z);
+  const distance = (maxDim / (2 * Math.tan(fov / 2))) * 1.4;
+
+  // Look at the body centre (mid-torso, ~55% of height)
+  const target = new THREE.Vector3(center.x, box.min.y + size.y * 0.55, center.z);
 
   camera.near = Math.max(0.01, distance / 100);
   camera.far = Math.max(1000, distance * 20);
-  camera.position.set(center.x + distance * 0.35, target.y + distance * 0.2, center.z + distance);
+  camera.position.set(center.x, target.y, center.z + distance);
   camera.lookAt(target);
   camera.updateProjectionMatrix();
 
@@ -255,20 +257,20 @@ const SMPLViewer = ({ meshData, statusText, statusDetail }) => {
             return;
           }
 
-          const initialSize = initialBox.getSize(new THREE.Vector3());
           const initialCenter = initialBox.getCenter(new THREE.Vector3());
-          const targetHeight = 1.8;
-          const currentHeight = initialSize.y > 0 ? initialSize.y : Math.max(initialSize.x, initialSize.y, initialSize.z, 1);
-          const scaleFactor = currentHeight > 0 ? targetHeight / currentHeight : 1;
+          const initialSize = initialBox.getSize(new THREE.Vector3());
+          const targetHeight = 1.8; // metres — matches a ~180 cm person
+          const currentHeight = initialSize.y > 0 ? initialSize.y : 1;
+          const scaleFactor = targetHeight / currentHeight;
 
+          // Scale uniformly to target height
           object.scale.setScalar(scaleFactor);
 
+          // After scaling, re-compute bounds and place feet at Y=0, centred on X/Z
           const scaledBox = new THREE.Box3().setFromObject(object);
+          const scaledMin = scaledBox.min;
           const scaledCenter = scaledBox.getCenter(new THREE.Vector3());
-          object.position.sub(scaledCenter);
-
-          const centeredBox = new THREE.Box3().setFromObject(object);
-          object.position.y -= centeredBox.min.y;
+          object.position.set(-scaledCenter.x, -scaledMin.y, -scaledCenter.z);
 
           scene.add(object);
           meshRef.current = object;

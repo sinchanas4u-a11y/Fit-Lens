@@ -46,7 +46,11 @@ def run_smpl_pipeline(
 
     # Stage 3: extract measurements from neutral-pose mesh
     neutral_vertices = estimator.get_vertices(fitted_betas)
-    posed_vertices   = estimator.get_vertices(fitted_betas, fitted_pose)
+    
+    # RESET POSE: Ensure neutral, upright, centered pose for the output mesh
+    # Instead of using potentially distorted 'fitted_pose' from landmark fitting
+    output_pose = np.zeros((24, 3), dtype=np.float64)
+    posed_vertices = estimator.get_vertices(fitted_betas, output_pose)
 
     extractor    = MeasurementExtractor()
     measurements = extractor.extract_all(
@@ -67,6 +71,11 @@ def run_smpl_pipeline(
 
       mid_y = (vertices_cm[:, 1].max() + vertices_cm[:, 1].min()) / 2.0
       vertices_cm[:, 1] -= mid_y
+      
+      # Step: Centre on X and Z for a perfect upright placement
+      for ax in [0, 2]:
+          mid_ax = (vertices_cm[:, ax].max() + vertices_cm[:, ax].min()) / 2.0
+          vertices_cm[:, ax] -= mid_ax
 
       mesh_data = {
         'x': vertices_cm[:, 0].tolist(),
@@ -125,7 +134,11 @@ def _build_mesh_data(estimator, betas, pose, user_height_cm, gender,
                      fit_result, landmarks_2d):
     """Scale posed vertices to cm, centre vertically, return Plotly mesh dict."""
     faces          = np.asarray(estimator.faces, dtype=np.int32)
-    posed_vertices = estimator.get_vertices(betas, pose)
+    
+    # RESET POSE: Force neutral, upright, centered pose for the output mesh
+    # Instead of using 'pose' which might be distorted from 2D projection
+    output_pose    = np.zeros((24, 3), dtype=np.float64)
+    posed_vertices = estimator.get_vertices(betas, output_pose)
 
     y_min = float(posed_vertices[:, 1].min())
     y_max = float(posed_vertices[:, 1].max())
@@ -139,6 +152,11 @@ def _build_mesh_data(estimator, betas, pose, user_height_cm, gender,
 
     mid_y = (vertices_cm[:, 1].max() + vertices_cm[:, 1].min()) / 2.0
     vertices_cm[:, 1] -= mid_y
+    
+    # Step: Centre on X and Z for a perfect upright placement
+    for ax in [0, 2]:
+        mid_ax = (vertices_cm[:, ax].max() + vertices_cm[:, ax].min()) / 2.0
+        vertices_cm[:, ax] -= mid_ax
 
     return {
         'x': vertices_cm[:, 0].tolist(),
@@ -220,8 +238,8 @@ def run_multiview_smpl_pipeline(
                 fit_result['status_text'] = "Model fitted from front + side silhouettes"
                 fit_result['fit_status']  = 'multiview'
                 print("[MultiView] Silhouette refinement succeeded.")
-            except ValueError as ve:
-                print(f"[MultiView] Silhouette refinement failed ({ve}) "
+            except Exception as e:
+                print(f"[MultiView] Silhouette refinement failed ({e}) "
                       "-- falling back to landmark betas.")
                 fitted_betas       = landmark_betas
                 silhouette_targets = {}
