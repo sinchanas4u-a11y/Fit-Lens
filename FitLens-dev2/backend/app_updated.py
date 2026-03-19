@@ -1637,9 +1637,7 @@ def process_images():
                     gender             = detected_gender_mv or 'neutral',
                     front_mask         = front_mask_mv,
                     side_mask          = side_mask_mv,
-                    side_landmarks_2d  = side_lm_fmt if side_lm_fmt else None,
-                    side_image_width   = side_img.shape[1],
-                    side_image_height  = side_img.shape[0],
+                    target_measurements = front_results.get('smpl_target_measurements') or {},
                 )
 
                 if mv_res.get('success') and mv_res.get('mesh_data'):
@@ -1878,26 +1876,30 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
 
         # Prepare target measurements for SMPL personalization
         target_measurements = {}
+
+        # Always include user height — the most reliable anchor
+        if effective_height_cm > 0:
+            target_measurements['height'] = float(effective_height_cm)
+
         if measurements:
             for name, m_data in measurements.items():
                 if isinstance(m_data, tuple) and len(m_data) == 3:
                      val = m_data[0] # cm value
-                     
+
                      # VALIDATE measurements before passing to SMPL
                      # Realistic ranges:
                      # chest: 70-130 cm
                      # waist: 55-125 cm
                      # hip:   75-135 cm
-                     
+
                      if name == 'chest_circumference':
                          if not (70 <= val <= 130):
                              print(f"WARNING: chest {val:.2f} out of range, recalculating...")
-                             # Fallback to width-based estimation if possible
                              chest_width_data = measurements.get('chest_width')
                              if chest_width_data and isinstance(chest_width_data, tuple):
                                  val = chest_width_data[0] * 3.2
                              else:
-                                 val = 90.0 # Default
+                                 val = 90.0
                          target_measurements[name] = val
 
                      elif name == 'waist_circumference':
@@ -1907,7 +1909,6 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
                          target_measurements[name] = val
 
                      elif name == 'hip_circumference' or name == 'hip_width':
-                         # If we have hip_width, use it to estimate hip_circumference if too large
                          key = 'hip_circumference'
                          if val > 135:
                              print(f"WARNING: hip {val:.2f} too large, recalculating from width...")
@@ -1917,7 +1918,6 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
                                  if 33 <= h_w <= 55:
                                      val = h_w * 3.0
                                  else:
-                                     # fallback to waist + offset
                                      waist_data = measurements.get('waist_circumference')
                                      w_c = waist_data[0] if waist_data else 85
                                      val = w_c + 15
@@ -1926,6 +1926,15 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
                          elif val < 75:
                              val = 85.0
                          target_measurements[key] = val
+
+                     elif name == 'shoulder_width':
+                         if 25.0 <= val <= 65.0:
+                             target_measurements[name] = val
+
+                     elif name in ('arm_length', 'leg_length'):
+                         if val > 10.0:
+                             target_measurements[name] = val
+
                      else:
                          target_measurements[name] = val
         
@@ -2157,6 +2166,7 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
             'visualization': vis_base64,
             'mask': mask_base64,
             'bbox': bbox if bbox else None,
+            'smpl_target_measurements': target_measurements,
             'smpl': {
                 'enabled': True,
                 'success': smpl_success,
