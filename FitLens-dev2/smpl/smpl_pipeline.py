@@ -1,14 +1,12 @@
-"""
+﻿"""
 SMPL mesh generation pipeline.
 
 Key design decisions:
 - Betas are clamped to [-2, 2] -- values beyond +-3 produce non-human shapes.
 - Shape fitting uses ratio-based losses + strong L2 regularisation.
-- Pose estimation uses a two-stage approach:
-    Stage 1: Heuristic warm-start from 2D landmark geometry.
-    Stage 2: Reprojection optimisation (L-BFGS-B) with biomechanical limits.
+- Pose estimation uses a per-joint direct geometric solver (no global optimizer).
 - When use_neutral_pose=True the mesh is always rendered in A-pose (safe default).
-- When use_neutral_pose=False the optimised pose is applied to the mesh.
+- When use_neutral_pose=False the estimated pose is applied to the mesh.
 """
 
 import numpy as np
@@ -68,18 +66,15 @@ def _build_neutral_mesh(estimator, betas, user_height_cm, gender, fit_result, n_
 def _build_posed_mesh(estimator, betas, pose, user_height_cm, gender, fit_result, n_landmarks):
     """
     Posed mesh using the estimated body pose.
-
-    The pose is applied to the SMPL model, then the resulting vertices are
-    aligned (scaled to user height, feet at Y=0, centred on pelvis).
     Falls back to neutral mesh if the posed mesh is degenerate.
     """
     faces = np.asarray(estimator.faces, dtype=np.int32)
 
-    # Check if pose is non-trivial
     pose_arr = np.asarray(pose, dtype=np.float64).reshape(-1)
     has_pose = bool(np.any(np.abs(pose_arr) > 1e-3))
 
     if not has_pose:
+        print("[Mesh] Pose is trivial — using neutral mesh")
         return _build_neutral_mesh(estimator, betas, user_height_cm, gender, fit_result, n_landmarks)
 
     try:
@@ -88,7 +83,6 @@ def _build_posed_mesh(estimator, betas, pose, user_height_cm, gender, fit_result
         print(f"[Mesh] Posed vertices failed ({e}), falling back to neutral")
         return _build_neutral_mesh(estimator, betas, user_height_cm, gender, fit_result, n_landmarks)
 
-    # Sanity check: posed mesh should not be wildly different in size from neutral
     neutral_verts = estimator.get_vertices(betas)
     neutral_span  = float(neutral_verts[:, 1].max() - neutral_verts[:, 1].min())
     posed_span    = float(verts[:, 1].max() - verts[:, 1].min())
@@ -102,6 +96,7 @@ def _build_posed_mesh(estimator, betas, pose, user_height_cm, gender, fit_result
     if v_cm is None:
         return _build_neutral_mesh(estimator, betas, user_height_cm, gender, fit_result, n_landmarks)
 
+    print(f"[Mesh] Posed mesh built successfully  span={posed_span:.3f}")
     return _mesh_dict(v_cm, faces, user_height_cm, gender, fit_result, n_landmarks, pose_applied=True)
 
 
@@ -112,7 +107,7 @@ def run_smpl_pipeline(
     user_height_cm,
     gender='neutral',
     view_type='front',
-    use_neutral_pose=True,
+    use_neutral_pose=False,
     target_measurements=None,
     front_mask=None,
     side_mask=None,
@@ -184,18 +179,23 @@ def run_smpl_pipeline(
             fit_result['status_text'] = 'Model optimised to your measurements'
             fit_result['fit_status']  = 'measurement_optimised'
 
-        # Stage 3: measurements always from neutral-pose mesh (unaffected by pose)
+        # Stage 3: measurements always from neutral-pose mesh (pose does not affect measurements)
         neutral_verts = estimator.get_vertices(fitted_betas)
         measurements  = MeasurementExtractor().extract_all(
             vertices=neutral_verts, user_height_cm=user_height_cm,
         )
 
-        # Stage 4: always neutral-pose mesh — 2D->3D pose lifting is
-        # geometrically ambiguous and produces twisted/floating limbs.
-        mesh_data = _build_neutral_mesh(
-            estimator, fitted_betas, user_height_cm, gender,
-            fit_result, len(landmarks_2d),
-        )
+        # Stage 4: build display mesh — posed or neutral based on flag
+        if use_neutral_pose:
+            mesh_data = _build_neutral_mesh(
+                estimator, fitted_betas, user_height_cm, gender,
+                fit_result, len(landmarks_2d),
+            )
+        else:
+            mesh_data = _build_posed_mesh(
+                estimator, fitted_betas, fitted_pose, user_height_cm, gender,
+                fit_result, len(landmarks_2d),
+            )
 
         print("SMPL measurements:")
         for k, v in measurements.items():
@@ -238,7 +238,7 @@ def run_multiview_smpl_pipeline(
     gender='neutral',
     front_mask=None,
     side_mask=None,
-    use_neutral_pose=True,
+    use_neutral_pose=False,
     target_measurements=None,
 ):
     print(f"[MultiView] height={user_height_cm} cm  gender={gender}  "
@@ -303,17 +303,23 @@ def run_multiview_smpl_pipeline(
             fit_result['status_text'] = 'Model optimised to your measurements'
             fit_result['fit_status']  = 'measurement_optimised'
 
-        # Measurements always from neutral pose
+        # Measurements always from neutral pose (pose does not affect measurements)
         neutral_verts = estimator.get_vertices(fitted_betas)
         measurements  = MeasurementExtractor().extract_all(
             vertices=neutral_verts, user_height_cm=user_height_cm,
         )
 
-        # Always neutral-pose mesh for display
-        mesh_data = _build_neutral_mesh(
-            estimator, fitted_betas, user_height_cm, gender,
-            fit_result, len(front_landmarks_2d),
-        )
+        # Build display mesh — posed or neutral based on flag
+        if use_neutral_pose:
+            mesh_data = _build_neutral_mesh(
+                estimator, fitted_betas, user_height_cm, gender,
+                fit_result, len(front_landmarks_2d),
+            )
+        else:
+            mesh_data = _build_posed_mesh(
+                estimator, fitted_betas, fitted_pose, user_height_cm, gender,
+                fit_result, len(front_landmarks_2d),
+            )
 
         print("[MultiView] Final measurements:")
         for mk, mv in measurements.items():

@@ -494,17 +494,20 @@ class SMPLEstimator:
         """
         Per-joint direct geometric solver — no global optimizer.
 
-        Each joint is solved independently from 2D landmark geometry with
-        hard anatomical clamps.  Deterministic: cannot produce lotus/twisted
-        poses.  Falls back to neutral when use_neutral=True or < 6 landmarks
-        are visible.
+        Solves each joint independently from 2D MediaPipe landmark geometry.
+        Key insight: SMPL T-pose has arms horizontal at ~90 deg. Pose params
+        are *relative* rotations from T-pose rest, so pose=0 => T-pose arms.
+        To bring arms to sides we need negative Z on left shoulder, positive
+        Z on right shoulder.
+
+        Falls back to neutral when use_neutral=True or < 6 landmarks visible.
         """
         pose = np.zeros((24, 3), dtype=np.float64)
 
         if use_neutral:
             return pose.reshape(-1)
 
-        # ── Landmark accessors ────────────────────────────────────────────────
+        # ── Landmark accessor (normalised 0-1 coords, y-down) ────────────────
         def _lm(idx):
             if idx >= len(landmarks_2d) or landmarks_2d[idx] is None:
                 return None
@@ -519,15 +522,20 @@ class SMPLEstimator:
             print(f"[Pose] Only {visible} visible landmarks — using neutral pose")
             return pose.reshape(-1)
 
-        # ── Per-joint direct geometric solver ────────────────────────────────
-        # No global optimizer — each joint solved independently with hard
-        # anatomical clamps.  Cannot produce lotus/twisted poses.
-
         betas_arr = np.asarray(betas, dtype=np.float64)
         rest_j    = self.get_joints(self._shape_vertices(betas_arr))
 
         def _rest_len(a, b):
             return float(np.linalg.norm(rest_j[a] - rest_j[b]))
+
+        # Pixels-per-unit scale from hip width (robust reference segment)
+        lh_lm, rh_lm = _lm(23), _lm(24)
+        hip_rest = _rest_len(1, 2)
+        if lh_lm and rh_lm and hip_rest > 1e-6:
+            hip_px = float(np.hypot(rh_lm[0] - lh_lm[0], rh_lm[1] - lh_lm[1]))
+            ppu = hip_px / hip_rest if hip_px > 1e-6 else None
+        else:
+            ppu = None
 
         # ── Global orientation ────────────────────────────────────────────────
         if view_type == 'side':
@@ -535,10 +543,9 @@ class SMPLEstimator:
         elif view_type == 'back':
             pose[0, 1] = np.pi
 
-        # ── Root + spine: lateral lean only (Z-axis) ─────────────────────────
+        # ── Root + spine: lateral lean (Z) ───────────────────────────────────
         lhip, rhip = _lm(23), _lm(24)
         lsho, rsho = _lm(11), _lm(12)
-
         if lhip and rhip and lsho and rsho:
             hip_cx = (lhip[0] + rhip[0]) / 2.0
             sho_cx = (lsho[0] + rsho[0]) / 2.0
@@ -551,88 +558,113 @@ class SMPLEstimator:
             for sj in (3, 6, 9):
                 pose[sj, 2] = self._clamp_angle(lean_z / 3.0, limit=0.12)
 
-        # ── Hips (joints 1=L, 2=R): abduction (Z) + flex (X) ────────────────
-        # CRITICAL: no Y rotation (no twist) — only Z abduction and X flex
+        # ── Hips (1=L, 2=R): abduction Z, flex X, NO twist Y ────────────────
         for mp_hip, mp_knee, smpl_hip in ((23, 25, 1), (24, 26, 2)):
             ph, pk = _lm(mp_hip), _lm(mp_knee)
             if ph is None or pk is None:
                 continue
             dx = pk[0] - ph[0]
             dy = abs(ph[1] - pk[1]) + 1e-6
-            # Z: abduction from horizontal offset of knee relative to hip
-            abduction = float(np.arctan2(dx, dy))
-            pose[smpl_hip, 2] = self._clamp_angle(abduction, limit=0.40)
-            pose[smpl_hip, 1] = 0.0  # explicitly zero — no twist
-            # X: flex only when knee is clearly above hip (sitting)
-            if pk[1] < ph[1] - 0.02:   # knee above hip in image (y-down)
-                flex = float(np.arctan2(ph[1] - pk[1], dy)) * 0.6
-                pose[smpl_hip, 0] = self._clamp_angle(flex, limit=0.60)
+            pose[smpl_hip, 2] = self._clamp_angle(float(np.arctan2(dx, dy)), limit=0.40)
+            pose[smpl_hip, 1] = 0.0  # no twist
+            # Flex only when knee is clearly above hip (sitting pose)
+            if pk[1] < ph[1] - 0.02:
+                pose[smpl_hip, 0] = self._clamp_angle(
+                    float(np.arctan2(ph[1] - pk[1], dy)) * 0.6, limit=0.60
+                )
             else:
                 pose[smpl_hip, 0] = 0.0
 
-        # ── Knees (joints 4=L, 5=R): hinge X-axis only ───────────────────────
-        # Flex estimated from foreshortening of lower leg segment
-        for mp_knee, mp_ankle, smpl_knee, smpl_hip_j in (
-            (25, 27, 4, 1), (26, 28, 5, 2)
+        # ── Knees (4=L, 5=R): hinge X only, flex from foreshortening ─────────
+        # SMPL joint indices: L hip=1, L knee=4, L ankle=7
+        #                     R hip=2, R knee=5, R ankle=8
+        for mp_knee, mp_ankle, smpl_knee, j_par, j_chi in (
+            (25, 27, 4, 4, 7),   # L: knee joint 4, segment knee(4)→ankle(7)
+            (26, 28, 5, 5, 8),   # R: knee joint 5, segment knee(5)→ankle(8)
         ):
             pk, pa = _lm(mp_knee), _lm(mp_ankle)
-            if pk is None or pa is None:
+            if pk is None or pa is None or ppu is None:
                 continue
-            seg_px = float(np.hypot(pa[0] - pk[0], pa[1] - pk[1]))
-            rest_px = _rest_len(smpl_hip_j + 3, smpl_hip_j + 3 + 3)  # knee→ankle
-            # Use actual rest length in image units via hip width scale
-            lh, rh = _lm(23), _lm(24)
-            if lh and rh:
-                hip_px = float(np.hypot(rh[0] - lh[0], rh[1] - lh[1]))
-                hip_rest = _rest_len(1, 2)
-                if hip_rest > 1e-6 and hip_px > 1e-6:
-                    ppu = hip_px / hip_rest
-                    rest_seg_px = _rest_len(smpl_knee - 3, smpl_knee) * ppu
-                    if rest_seg_px > 1e-6:
-                        ratio = np.clip(seg_px / rest_seg_px, 0.0, 1.0)
-                        flex = float(np.arccos(ratio))
-                        pose[smpl_knee, 0] = self._clamp_angle(flex, limit=1.8)
-                        pose[smpl_knee, 1] = 0.0  # no twist
-                        pose[smpl_knee, 2] = 0.0  # hinge only
+            seg_px      = float(np.hypot(pa[0] - pk[0], pa[1] - pk[1]))
+            rest_seg_px = _rest_len(j_par, j_chi) * ppu
+            if rest_seg_px > 1e-6:
+                ratio = np.clip(seg_px / rest_seg_px, 0.0, 1.0)
+                pose[smpl_knee, 0] = self._clamp_angle(float(np.arccos(ratio)), limit=1.8)
+                pose[smpl_knee, 1] = 0.0
+                pose[smpl_knee, 2] = 0.0
 
-        # ── Shoulders (joints 16=L, 17=R): raise (Z) + flex (X) ─────────────
-        for mp_sho, mp_elb, smpl_sho in ((11, 13, 16), (12, 14, 17)):
+        # ── Shoulders (16=L, 17=R) ────────────────────────────────────────────
+        # SMPL T-pose: arms horizontal at ~90 deg outward.
+        # pose[shoulder, 2] = 0  =>  arm stays horizontal (T-pose).
+        # We measure the actual arm angle in the image and compute the
+        # *delta* from horizontal (T-pose rest = 0 deg from horizontal).
+        #
+        # Image convention: y increases downward.
+        # Arm vector from shoulder to elbow: (dx, dy) in image space.
+        # Angle from horizontal (positive = arm raised above horizontal):
+        #   arm_angle_from_horiz = arctan2(-dy, |dx|)   [image y-down]
+        #
+        # Left shoulder (16): T-pose arm points LEFT (+x in image for front view).
+        #   Z rotation brings arm down (negative) or up (positive).
+        # Right shoulder (17): T-pose arm points RIGHT (-x in image for front view).
+        #   Z rotation: positive brings arm down, negative raises it.
+        for mp_sho, mp_elb, smpl_sho, side in (
+            (11, 13, 16, 'left'),
+            (12, 14, 17, 'right'),
+        ):
             ps, pe = _lm(mp_sho), _lm(mp_elb)
             if ps is None or pe is None:
                 continue
-            dy_img = pe[1] - ps[1]   # positive = elbow below shoulder (image y-down)
-            dx_img = pe[0] - ps[0]
-            # Z: raise/lower arm — negative dy means arm raised
-            raise_z = float(np.arctan2(-dy_img, max(abs(dx_img), 1e-4)))
-            pose[smpl_sho, 2] = self._clamp_angle(raise_z, limit=1.20)
-            # X: forward/back flex from horizontal offset
-            flex_x = float(np.arctan2(dx_img, max(abs(dy_img), 1e-4))) * 0.5
+            dx_img = pe[0] - ps[0]   # positive = elbow to the right
+            dy_img = pe[1] - ps[1]   # positive = elbow below shoulder
+
+            # Angle of arm from horizontal in image (positive = above horizontal)
+            arm_angle = float(np.arctan2(-dy_img, abs(dx_img) + 1e-6))
+
+            # In SMPL T-pose, arm is at 0 deg from horizontal.
+            # pose Z = arm_angle rotates arm up/down from that rest position.
+            # Left shoulder: positive Z = arm up; negative Z = arm down.
+            # Right shoulder: negative Z = arm up; positive Z = arm down.
+            # Both use the same formula since we take abs(dx) above.
+            if side == 'left':
+                pose[smpl_sho, 2] = self._clamp_angle(arm_angle, limit=1.40)
+            else:
+                pose[smpl_sho, 2] = self._clamp_angle(-arm_angle, limit=1.40)
+
+            # X: forward/back flex — arm crossing body vs going straight out
+            # Measure how much the elbow deviates inward/outward from straight
+            # Left arm: natural direction is leftward (dx < 0), crossing = dx > 0
+            # Right arm: natural direction is rightward (dx > 0), crossing = dx < 0
+            if side == 'left':
+                # Normalise by arm length to get a ratio, not raw pixels
+                arm_len = abs(dx_img) + abs(dy_img) + 1e-6
+                cross = dx_img / arm_len   # +1 = fully crossing, -1 = fully out
+            else:
+                arm_len = abs(dx_img) + abs(dy_img) + 1e-6
+                cross = -dx_img / arm_len
+            flex_x = float(np.arcsin(np.clip(cross, -1.0, 1.0))) * 0.5
             pose[smpl_sho, 0] = self._clamp_angle(flex_x, limit=0.80)
             pose[smpl_sho, 1] = 0.0  # no twist
 
-        # ── Elbows (joints 18=L, 19=R): hinge X-axis only ────────────────────
-        for mp_sho, mp_elb, mp_wri, smpl_elb, smpl_sho_j in (
-            (11, 13, 15, 18, 16), (12, 14, 16, 19, 17)
+        # ── Elbows (18=L, 19=R): hinge X only, flex from foreshortening ──────
+        # SMPL joint indices: L shoulder=16, L elbow=18, L wrist=20
+        #                     R shoulder=17, R elbow=19, R wrist=21
+        for mp_elb, mp_wri, smpl_elb, j_par, j_chi in (
+            (13, 15, 18, 18, 20),   # L: elbow(18)→wrist(20)
+            (14, 16, 19, 19, 21),   # R: elbow(19)→wrist(21)
         ):
             pe, pw = _lm(mp_elb), _lm(mp_wri)
-            if pe is None or pw is None:
+            if pe is None or pw is None or ppu is None:
                 continue
-            seg_px = float(np.hypot(pw[0] - pe[0], pw[1] - pe[1]))
-            lh, rh = _lm(23), _lm(24)
-            if lh and rh:
-                hip_px = float(np.hypot(rh[0] - lh[0], rh[1] - lh[1]))
-                hip_rest = _rest_len(1, 2)
-                if hip_rest > 1e-6 and hip_px > 1e-6:
-                    ppu = hip_px / hip_rest
-                    rest_seg_px = _rest_len(smpl_sho_j + 2, smpl_sho_j + 4) * ppu
-                    if rest_seg_px > 1e-6:
-                        ratio = np.clip(seg_px / rest_seg_px, 0.0, 1.0)
-                        flex = float(np.arccos(ratio))
-                        pose[smpl_elb, 0] = self._clamp_angle(flex, limit=2.0)
-                        pose[smpl_elb, 1] = 0.0
-                        pose[smpl_elb, 2] = 0.0
+            seg_px      = float(np.hypot(pw[0] - pe[0], pw[1] - pe[1]))
+            rest_seg_px = _rest_len(j_par, j_chi) * ppu
+            if rest_seg_px > 1e-6:
+                ratio = np.clip(seg_px / rest_seg_px, 0.0, 1.0)
+                pose[smpl_elb, 0] = self._clamp_angle(float(np.arccos(ratio)), limit=2.0)
+                pose[smpl_elb, 1] = 0.0
+                pose[smpl_elb, 2] = 0.0
 
-        # ── Sanity clamp: no joint magnitude > 2.0 rad ───────────────────────
+        # ── Sanity clamp ──────────────────────────────────────────────────────
         for j in range(24):
             mag = float(np.linalg.norm(pose[j]))
             if mag > 2.0:
