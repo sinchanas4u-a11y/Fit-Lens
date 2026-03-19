@@ -257,9 +257,13 @@ const SMPLViewer = ({ meshData, statusText, statusDetail }) => {
             return;
           }
 
-          // OBJ is already in metres with feet at Y=0, centred on X/Z.
-          // Just place the object at the origin — no rescaling needed.
-          object.position.set(0, 0, 0);
+          // Center the object dynamically
+          const initialCenter = initialBox.getCenter(new THREE.Vector3());
+          // Center X and Z, and place the bottom (feet) at Y = 0
+          object.position.set(-initialCenter.x, -initialBox.min.y, -initialCenter.z);
+          
+          // Apply changes before framing
+          object.updateMatrixWorld();
 
           scene.add(object);
           meshRef.current = object;

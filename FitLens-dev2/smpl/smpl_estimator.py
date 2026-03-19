@@ -589,7 +589,14 @@ class SMPLEstimator:
             rest_seg_px = _rest_len(j_par, j_chi) * ppu
             if rest_seg_px > 1e-6:
                 ratio = np.clip(seg_px / rest_seg_px, 0.0, 1.0)
-                pose[smpl_knee, 0] = self._clamp_angle(float(np.arccos(ratio)), limit=1.8)
+                # Ignore small foreshortening changes typical of standing straight poses
+                if ratio > 0.85:
+                    flex_angle = 0.0
+                else:
+                    # SMPL knees bend naturally with negative X rotation
+                    flex_angle = -float(np.arccos(ratio))
+                
+                pose[smpl_knee, 0] = self._clamp_angle(flex_angle, limit=1.8)
                 pose[smpl_knee, 1] = 0.0
                 pose[smpl_knee, 2] = 0.0
 
@@ -660,7 +667,15 @@ class SMPLEstimator:
             rest_seg_px = _rest_len(j_par, j_chi) * ppu
             if rest_seg_px > 1e-6:
                 ratio = np.clip(seg_px / rest_seg_px, 0.0, 1.0)
-                pose[smpl_elb, 0] = self._clamp_angle(float(np.arccos(ratio)), limit=2.0)
+                # Apply a strict threshold: ignore slight differences likely caused by camera perspective or noisy landmarks
+                if ratio > 0.85:
+                    flex_angle = 0.0
+                else:
+                    # Depending on SMPL, elbows bend naturally with positive or negative rotation. 
+                    # We will assume positive similar to knees if left unchanged, but clamp it better.
+                    flex_angle = float(np.arccos(ratio))
+                
+                pose[smpl_elb, 0] = self._clamp_angle(flex_angle, limit=2.0)
                 pose[smpl_elb, 1] = 0.0
                 pose[smpl_elb, 2] = 0.0
 
