@@ -1,264 +1,225 @@
 import numpy as np
+import os
+import sys
 import pickle
-import sys, os
-
-# Mock chumpy before any pickle load
 from types import ModuleType
+
 
 def mock_chumpy():
     fake = ModuleType('chumpy')
+
     class Ch(np.ndarray):
         def __new__(cls, val, *a, **kw):
             return np.asarray(val).view(cls)
+
         @property
-        def r(self): return np.asarray(self)
-    fake.Ch     = Ch
-    fake.array  = np.array
-    fake.zeros  = np.zeros
-    fake.ones   = np.ones
+        def r(self):
+            return np.asarray(self)
+
+    fake.Ch = Ch
+    fake.array = np.array
+    fake.zeros = np.zeros
+    fake.ones = np.ones
     fake.concatenate = np.concatenate
-    fake.sqrt   = np.sqrt
-    fake.sum    = np.sum
-    fake.dot    = np.dot
-    fake.mean   = np.mean
-    sys.modules['chumpy']          = fake
-    sys.modules['chumpy.ch']       = fake
+    fake.sqrt = np.sqrt
+    fake.sum = np.sum
+    fake.dot = np.dot
+    fake.mean = np.mean
+    sys.modules['chumpy'] = fake
+    sys.modules['chumpy.ch'] = fake
     sys.modules['chumpy.reordering'] = fake
-    sys.modules['chumpy.utils']    = fake
+    sys.modules['chumpy.utils'] = fake
+
 
 mock_chumpy()
 
-class BetaCalculator:
-  """
-  Compute SMPL-X betas directly from
-  body measurements using PCA inversion.
+NEUTRAL_REF = {
+    'chest': 97.0,
+    'waist': 88.0,
+    'hip': 96.0,
+}
 
-  Instead of relying on SMPLify-X 2D
-  fitting (which fails without depth),
-  we analytically solve for betas that
-  produce the user's measurements.
-  """
+BETA_EFFECTS = np.array([
+    [ 6.0,  5.0,  5.0],
+    [ 2.0, -1.0,  2.5],
+    [ 4.0,  2.0,  1.5],
+    [-1.5,  3.5,  0.5],
+    [ 0.5,  0.5,  4.0],
+    [ 1.5,  0.5,  0.5],
+    [ 0.5,  1.5,  0.5],
+    [ 0.5,  0.5,  1.5],
+    [ 1.5,  0.5,  0.5],
+    [ 0.5,  0.5,  0.5],
+])
 
-  def __init__(
-    self,
-    model_path: str,
-    gender:     str = 'neutral'
-  ):
-    self.gender     = gender
-    self.model_path = model_path
-    self._load_model()
 
-  def _load_model(self):
-    # Load SMPL-X model pkl
-    model_file = os.path.join(
-      self.model_path,
-      f'SMPLX_{self.gender.upper()}.npz'
-    )
-    if not os.path.exists(model_file):
-      # Try pkl format
-      model_file = os.path.join(
-        self.model_path,
-        f'SMPL_{self.gender.upper()}.pkl'
-      )
+def compute_betas_direct(
+    target_chest_cm,
+    target_waist_cm,
+    target_hip_cm,
+    user_height_cm=170.0,
+):
+    h_scale = user_height_cm / 170.0
+    ref = {k: v * h_scale for k, v in NEUTRAL_REF.items()}
 
-    print(f"Loading model: {model_file}")
+    print(f"Reference at {user_height_cm}cm:")
+    print(f"  chest: {ref['chest']:.1f} cm")
+    print(f"  waist: {ref['waist']:.1f} cm")
+    print(f"  hip  : {ref['hip']:.1f} cm")
+
+    target_diff = np.array([
+        target_chest_cm - ref['chest'],
+        target_waist_cm - ref['waist'],
+        target_hip_cm   - ref['hip'],
+    ])
+
+    print(f"Differences:")
+    print(f"  chest: {target_diff[0]:+.1f} cm")
+    print(f"  waist: {target_diff[1]:+.1f} cm")
+    print(f"  hip  : {target_diff[2]:+.1f} cm")
+
+    A = BETA_EFFECTS.T
+    betas, _, _, _ = np.linalg.lstsq(A, target_diff, rcond=None)
+    betas = np.clip(betas, -2.0, 2.0)
+
+    predicted = BETA_EFFECTS.T @ betas
+    print(f"Predicted:")
+    print(f"  chest: {ref['chest'] + predicted[0]:.1f}"
+          f" (target: {target_chest_cm:.1f})")
+    print(f"  waist: {ref['waist'] + predicted[1]:.1f}"
+          f" (target: {target_waist_cm:.1f})")
+    print(f"  hip  : {ref['hip']   + predicted[2]:.1f}"
+          f" (target: {target_hip_cm:.1f})")
+    print(f"Betas: {np.round(betas, 3)}")
+
+    return betas
+
+
+def get_shaped_vertices(
+    betas,
+    model_path,
+    gender='neutral',
+    user_height_cm=170.0,
+):
+    gender_map = {
+        'neutral': 'SMPL_NEUTRAL',
+        'male':    'SMPL_MALE',
+        'female':  'SMPL_FEMALE',
+    }
+    model_name = gender_map.get(gender.lower(), 'SMPL_NEUTRAL')
+    model_file = None
+
+    search_paths = [
+        os.path.join(model_path, model_name + '.pkl'),
+        os.path.join(model_path, model_name + '.npz'),
+        os.path.join(model_path, 'smpl', model_name + '.pkl'),
+        os.path.join(model_path, 'smpl', model_name + '.npz'),
+    ]
+
+    for p in search_paths:
+        if os.path.exists(p):
+            model_file = p
+            break
+
+    if not model_file:
+        print(f"SMPL model not found in {model_path}")
+        print(f"Searched: {search_paths}")
+        return None
+
+    print(f"Loading: {model_file}")
+
     if model_file.endswith('.npz'):
-      data = np.load(
-        model_file, allow_pickle=True
-      )
+        data = np.load(model_file, allow_pickle=True)
     else:
-      data = pickle.load(
-        open(model_file, 'rb'),
-        encoding='latin1'
-      )
+        data = pickle.load(open(model_file, 'rb'), encoding='latin1')
 
-    self.v_template  = np.array(
-      data['v_template']
-    )
-    self.shapedirs   = np.array(
-      data['shapedirs']
-    )
-    print(f"Template vertices: "
-          f"{len(self.v_template)}")
-    print(f"Shape dirs: "
-          f"{self.shapedirs.shape}")
+    v_template = np.array(data['v_template'])
+    shapedirs  = np.array(data['shapedirs'])
 
-  def get_vertices(
-    self, betas: np.ndarray
-  ) -> np.ndarray:
-    """Get mesh vertices for given betas."""
-    n = min(len(betas), self.shapedirs.shape[2])
-    shaped = self.v_template + np.einsum(
-      'ijk,k->ij',
-      self.shapedirs[:, :, :n],
-      betas[:n]
+    n = min(len(betas), shapedirs.shape[2])
+    shaped = v_template + np.einsum(
+        'ijk,k->ij',
+        shapedirs[:, :, :n],
+        betas[:n],
     )
-    return shaped
 
-  def measure_mesh(
-    self,
-    verts:         np.ndarray,
-    user_height_cm: float
-  ) -> dict:
-    """Extract measurements from mesh."""
-    # Scale to user height
-    y_min  = verts[:, 1].min()
-    y_max  = verts[:, 1].max()
+    y_min  = shaped[:, 1].min()
+    y_max  = shaped[:, 1].max()
     h_m    = y_max - y_min
     scale  = user_height_cm / (h_m * 100)
-    v_sc   = verts * scale * 100  # to cm
+    v_sc   = shaped * scale * 100
 
-    y_max_cm = v_sc[:, 1].max()
-    y_min_cm = v_sc[:, 1].min()
-    h_cm     = y_max_cm - y_min_cm
+    for ax in [0, 1, 2]:
+        mid = (v_sc[:, ax].max() + v_sc[:, ax].min()) / 2
+        v_sc[:, ax] -= mid
 
-    def circ_at(pct, radius_cm=20):
-      y_level = y_max_cm - h_cm * pct
-      section = v_sc[
-        np.abs(v_sc[:, 1] - y_level) < 2.0
-      ]
-      if len(section) < 10:
-        return None
-      pts  = section[:, [0, 2]]
-      cx   = np.median(pts[:, 0])
-      cz   = np.median(pts[:, 1])
-      dist = np.sqrt(
-        (pts[:, 0] - cx)**2 +
-        (pts[:, 1] - cz)**2
-      )
-      pts = pts[dist < radius_cm]
-      if len(pts) < 10:
-        return None
-      from scipy.spatial import ConvexHull
-      try:
-        hull  = ConvexHull(pts)
-        vh    = pts[hull.vertices]
-        n     = len(vh)
-        perim = sum(
-          np.linalg.norm(
-            vh[(i+1)%n] - vh[i]
-          )
-          for i in range(n)
-        )
-        return float(perim)
-      except Exception:
-        return None
-
-    return {
-      'chest': circ_at(0.25, 22),
-      'waist': circ_at(0.38, 20),
-      'hip':   circ_at(0.48, 21),
-    }
-
-  def fit_betas_to_measurements(
-    self,
-    target_chest_cm:  float,
-    target_waist_cm:  float,
-    target_hip_cm:    float,
-    user_height_cm:   float,
-    n_betas:          int   = 10,
-    n_iterations:     int   = 200
-  ) -> np.ndarray:
-    """
-    Analytically compute betas directly from
-    target measurements using a Jacobian 
-    pseudo-inverse mapping.
-    """
-    targets = {
-      'chest': target_chest_cm,
-      'waist': target_waist_cm,
-      'hip':   target_hip_cm,
-    }
-
-    print(f"Analytically fitting betas to measurements:")
-    print(f"  Target chest : {target_chest_cm} cm")
-    print(f"  Target waist : {target_waist_cm} cm")
-    print(f"  Target hip   : {target_hip_cm} cm")
-
-    # 1. Base measurements at beta = 0
-    base_betas = np.zeros(n_betas)
-    base_verts = self.get_vertices(base_betas)
-    base_meas = self.measure_mesh(base_verts, user_height_cm)
-
-    # Use only valid keys
-    keys = [k for k in ['chest', 'waist', 'hip'] if targets.get(k) and base_meas.get(k)]
-    if not keys:
-      print("No valid measurements found. Returning zero betas.")
-      return base_betas
-
-    # 2. Compute Jacobian matrix J (num_measurements x n_betas)
-    J = np.zeros((len(keys), n_betas))
-    delta = 1.0  # 1 standard deviation step for finite differences
-    
-    for j in range(n_betas):
-      betas_j = np.zeros(n_betas)
-      betas_j[j] = delta
-      verts_j = self.get_vertices(betas_j)
-      meas_j = self.measure_mesh(verts_j, user_height_cm)
-      
-      for i, k in enumerate(keys):
-        if meas_j.get(k) is not None:
-          J[i, j] = (meas_j[k] - base_meas[k]) / delta
-
-    # 3. Compute delta measurements
-    delta_m = np.array([targets[k] - base_meas[k] for k in keys])
-    
-    # 4. Direct analytic solution: beta = J^T (J J^T + lambda I)^-1 delta_m
-    # We use Tikhonov regularization (lambda) to avoid extreme shapes
-    l2_reg = 0.5
-    J_T = J.T
-    matrix_to_inv = J @ J_T + l2_reg * np.eye(len(keys))
-    
-    try:
-      fitted_betas = J_T @ np.linalg.solve(matrix_to_inv, delta_m)
-    except np.linalg.LinAlgError:
-      print("Singular matrix encountered, returning zero betas.")
-      fitted_betas = np.zeros(n_betas)
-
-    print(f"Fitted betas  : {np.round(fitted_betas, 3)}")
-
-    # Verify
-    verts = self.get_vertices(fitted_betas)
-    final = self.measure_mesh(verts, user_height_cm)
-    print(f"Final measurements:")
-    for k, v in final.items():
-      t = targets.get(k, 0)
-      if v:
-        print(f"  {k:8s}: {v:.1f} cm (target: {t:.1f} cm)")
-
-    return fitted_betas
+    print(f"Shaped vertices: {len(v_sc)}")
+    return v_sc
 
 
 def compute_betas_from_measurements(
-  measurements:   dict,
-  user_height_cm: float,
-  model_path:     str,
-  gender:         str = 'neutral'
-) -> np.ndarray:
-  """
-  Main entry point.
-  Takes measurements dict from SMPLify-X
-  reader and returns fitted betas.
-  """
-  chest = measurements.get(
-    'chest_circumference'
-  )
-  waist = measurements.get(
-    'waist_circumference'
-  )
-  hip   = measurements.get(
-    'hip_circumference'
-  )
+    measurements,
+    user_height_cm,
+    model_path=None,
+    gender='neutral',
+):
+    chest = measurements.get('chest_circumference')
+    waist = measurements.get('waist_circumference')
+    hip   = measurements.get('hip_circumference')
 
-  if not all([chest, waist, hip]):
-    print("Missing measurements for "
-          "beta fitting")
-    return np.zeros(10)
+    # Validate and fix unrealistic values
+    if chest and float(chest) < 70:
+        print(f"WARNING chest {chest} too "
+              f"small, using width * 3.2")
+        chest_w = measurements.get('chest_width', 0)
+        chest = (float(chest_w) * 3.2 if chest_w else 90.0)
 
-  calc = BetaCalculator(model_path, gender)
-  return calc.fit_betas_to_measurements(
-    target_chest_cm = chest,
-    target_waist_cm = waist,
-    target_hip_cm   = hip,
-    user_height_cm  = user_height_cm
-  )
+    if chest and float(chest) > 130:
+        print(f"WARNING chest {chest} too "
+              f"large, capping at 130")
+        chest = 130.0
+
+    if hip and float(hip) > 135:
+        print(f"WARNING hip {hip} too "
+              f"large, recalculating")
+        hip_w = measurements.get('hip_width', 0)
+        if hip_w and 33 <= float(hip_w) <= 55:
+            hip = float(hip_w) * 3.0
+        else:
+            hip = float(waist or 85) + 12
+
+    if hip and float(hip) < 75:
+        print(f"WARNING hip {hip} too "
+              f"small, using waist + 12")
+        hip = float(waist or 85) + 12
+
+    print(f"Validated measurements:")
+    print(f"  chest: {chest}")
+    print(f"  waist: {waist}")
+    print(f"  hip  : {hip}")
+
+    if not chest or not waist or not hip:
+        print("Missing measurements")
+        return np.zeros(10), None
+
+    print(f"\nComputing betas from measurements:")
+    betas = compute_betas_direct(
+        target_chest_cm=float(chest),
+        target_waist_cm=float(waist),
+        target_hip_cm=float(hip),
+        user_height_cm=float(user_height_cm),
+    )
+
+    shaped_verts = None
+    if model_path and os.path.exists(model_path):
+        shaped_verts = get_shaped_vertices(
+            betas=betas,
+            model_path=model_path,
+            gender=gender,
+            user_height_cm=float(user_height_cm),
+        )
+    else:
+        print(f"No model path provided or "
+              f"path does not exist: {model_path}")
+
+    return betas, shaped_verts

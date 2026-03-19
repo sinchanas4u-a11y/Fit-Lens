@@ -60,24 +60,23 @@ const UploadMode = () => {
     return '#2196f3';
   };
 
+  const formatCmValue = (value) => {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) {
+      return '—';
+    }
+    return `${Number(value).toFixed(1)} cm`;
+  };
+
   const getSmplStatusBadge = (smpl) => {
-    if (smpl?.fitted_to_user) {
+    if (smpl?.fitted_to_user || smpl?.status === 'active') {
       return {
         className: 'smpl-fitted',
-        text: smpl.status_text || '✓ Model fitted to your body'
+        text: '3D Body Model: Active',
       };
     }
-
-    if (smpl?.status === 'active') {
-      return {
-        className: 'smpl-active',
-        text: smpl.status_text || '3D model ready'
-      };
-    }
-
     return {
       className: 'smpl-estimated',
-      text: smpl?.status_text || 'Using estimated SMPL body'
+      text: '3D Body Model: Estimated',
     };
   };
 
@@ -807,7 +806,7 @@ const UploadMode = () => {
                       {Object.entries(results.results.merged.measurements).map(([name, data]) => (
                         <div key={name} style={{ padding: '8px', borderBottom: '1px solid #ddd' }}>
                           <strong>{name.replace(/_/g, ' ').toUpperCase()}:</strong>{' '}
-                          {data.value_cm} cm ({formatPxValue(data.value_px)})
+                          {formatCmValue(data.value_cm)} ({formatPxValue(data.value_px)})
                           {data.label && <span style={{ color: '#666', marginLeft: '10px' }}>({data.label})</span>}
                           {/* Show view source for arm_length and leg_length */}
                           {name === 'arm_length' && <span style={{ color: '#2196f3', marginLeft: '10px', fontWeight: 'bold' }}>[Side View]</span>}
@@ -840,7 +839,7 @@ const UploadMode = () => {
                           return (
                             <tr key={name}>
                               <td>{data.label || name.replace(/_/g, ' ').toUpperCase()}</td>
-                              <td>{data.value_cm} cm</td>
+                              <td>{formatCmValue(data.value_cm)}</td>
                               <td>{formatPxValue(data.value_px)}</td>
                               <td style={{
                                 fontSize: '12px',
@@ -1031,8 +1030,8 @@ const UploadMode = () => {
                             {Object.entries(frontResult.measurements).map(([name, data]) => (
                               <div key={name} style={{ padding: '8px', borderBottom: '1px solid #ddd' }}>
                                 <strong>{name.replace(/_/g, ' ').toUpperCase()}:</strong>{' '}
-                                {data.value_cm} cm ({formatPxValue(data.value_px)})
-                                {data.source && <span style={{ color: '#666', marginLeft: '10px', fontSize: '12px' }}>[{data.source}]</span>}
+                                {formatCmValue(data.value_cm)} ({formatPxValue(data.value_px)})
+                                {data.source && <span style={{ color: getSourceColor(data.source), marginLeft: '10px', fontSize: '12px' }}>[{data.source}]</span>}
                               </div>
                             ))}
                           </div>
@@ -1055,7 +1054,7 @@ const UploadMode = () => {
                                 return (
                                   <tr key={name}>
                                     <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
-                                    <td>{data.value_cm} cm</td>
+                                    <td>{formatCmValue(data.value_cm)}</td>
                                     <td>{formatPxValue(data.value_px)}</td>
                                     <td style={{ color: sourceColor, fontSize: '12px', fontWeight: 'bold' }}>{sourceLabel}</td>
                                   </tr>
@@ -1151,7 +1150,7 @@ const UploadMode = () => {
                         return (
                           <tr key={name}>
                             <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
-                            <td>{data.value_cm} cm</td>
+                            <td>{formatCmValue(data.value_cm)}</td>
                             <td>{formatPxValue(data.value_px)}</td>
                             <td style={{ color: sourceColor, fontSize: '12px', fontWeight: 'bold' }}>{sourceLabel}</td>
                           </tr>

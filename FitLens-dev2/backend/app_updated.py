@@ -30,12 +30,16 @@ from backend.measurement_engine import MeasurementEngine
 from segmentation_model import SegmentationModel
 try:
     from smpl.smpl_pipeline import (
-        run_smpl_pipeline
+        run_smpl_pipeline,
+        run_multiview_smpl_pipeline,
     )
 except Exception as smpl_import_err:
     print(f"SMPL pipeline not available: "
           f"{smpl_import_err}")
     def run_smpl_pipeline(*a, **kw):
+        return {"success": False,
+                "error": "SMPL unavailable"}
+    def run_multiview_smpl_pipeline(*a, **kw):
         return {"success": False,
                 "error": "SMPL unavailable"}
 from smpl.smpl_estimator import SMPLEstimator
@@ -787,7 +791,10 @@ def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success):
             continue
         cm = value.get('value_cm')
         px = value.get('value_px')
-        if cm is None and px is None:
+        # Always keep circumference rows even when value is None —
+        # the frontend will show "—" so the user knows the field exists.
+        is_circumference = key in ('chest_circumference', 'waist_circumference', 'hip_circumference')
+        if cm is None and px is None and not is_circumference:
             continue
         cleaned[key] = value
 
@@ -1583,6 +1590,76 @@ def process_images():
             )
             results['side'] = side_results
 
+        # ── Multi-view mesh generation ────────────────────────────────────────
+        # When both views are available, replace the front-only SMPL mesh with
+        # a multi-view reconstruction that uses front widths + side depths.
+        if side_img is not None and front_results.get('success') and results.get('side', {}).get('success'):
+            print("\n" + "="*60)
+            print("MULTI-VIEW SMPL RECONSTRUCTION")
+            print("="*60)
+            try:
+                # Re-detect landmarks (already done inside process_single_view,
+                # but we need them here for the multiview call)
+                ld = get_landmark_detector()
+                front_lm_raw = ld.detect(front_img) if ld else None
+                side_lm_raw  = ld.detect(side_img)  if ld else None
+
+                front_lm_raw = _ensure_pixel_landmarks(front_lm_raw, front_img.shape) if front_lm_raw is not None else None
+                side_lm_raw  = _ensure_pixel_landmarks(side_lm_raw,  side_img.shape)  if side_lm_raw  is not None else None
+
+                def _fmt_lm(lm_raw, img):
+                    if lm_raw is None:
+                        return []
+                    h, w = img.shape[:2]
+                    return [
+                        {
+                            'x': float(lm_raw[i][0]) / w,
+                            'y': float(lm_raw[i][1]) / h,
+                            'visibility': float(lm_raw[i][2]) if len(lm_raw[i]) > 2 else 1.0,
+                        }
+                        for i in range(len(lm_raw))
+                    ]
+
+                front_lm_fmt = _fmt_lm(front_lm_raw, front_img)
+                side_lm_fmt  = _fmt_lm(side_lm_raw,  side_img)
+
+                # Get masks from segmentation model
+                front_mask_mv = segmentation_model.segment_person(front_img, conf_threshold=0.5)
+                side_mask_mv  = segmentation_model.segment_person(side_img,  conf_threshold=0.5)
+
+                detected_gender_mv = run_gender_detection(front_img)
+
+                mv_res = run_multiview_smpl_pipeline(
+                    front_landmarks_2d = front_lm_fmt,
+                    front_image_width  = front_img.shape[1],
+                    front_image_height = front_img.shape[0],
+                    user_height_cm     = user_height_cm,
+                    gender             = detected_gender_mv or 'neutral',
+                    front_mask         = front_mask_mv,
+                    side_mask          = side_mask_mv,
+                    side_landmarks_2d  = side_lm_fmt if side_lm_fmt else None,
+                    side_image_width   = side_img.shape[1],
+                    side_image_height  = side_img.shape[0],
+                )
+
+                if mv_res.get('success') and mv_res.get('mesh_data'):
+                    # Overwrite front mesh with the multiview result
+                    front_results['mesh_data'] = mv_res['mesh_data']
+                    front_results['measurements'] = mv_res.get('measurements', front_results.get('measurements', {}))
+                    front_results['smpl'] = {
+                        'success': True,
+                        'fitted_to_user': True,
+                        'status_text': mv_res['fit'].get('status_text', '✓ Multi-view reconstruction'),
+                        'multiview': True,
+                    }
+                    print("✓ Multi-view mesh integrated into front results")
+                else:
+                    print(f"Multi-view pipeline returned no mesh: {mv_res.get('error')}")
+            except Exception as mv_err:
+                print(f"Multi-view reconstruction failed (keeping single-view mesh): {mv_err}")
+                import traceback
+                traceback.print_exc()
+
         # Integrate SMPL results from front view
         if front_results.get('success'):
             smpl_info = front_results.get('smpl', {})
@@ -1804,7 +1881,53 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
         if measurements:
             for name, m_data in measurements.items():
                 if isinstance(m_data, tuple) and len(m_data) == 3:
-                     target_measurements[name] = m_data[0] # cm value
+                     val = m_data[0] # cm value
+                     
+                     # VALIDATE measurements before passing to SMPL
+                     # Realistic ranges:
+                     # chest: 70-130 cm
+                     # waist: 55-125 cm
+                     # hip:   75-135 cm
+                     
+                     if name == 'chest_circumference':
+                         if not (70 <= val <= 130):
+                             print(f"WARNING: chest {val:.2f} out of range, recalculating...")
+                             # Fallback to width-based estimation if possible
+                             chest_width_data = measurements.get('chest_width')
+                             if chest_width_data and isinstance(chest_width_data, tuple):
+                                 val = chest_width_data[0] * 3.2
+                             else:
+                                 val = 90.0 # Default
+                         target_measurements[name] = val
+
+                     elif name == 'waist_circumference':
+                         if not (55 <= val <= 125):
+                             print(f"WARNING: waist {val:.2f} out of range, capping...")
+                             val = max(55, min(125, val))
+                         target_measurements[name] = val
+
+                     elif name == 'hip_circumference' or name == 'hip_width':
+                         # If we have hip_width, use it to estimate hip_circumference if too large
+                         key = 'hip_circumference'
+                         if val > 135:
+                             print(f"WARNING: hip {val:.2f} too large, recalculating from width...")
+                             hip_width_data = measurements.get('hip_width')
+                             if hip_width_data and isinstance(hip_width_data, tuple):
+                                 h_w = hip_width_data[0]
+                                 if 33 <= h_w <= 55:
+                                     val = h_w * 3.0
+                                 else:
+                                     # fallback to waist + offset
+                                     waist_data = measurements.get('waist_circumference')
+                                     w_c = waist_data[0] if waist_data else 85
+                                     val = w_c + 15
+                             else:
+                                 val = 100.0
+                         elif val < 75:
+                             val = 85.0
+                         target_measurements[key] = val
+                     else:
+                         target_measurements[name] = val
         
         # Step 5.5: SMPL integration
         print(f"\nSTEP 5.5: GENERATING PERSONALIZED 3D BODY MODEL ({view_name.upper()} VIEW)")

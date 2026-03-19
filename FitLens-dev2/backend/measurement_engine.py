@@ -37,6 +37,8 @@ class MeasurementEngine:
             'chest_circumference',
             'waist_circumference',
             'hip_width',
+            'chest_width',
+            'waist_width',
         }
         
         # Measurements that use MediaPipe joints
@@ -215,12 +217,28 @@ class MeasurementEngine:
         """
         left_point = right_point = None
         
-        if measurement_name in ('shoulder_width', 'chest_circumference'):
-            left_point = edge_reference_points.get('shoulder_left')
-            right_point = edge_reference_points.get('shoulder_right')
-        elif measurement_name == 'waist_circumference':
+        if measurement_name in ('shoulder_width', 'chest_circumference', 'chest_width'):
+            left_point = edge_reference_points.get('shoulder_left') if measurement_name == 'shoulder_width' else edge_reference_points.get('chest_left')
+            right_point = edge_reference_points.get('shoulder_right') if measurement_name == 'shoulder_width' else edge_reference_points.get('chest_right')
+            
+            # Special case for chest_circumference: width * 3.0
+            if measurement_name == 'chest_circumference' and left_point and right_point:
+                left_array = np.array(left_point, dtype=np.float32)
+                right_array = np.array(right_point, dtype=np.float32)
+                width_px = float(np.linalg.norm(right_array - left_array))
+                return width_px * 3.0
+
+        elif measurement_name in ('waist_circumference', 'waist_width'):
             left_point = edge_reference_points.get('waist_left')
             right_point = edge_reference_points.get('waist_right')
+            
+            # Special case for waist_circumference: width * 2.8
+            if measurement_name == 'waist_circumference' and left_point and right_point:
+                left_array = np.array(left_point, dtype=np.float32)
+                right_array = np.array(right_point, dtype=np.float32)
+                width_px = float(np.linalg.norm(right_array - left_array))
+                return width_px * 2.8
+
         elif measurement_name == 'hip_width':
             left_point = edge_reference_points.get('hip_left')
             right_point = edge_reference_points.get('hip_right')

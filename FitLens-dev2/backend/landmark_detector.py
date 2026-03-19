@@ -1077,12 +1077,34 @@ class LandmarkDetector:
 
             best_hip_span = 0
             best_hip_y = None
+            
+            # Use body bounding box if landmarks are available to constrain hip width
+            bbox_x_min = 0
+            bbox_x_max = image_width - 1
+            if mediapipe_landmarks is not None:
+                # Get approximate body bounding box width from shoulders/hips
+                body_xs = mediapipe_landmarks[[11, 12, 23, 24], 0]
+                mid_x = np.mean(body_xs)
+                # Max width is unlikely to exceed 2.5x shoulder width
+                sh_width = abs(mediapipe_landmarks[12][0] - mediapipe_landmarks[11][0])
+                bbox_x_min = max(0, int(mid_x - sh_width * 1.5))
+                bbox_x_max = min(image_width - 1, int(mid_x + sh_width * 1.5))
+
             for y in range(hip_y, hip_scan_end + 1):
-                left, right, s = _span_for_row(y)
+                row = mask_bin[y, bbox_x_min:bbox_x_max+1]
+                xs = np.where(row > 0)[0]
+                if xs.size == 0:
+                    continue
+                
+                left_x = int(xs.min()) + bbox_x_min
+                right_x = int(xs.max()) + bbox_x_min
+                s = right_x - left_x
+                
                 if s > best_hip_span:
                     best_hip_span = s
                     best_hip_y = y
-                    hip_left, hip_right = left, right
+                    hip_left = (float(left_x), float(y))
+                    hip_right = (float(right_x), float(y))
 
             # Overall body height from mask for potential re-scaling
             ys_all = np.where(mask_bin > 0)[0]
