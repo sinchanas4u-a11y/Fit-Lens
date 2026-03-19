@@ -198,6 +198,14 @@ smplify-x-new/
 output/
 .venv/
 FitLens-dev2/models/*.pkl
+
+# Backend measurements and results
+backend/measurement_results/
+results/
+*.jsonl
+*.xml
+test_out.txt
+test_results.txt
 FitLens-dev2/models/**/*.pkl
 FitLens-dev2/models/**/*.npz
 FitLens-dev2/models/*.npz
