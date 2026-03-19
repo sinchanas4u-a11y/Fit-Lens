@@ -80,10 +80,8 @@ os.makedirs(MESHES_DIR, exist_ok=True)
 def save_mesh_as_obj(mesh_data, view_name='front', session_id=None):
     """Save mesh data (Plotly format) as a Wavefront OBJ file.
 
-    Vertices in mesh_data are already in centimetres (cm).
-    OBJ files conventionally use metres, so we divide by 100.
-    The pipeline centres the mesh so Y=0 is the body midpoint;
-    we shift by +height/2 so feet sit at Y=0 in the OBJ file.
+    Vertices in mesh_data are in centimetres with feet already at Y=0.
+    Convert cm → metres for the OBJ file (standard convention).
     """
     if not mesh_data or 'x' not in mesh_data:
         return None
@@ -98,23 +96,16 @@ def save_mesh_as_obj(mesh_data, view_name='front', session_id=None):
         ys = mesh_data['y']
         zs = mesh_data['z']
 
-        # Pipeline centres mesh so midpoint is Y=0.
-        # Shift so feet (min Y) sit at Y=0 in the OBJ.
-        y_min_cm = min(ys)
-        y_shift  = -y_min_cm   # positive → lifts mesh up
-
         with open(obj_path, 'w') as f:
             f.write(f"# SMPL Mesh OBJ export - Session: {session_id or 'default'}\n")
-            # Convert cm → metres for OBJ
+            # Convert cm → metres (feet already at Y=0 from pipeline)
             for x, y, z in zip(xs, ys, zs):
-                f.write(f"v {x/100:.6f} {(y + y_shift)/100:.6f} {z/100:.6f}\n")
+                f.write(f"v {x/100:.6f} {y/100:.6f} {z/100:.6f}\n")
             # Faces (OBJ is 1-indexed)
             for i, j, k in zip(mesh_data['i'], mesh_data['j'], mesh_data['k']):
                 f.write(f"f {i+1} {j+1} {k+1}\n")
 
-        print(f"✓ Saved mesh to {obj_path}  "
-              f"(y_shift={y_shift/100:.3f} m, "
-              f"vertices={len(xs)})")
+        print(f"✓ Saved mesh to {obj_path}  (vertices={len(xs)})")
         return obj_path
     except Exception as e:
         print(f"Error saving OBJ: {e}")
@@ -1650,6 +1641,7 @@ def process_images():
                     gender             = detected_gender_mv or 'neutral',
                     front_mask         = front_mask_mv,
                     side_mask          = side_mask_mv,
+                    use_neutral_pose   = False,
                     target_measurements = front_results.get('smpl_target_measurements') or {},
                 )
 
@@ -1970,8 +1962,9 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
                 user_height_cm = effective_height_cm,
                 gender         = detected_gender or 'neutral',
                 view_type      = view_name,
-                use_neutral_pose = True,
-                target_measurements = target_measurements
+                use_neutral_pose = False,
+                target_measurements = target_measurements,
+                front_mask     = mask,
             )
             
             if smpl_res.get('success'):

@@ -209,7 +209,7 @@ class SMPLEstimator:
             [target_measurements[k] - base_meas[k] for k in keys],
             dtype=np.float64,
         )
-        l2_reg       = 0.5
+        l2_reg       = 1.0
         J_T          = J.T
         matrix_to_inv = J @ J_T + l2_reg * np.eye(len(keys), dtype=np.float64)
 
@@ -292,7 +292,7 @@ class SMPLEstimator:
         init_betas:          np.ndarray = None,
         n_betas:             int   = 10,
         n_iter:              int   = 300,
-        beta_clip:           float = 3.0,
+        beta_clip:           float = 2.0,
     ) -> np.ndarray:
         """
         Iterative gradient-descent optimisation of SMPL shape betas.
@@ -377,7 +377,7 @@ class SMPLEstimator:
                 total += 0.5 * self._ratio_loss(joints, lm_targets)
 
             # L2 regularisation — penalise extreme betas
-            total += 0.02 * float(np.sum(betas ** 2))
+            total += 0.10 * float(np.sum(betas ** 2))
             return float(total)
 
         result = minimize(
@@ -452,15 +452,16 @@ class SMPLEstimator:
         def objective(betas):
             betas = np.asarray(betas, dtype=np.float64)
             joints = self.get_joints(self._shape_vertices(betas))
-            joint_loss = self._joint_reprojection_loss(joints, targets)
+            # Lower weights + stronger L2 reg → anatomically plausible betas
             ratio_loss = self._ratio_loss(joints, targets)
-            return (joint_loss * 8.0) + (ratio_loss * 3.0) + (0.025 * np.sum(betas ** 2))
+            return ratio_loss * 2.0 + 0.15 * float(np.sum(betas ** 2))
 
         result = minimize(
             objective,
             x0=np.zeros(10, dtype=np.float64),
             method="L-BFGS-B",
-            options={"maxiter": 250, "ftol": 1e-9},
+            bounds=[(-2.0, 2.0)] * 10,
+            options={"maxiter": 200, "ftol": 1e-9},
         )
 
         betas = np.asarray(result.x, dtype=np.float64)
@@ -488,52 +489,158 @@ class SMPLEstimator:
             "view_type": view_type
         }
 
-    def estimate_pose_from_landmarks(self, landmarks_2d, betas, view_type='front', use_neutral=False):
+    def estimate_pose_from_landmarks(self, landmarks_2d, betas,
+                                     view_type='front', use_neutral=False):
+        """
+        Per-joint direct geometric solver — no global optimizer.
+
+        Each joint is solved independently from 2D landmark geometry with
+        hard anatomical clamps.  Deterministic: cannot produce lotus/twisted
+        poses.  Falls back to neutral when use_neutral=True or < 6 landmarks
+        are visible.
+        """
         pose = np.zeros((24, 3), dtype=np.float64)
-        
+
         if use_neutral:
-            # Return neutral standing pose (all zeros)
-            # pose[0] is global orientation; [0,0,0] is neutral upright in standard SMPL
             return pose.reshape(-1)
 
-        joints = self.get_joints(self._shape_vertices(np.asarray(betas, dtype=np.float64)))
-        
-        # Set global orientation based on view
+        # ── Landmark accessors ────────────────────────────────────────────────
+        def _lm(idx):
+            if idx >= len(landmarks_2d) or landmarks_2d[idx] is None:
+                return None
+            d   = landmarks_2d[idx]
+            vis = float(d.get('visibility', 1.0))
+            if vis < 0.20:
+                return None
+            return float(d['x']), float(d['y']), vis
+
+        visible = sum(1 for i in range(min(33, len(landmarks_2d))) if _lm(i) is not None)
+        if visible < 6:
+            print(f"[Pose] Only {visible} visible landmarks — using neutral pose")
+            return pose.reshape(-1)
+
+        # ── Per-joint direct geometric solver ────────────────────────────────
+        # No global optimizer — each joint solved independently with hard
+        # anatomical clamps.  Cannot produce lotus/twisted poses.
+
+        betas_arr = np.asarray(betas, dtype=np.float64)
+        rest_j    = self.get_joints(self._shape_vertices(betas_arr))
+
+        def _rest_len(a, b):
+            return float(np.linalg.norm(rest_j[a] - rest_j[b]))
+
+        # ── Global orientation ────────────────────────────────────────────────
         if view_type == 'side':
-            pose[0, 1] = np.pi / 2.0  # Rotate 90 degrees for side view
+            pose[0, 1] = np.pi / 2.0
         elif view_type == 'back':
             pose[0, 1] = np.pi
-            
-        rest_xy = np.stack((joints[:, 0], -joints[:, 1]), axis=1)
 
-        hip_center = self._average_target_point(landmarks_2d, (23, 24))
-        shoulder_center = self._average_target_point(landmarks_2d, (11, 12))
-        
-        if hip_center is not None and shoulder_center is not None:
-            target_torso = self._target_vector(hip_center, shoulder_center)
-            rest_torso = (rest_xy[16] + rest_xy[17]) * 0.5 - (rest_xy[1] + rest_xy[2]) * 0.5
-            # Root rotation (global z)
-            pose[0, 2] = self._clamp_angle(self._signed_angle(rest_torso, target_torso), limit=0.8)
+        # ── Root + spine: lateral lean only (Z-axis) ─────────────────────────
+        lhip, rhip = _lm(23), _lm(24)
+        lsho, rsho = _lm(11), _lm(12)
 
-        cumulative_z = {0: pose[0, 2]}
-        for joint_idx, mp_parent, mp_child, smpl_parent, smpl_child in self.POSE_BONE_MAP:
-            parent_point = self._landmark_point(landmarks_2d, mp_parent)
-            child_point = self._landmark_point(landmarks_2d, mp_child)
-            if parent_point is None or child_point is None:
+        if lhip and rhip and lsho and rsho:
+            hip_cx = (lhip[0] + rhip[0]) / 2.0
+            sho_cx = (lsho[0] + rsho[0]) / 2.0
+            hip_cy = (lhip[1] + rhip[1]) / 2.0
+            sho_cy = (lsho[1] + rsho[1]) / 2.0
+            dx = sho_cx - hip_cx
+            dy = max(hip_cy - sho_cy, 1e-4)
+            lean_z = float(np.arctan2(dx, dy))
+            pose[0, 2] = self._clamp_angle(lean_z, limit=0.25)
+            for sj in (3, 6, 9):
+                pose[sj, 2] = self._clamp_angle(lean_z / 3.0, limit=0.12)
+
+        # ── Hips (joints 1=L, 2=R): abduction (Z) + flex (X) ────────────────
+        # CRITICAL: no Y rotation (no twist) — only Z abduction and X flex
+        for mp_hip, mp_knee, smpl_hip in ((23, 25, 1), (24, 26, 2)):
+            ph, pk = _lm(mp_hip), _lm(mp_knee)
+            if ph is None or pk is None:
                 continue
+            dx = pk[0] - ph[0]
+            dy = abs(ph[1] - pk[1]) + 1e-6
+            # Z: abduction from horizontal offset of knee relative to hip
+            abduction = float(np.arctan2(dx, dy))
+            pose[smpl_hip, 2] = self._clamp_angle(abduction, limit=0.40)
+            pose[smpl_hip, 1] = 0.0  # explicitly zero — no twist
+            # X: flex only when knee is clearly above hip (sitting)
+            if pk[1] < ph[1] - 0.02:   # knee above hip in image (y-down)
+                flex = float(np.arctan2(ph[1] - pk[1], dy)) * 0.6
+                pose[smpl_hip, 0] = self._clamp_angle(flex, limit=0.60)
+            else:
+                pose[smpl_hip, 0] = 0.0
 
-            target_vec = self._target_vector(parent_point, child_point)
-            rest_vec = rest_xy[smpl_child] - rest_xy[smpl_parent]
-            desired_global = self._vector_angle(target_vec)
-            rest_global = self._vector_angle(rest_vec)
-            
-            p_idx = int(self.parents[joint_idx])
-            parent_global = cumulative_z.get(p_idx, cumulative_z.get(0, 0.0))
-            
-            local_angle = self._wrap_angle(desired_global - rest_global - parent_global)
-            pose[joint_idx, 2] = self._clamp_angle(local_angle)
-            cumulative_z[joint_idx] = parent_global + pose[joint_idx, 2]
+        # ── Knees (joints 4=L, 5=R): hinge X-axis only ───────────────────────
+        # Flex estimated from foreshortening of lower leg segment
+        for mp_knee, mp_ankle, smpl_knee, smpl_hip_j in (
+            (25, 27, 4, 1), (26, 28, 5, 2)
+        ):
+            pk, pa = _lm(mp_knee), _lm(mp_ankle)
+            if pk is None or pa is None:
+                continue
+            seg_px = float(np.hypot(pa[0] - pk[0], pa[1] - pk[1]))
+            rest_px = _rest_len(smpl_hip_j + 3, smpl_hip_j + 3 + 3)  # knee→ankle
+            # Use actual rest length in image units via hip width scale
+            lh, rh = _lm(23), _lm(24)
+            if lh and rh:
+                hip_px = float(np.hypot(rh[0] - lh[0], rh[1] - lh[1]))
+                hip_rest = _rest_len(1, 2)
+                if hip_rest > 1e-6 and hip_px > 1e-6:
+                    ppu = hip_px / hip_rest
+                    rest_seg_px = _rest_len(smpl_knee - 3, smpl_knee) * ppu
+                    if rest_seg_px > 1e-6:
+                        ratio = np.clip(seg_px / rest_seg_px, 0.0, 1.0)
+                        flex = float(np.arccos(ratio))
+                        pose[smpl_knee, 0] = self._clamp_angle(flex, limit=1.8)
+                        pose[smpl_knee, 1] = 0.0  # no twist
+                        pose[smpl_knee, 2] = 0.0  # hinge only
 
+        # ── Shoulders (joints 16=L, 17=R): raise (Z) + flex (X) ─────────────
+        for mp_sho, mp_elb, smpl_sho in ((11, 13, 16), (12, 14, 17)):
+            ps, pe = _lm(mp_sho), _lm(mp_elb)
+            if ps is None or pe is None:
+                continue
+            dy_img = pe[1] - ps[1]   # positive = elbow below shoulder (image y-down)
+            dx_img = pe[0] - ps[0]
+            # Z: raise/lower arm — negative dy means arm raised
+            raise_z = float(np.arctan2(-dy_img, max(abs(dx_img), 1e-4)))
+            pose[smpl_sho, 2] = self._clamp_angle(raise_z, limit=1.20)
+            # X: forward/back flex from horizontal offset
+            flex_x = float(np.arctan2(dx_img, max(abs(dy_img), 1e-4))) * 0.5
+            pose[smpl_sho, 0] = self._clamp_angle(flex_x, limit=0.80)
+            pose[smpl_sho, 1] = 0.0  # no twist
+
+        # ── Elbows (joints 18=L, 19=R): hinge X-axis only ────────────────────
+        for mp_sho, mp_elb, mp_wri, smpl_elb, smpl_sho_j in (
+            (11, 13, 15, 18, 16), (12, 14, 16, 19, 17)
+        ):
+            pe, pw = _lm(mp_elb), _lm(mp_wri)
+            if pe is None or pw is None:
+                continue
+            seg_px = float(np.hypot(pw[0] - pe[0], pw[1] - pe[1]))
+            lh, rh = _lm(23), _lm(24)
+            if lh and rh:
+                hip_px = float(np.hypot(rh[0] - lh[0], rh[1] - lh[1]))
+                hip_rest = _rest_len(1, 2)
+                if hip_rest > 1e-6 and hip_px > 1e-6:
+                    ppu = hip_px / hip_rest
+                    rest_seg_px = _rest_len(smpl_sho_j + 2, smpl_sho_j + 4) * ppu
+                    if rest_seg_px > 1e-6:
+                        ratio = np.clip(seg_px / rest_seg_px, 0.0, 1.0)
+                        flex = float(np.arccos(ratio))
+                        pose[smpl_elb, 0] = self._clamp_angle(flex, limit=2.0)
+                        pose[smpl_elb, 1] = 0.0
+                        pose[smpl_elb, 2] = 0.0
+
+        # ── Sanity clamp: no joint magnitude > 2.0 rad ───────────────────────
+        for j in range(24):
+            mag = float(np.linalg.norm(pose[j]))
+            if mag > 2.0:
+                pose[j] = pose[j] * (2.0 / mag)
+
+        non_zero = int(np.sum(np.any(pose != 0, axis=1)))
+        print(f"[Pose] Per-joint solver — non-zero joints: {non_zero}/24  "
+              f"view={view_type}  visible_lm={visible}")
         return pose.reshape(-1)
 
     def _prepare_landmark_targets(self, landmarks_2d):

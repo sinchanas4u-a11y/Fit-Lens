@@ -954,7 +954,7 @@ const UploadMode = () => {
                         <SMPLViewer
                           meshData={frontMeshData}
                           statusText={smplStatusText}
-                          statusDetail="Neutral standing pose matching your body shape"
+                          statusDetail="Neutral pose · Interactive 3D viewer"
                         />
                       ) : canShowPlaceholder ? (
                         <div style={{

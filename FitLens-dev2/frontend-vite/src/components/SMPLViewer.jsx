@@ -95,16 +95,16 @@ const frameCameraToObject = (camera, controls, object, lights) => {
   const box = new THREE.Box3().setFromObject(object);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
-  const maxDim = Math.max(size.x, size.y, size.z, 1);
+  const maxDim = Math.max(size.x, size.y, size.z, 0.1);
   const fov = THREE.MathUtils.degToRad(camera.fov);
-  const distance = (maxDim / (2 * Math.tan(fov / 2))) * 1.4;
+  const distance = (maxDim / (2 * Math.tan(fov / 2))) * 1.5;
 
-  // Look at the body centre (mid-torso, ~55% of height)
+  // Target mid-torso (~55% of height from feet = box.min.y)
   const target = new THREE.Vector3(center.x, box.min.y + size.y * 0.55, center.z);
 
   camera.near = Math.max(0.01, distance / 100);
   camera.far = Math.max(1000, distance * 20);
-  camera.position.set(center.x, target.y, center.z + distance);
+  camera.position.set(center.x, target.y, target.z + distance);
   camera.lookAt(target);
   camera.updateProjectionMatrix();
 
@@ -119,7 +119,7 @@ const frameCameraToObject = (camera, controls, object, lights) => {
     lights.back.position.set(0, distance * 0.7, -distance);
   }
 
-  return { box, size, center, distance };
+  return { box, size, center: target, distance };
 };
 
 const disposeSceneObject = (object) => {
@@ -257,34 +257,18 @@ const SMPLViewer = ({ meshData, statusText, statusDetail }) => {
             return;
           }
 
-          const initialCenter = initialBox.getCenter(new THREE.Vector3());
-          const initialSize = initialBox.getSize(new THREE.Vector3());
-          const targetHeight = 1.8; // metres — matches a ~180 cm person
-          const currentHeight = initialSize.y > 0 ? initialSize.y : 1;
-          const scaleFactor = targetHeight / currentHeight;
-
-          // Scale uniformly to target height
-          object.scale.setScalar(scaleFactor);
-
-          // After scaling, re-compute bounds and place feet at Y=0, centred on X/Z
-          const scaledBox = new THREE.Box3().setFromObject(object);
-          const scaledMin = scaledBox.min;
-          const scaledCenter = scaledBox.getCenter(new THREE.Vector3());
-          object.position.set(-scaledCenter.x, -scaledMin.y, -scaledCenter.z);
+          // OBJ is already in metres with feet at Y=0, centred on X/Z.
+          // Just place the object at the origin — no rescaling needed.
+          object.position.set(0, 0, 0);
 
           scene.add(object);
           meshRef.current = object;
 
           const framed = frameCameraToObject(camera, controls, object, lights);
-          console.log('📏 Mesh bounds before centering:', {
-            center: initialCenter,
-            size: initialSize,
-          });
-          console.log('⚖️ Applied mesh scale:', scaleFactor);
-          console.log('🎯 Final framed mesh bounds:', {
-            center: framed.center,
+          console.log('✅ Mesh loaded:', {
+            vertices: object.children?.[0]?.geometry?.attributes?.position?.count,
             size: framed.size,
-            cameraDistance: framed.distance,
+            distance: framed.distance,
           });
 
           setIsReady(true);
@@ -383,8 +367,9 @@ const SMPLViewer = ({ meshData, statusText, statusDetail }) => {
 
   const metadata = meshData.metadata || {};
   const fittedToUser = Boolean(metadata.fitted_to_user);
+  const poseApplied = Boolean(metadata.pose_applied);
   const viewerStatusText = statusText || metadata.status_text || (fittedToUser ? '✓ Model fitted to your body' : '3D model ready');
-  const viewerStatusDetail = statusDetail || (metadata.pose_applied ? 'Real MediaPipe landmarks and body pose applied' : 'Interactive viewer ready');
+  const viewerStatusDetail = statusDetail || (poseApplied ? 'Pose matched to your image · Interactive 3D viewer' : 'Neutral pose · Interactive 3D viewer');
 
   return (
     <div
