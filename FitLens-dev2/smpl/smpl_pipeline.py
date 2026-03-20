@@ -191,8 +191,11 @@ def run_smpl_pipeline(
 
         # Stage 3: measurements always from neutral-pose mesh (pose does not affect measurements)
         neutral_verts = estimator.get_vertices(fitted_betas)
+        neutral_joints = estimator.get_joints(neutral_verts)
         measurements  = MeasurementExtractor().extract_all(
-            vertices=neutral_verts, user_height_cm=user_height_cm,
+            vertices=neutral_verts,
+            user_height_cm=user_height_cm,
+            joints=neutral_joints,
         )
 
         # Stage 4: build display mesh — posed or neutral based on flag
@@ -327,9 +330,12 @@ def run_multiview_smpl_pipeline(
             fit_result['fit_status']  = 'measurement_optimised'
 
         # Measurements always from neutral pose (pose does not affect measurements)
-        neutral_verts = estimator.get_vertices(fitted_betas)
-        measurements  = MeasurementExtractor().extract_all(
-            vertices=neutral_verts, user_height_cm=user_height_cm,
+        neutral_verts  = estimator.get_vertices(fitted_betas)
+        neutral_joints = estimator.get_joints(neutral_verts)
+        measurements   = MeasurementExtractor().extract_all(
+            vertices=neutral_verts,
+            user_height_cm=user_height_cm,
+            joints=neutral_joints,
         )
 
         # Build display mesh — posed or neutral based on flag
