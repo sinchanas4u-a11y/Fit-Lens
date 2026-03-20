@@ -538,12 +538,20 @@ class SMPLEstimator:
             ppu = None
 
         # ── Global orientation ────────────────────────────────────────────────
+        # Root joint (pose[0]) controls the whole-body orientation.
+        # For a front-facing standing person: X=0, Y=0, Z=0 (upright, facing camera).
+        # Side/back views only need a Y rotation — never tilt the root.
+        pose[0, 0] = 0.0  # no forward/back tilt
+        pose[0, 2] = 0.0  # no lateral tilt — keeps mesh perfectly upright
         if view_type == 'side':
             pose[0, 1] = np.pi / 2.0
         elif view_type == 'back':
             pose[0, 1] = np.pi
+        else:
+            pose[0, 1] = 0.0  # front view: no Y rotation
 
-        # ── Root + spine: lateral lean (Z) ───────────────────────────────────
+        # ── Spine: lateral lean (Z) — only for clearly leaning poses ─────────
+        # Threshold: ignore lean < 8° (0.14 rad) to avoid noise-driven tilt.
         lhip, rhip = _lm(23), _lm(24)
         lsho, rsho = _lm(11), _lm(12)
         if lhip and rhip and lsho and rsho:
@@ -554,9 +562,11 @@ class SMPLEstimator:
             dx = sho_cx - hip_cx
             dy = max(hip_cy - sho_cy, 1e-4)
             lean_z = float(np.arctan2(dx, dy))
-            pose[0, 2] = self._clamp_angle(lean_z, limit=0.25)
-            for sj in (3, 6, 9):
-                pose[sj, 2] = self._clamp_angle(lean_z / 3.0, limit=0.12)
+            # Only distribute lean to spine joints when it is clearly intentional
+            if abs(lean_z) > 0.14:  # > ~8 degrees
+                for sj in (3, 6, 9):
+                    pose[sj, 2] = self._clamp_angle(lean_z / 3.0, limit=0.12)
+            # Root Z stays zero regardless — lean is expressed through spine joints only
 
         # ── Hips (1=L, 2=R): abduction Z, flex X, NO twist Y ────────────────
         for mp_hip, mp_knee, smpl_hip in ((23, 25, 1), (24, 26, 2)):
@@ -565,7 +575,9 @@ class SMPLEstimator:
                 continue
             dx = pk[0] - ph[0]
             dy = abs(ph[1] - pk[1]) + 1e-6
-            pose[smpl_hip, 2] = self._clamp_angle(float(np.arctan2(dx, dy)), limit=0.40)
+            abduction = float(np.arctan2(dx, dy))
+            # Only apply hip abduction when clearly visible (> 5°) to avoid noise tilt
+            pose[smpl_hip, 2] = self._clamp_angle(abduction, limit=0.40) if abs(abduction) > 0.09 else 0.0
             pose[smpl_hip, 1] = 0.0  # no twist
             # Flex only when knee is clearly above hip (sitting pose)
             if pk[1] < ph[1] - 0.02:
@@ -632,8 +644,8 @@ class SMPLEstimator:
             if segment_angle < 0.35:
                 continue
 
-            # Negative X = forward flex only, clamp to anatomical limit
-            pose[smpl_knee, 0] = float(np.clip(-segment_angle, -1.8, 0.0))
+            # Negative X = forward flex only, clamp to anatomical limit (0–150°)
+            pose[smpl_knee, 0] = float(np.clip(-segment_angle, -2.618, 0.0))
 
         # ── Shoulders (16=L, 17=R) ────────────────────────────────────────────
         # SMPL T-pose: arms horizontal at ~90 deg outward.
@@ -691,6 +703,7 @@ class SMPLEstimator:
         # ── Elbows (18=L, 19=R): hinge X only, flex from foreshortening ──────
         # SMPL joint indices: L shoulder=16, L elbow=18, L wrist=20
         #                     R shoulder=17, R elbow=19, R wrist=21
+        # Constraint: 0° to 150° flex only (no hyperextension).
         for mp_elb, mp_wri, smpl_elb, j_par, j_chi in (
             (13, 15, 18, 18, 20),   # L: elbow(18)→wrist(20)
             (14, 16, 19, 19, 21),   # R: elbow(19)→wrist(21)
@@ -702,7 +715,9 @@ class SMPLEstimator:
             rest_seg_px = _rest_len(j_par, j_chi) * ppu
             if rest_seg_px > 1e-6:
                 ratio = np.clip(seg_px / rest_seg_px, 0.0, 1.0)
-                pose[smpl_elb, 0] = self._clamp_angle(float(np.arccos(ratio)), limit=2.0)
+                flex  = float(np.arccos(ratio))
+                # Clamp to [0, 150°=2.618 rad] — no hyperextension
+                pose[smpl_elb, 0] = float(np.clip(flex, 0.0, 2.618))
                 pose[smpl_elb, 1] = 0.0
                 pose[smpl_elb, 2] = 0.0
 

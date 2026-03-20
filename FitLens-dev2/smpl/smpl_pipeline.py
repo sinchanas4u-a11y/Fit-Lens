@@ -1,4 +1,4 @@
-﻿"""
+"""
 SMPL mesh generation pipeline.
 
 Key design decisions:
@@ -135,20 +135,30 @@ def run_smpl_pipeline(
             try:
                 from smpl.multiview_reconstructor import (
                     extract_measurements_from_masks, _measure_smpl,
-                    _JACOBIAN_DELTA, _L2_REG,
+                    _JACOBIAN_DELTA, _L2_REG, clean_mask,
+                    direct_betas_from_measurements,
                 )
+                # Clean mask before use
+                clean_front = clean_mask(front_mask)
                 sil = extract_measurements_from_masks(
-                    front_mask=front_mask, side_mask=None,
+                    front_mask=clean_front, side_mask=None,
                     user_height_cm=user_height_cm,
                 )
                 if sil:
-                    base = _measure_smpl(estimator, fitted_betas, user_height_cm)
+                    # Use direct beta mapping as better warm-start if we have mask data
+                    direct_init = direct_betas_from_measurements(sil, user_height_cm)
+                    # Blend: 50% direct + 50% landmark-fit betas
+                    blended_init = np.clip(
+                        0.5 * direct_init + 0.5 * fitted_betas,
+                        -_BETA_CLIP, _BETA_CLIP,
+                    )
+                    base = _measure_smpl(estimator, blended_init, user_height_cm)
                     keys = [k for k in sil if k in base]
                     if keys:
                         n = 10
                         J = np.zeros((len(keys), n), dtype=np.float64)
                         for j in range(n):
-                            bj = fitted_betas.copy()
+                            bj = blended_init.copy()
                             bj[j] += _JACOBIAN_DELTA
                             mj = _measure_smpl(estimator, bj, user_height_cm)
                             for i, k in enumerate(keys):
@@ -157,7 +167,7 @@ def run_smpl_pipeline(
                         dm = np.array([sil[k] - base[k] for k in keys], dtype=np.float64)
                         A  = J @ J.T + _L2_REG * np.eye(len(keys), dtype=np.float64)
                         db = J.T @ np.linalg.solve(A, dm)
-                        fitted_betas = np.clip(fitted_betas + db, -_BETA_CLIP, _BETA_CLIP)
+                        fitted_betas = np.clip(blended_init + db, -_BETA_CLIP, _BETA_CLIP)
                         fit_result['betas']       = fitted_betas
                         fit_result['fit_status']  = 'silhouette_refined'
                         fit_result['status_text'] = 'Model fitted from silhouette + landmarks'
@@ -201,6 +211,16 @@ def run_smpl_pipeline(
         for k, v in measurements.items():
             if v is not None:
                 print(f"  {k:30s}: {v} cm")
+
+        # Validation: project 3D joints back to 2D and log alignment error
+        try:
+            from smpl.multiview_reconstructor import validate_pose_projection
+            validate_pose_projection(
+                estimator, fitted_betas, fitted_pose,
+                landmarks_2d, image_width, image_height, user_height_cm,
+            )
+        except Exception:
+            pass
 
         return {
             'success':      True,
@@ -268,10 +288,13 @@ def run_multiview_smpl_pipeline(
 
         if have_front and have_side:
             try:
+                from smpl.multiview_reconstructor import clean_mask
+                clean_front = clean_mask(front_mask)
+                clean_side  = clean_mask(side_mask)
                 fitted_betas, silhouette_targets = fit_betas_multiview(
                     estimator=estimator,
-                    front_mask=front_mask,
-                    side_mask=side_mask,
+                    front_mask=clean_front,
+                    side_mask=clean_side,
                     user_height_cm=user_height_cm,
                     init_betas=fitted_betas,
                 )
@@ -325,6 +348,17 @@ def run_multiview_smpl_pipeline(
         for mk, mv in measurements.items():
             if mv is not None:
                 print(f"  {mk:30s}: {mv} cm")
+
+        # Validation: project 3D joints back to 2D and log alignment error
+        try:
+            from smpl.multiview_reconstructor import validate_pose_projection
+            validate_pose_projection(
+                estimator, fitted_betas, fitted_pose,
+                front_landmarks_2d, front_image_width, front_image_height,
+                user_height_cm,
+            )
+        except Exception:
+            pass
 
         return {
             'success':            True,

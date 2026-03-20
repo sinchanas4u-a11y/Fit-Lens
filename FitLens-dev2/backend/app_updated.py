@@ -1635,8 +1635,11 @@ def process_images():
 
                 mv_res = run_multiview_smpl_pipeline(
                     front_landmarks_2d = front_lm_fmt,
+                    side_landmarks_2d  = side_lm_fmt,
                     front_image_width  = front_img.shape[1],
                     front_image_height = front_img.shape[0],
+                    side_image_width   = side_img.shape[1],
+                    side_image_height  = side_img.shape[0],
                     user_height_cm     = user_height_cm,
                     gender             = detected_gender_mv or 'neutral',
                     front_mask         = front_mask_mv,
