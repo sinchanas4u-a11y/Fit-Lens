@@ -114,6 +114,55 @@ def mediapipe_to_openpose(
     float(ra.visibility * 0.7)
   ]
 
+  # -----------------------------------------------------
+  # COMPUTE LEG ANGLE
+  # Generate realistic leg posture by correcting knee joint
+  # behavior and aligning it with the user's actual pose.
+  # Ensure the 3D mesh legs accurately match the image and remain straight.
+  # -----------------------------------------------------
+  def align_knee(hip_idx, knee_idx, ankle_idx):
+      # Extract points: [x, y, confidence]
+      hip = np.array(keypoints[hip_idx][:2])
+      knee = np.array(keypoints[knee_idx][:2])
+      ankle = np.array(keypoints[ankle_idx][:2])
+      
+      # For each leg:
+      #   upper_leg = hip -> knee
+      #   lower_leg = knee -> ankle
+      upper_leg = knee - hip
+      lower_leg = ankle - knee
+      
+      norm_upper = np.linalg.norm(upper_leg)
+      norm_lower = np.linalg.norm(lower_leg)
+      
+      if norm_upper > 1e-6 and norm_lower > 1e-6:
+          # Compute leg angle using dot product
+          cos_theta = np.dot(upper_leg, lower_leg) / (norm_upper * norm_lower)
+          cos_theta = np.clip(cos_theta, -1.0, 1.0)
+          angle = np.degrees(np.arccos(cos_theta))
+          
+          # If leg is relatively straight (e.g. angle < 25 degrees from being a straight line)
+          if angle < 25.0:
+              # Project the knee onto the line segment connecting hip and ankle
+              hip_to_ankle = ankle - hip
+              length_sq = np.sum(hip_to_ankle**2)
+              if length_sq > 0:
+                  t = np.dot(knee - hip, hip_to_ankle) / length_sq
+                  # Constrain parameter t to [0, 1] bounds (between hip and ankle)
+                  t = np.clip(t, 0.0, 1.0)
+                  # Calculate corrected straight knee position
+                  perfect_knee = hip + t * hip_to_ankle
+                  
+                  # Update the keypoint coordinates, keep original confidence
+                  keypoints[knee_idx][0] = float(perfect_knee[0])
+                  keypoints[knee_idx][1] = float(perfect_knee[1])
+
+  # OpenPose Indices: 
+  # Right leg: Hip=9, Knee=10, Ankle=11
+  # Left leg:  Hip=12, Knee=13, Ankle=14
+  align_knee(9, 10, 11)   # Right leg
+  align_knee(12, 13, 14)  # Left leg
+
   # Flatten to 1D array [x,y,c, x,y,c, ...]
   flat = []
   for kp in keypoints:

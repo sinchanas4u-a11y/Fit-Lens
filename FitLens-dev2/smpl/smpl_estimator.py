@@ -575,30 +575,65 @@ class SMPLEstimator:
             else:
                 pose[smpl_hip, 0] = 0.0
 
-        # ── Knees (4=L, 5=R): hinge X only, flex from foreshortening ─────────
+        # ── Knees (4=L, 5=R): straight unless clearly bent ───────────────────
         # SMPL joint indices: L hip=1, L knee=4, L ankle=7
         #                     R hip=2, R knee=5, R ankle=8
-        for mp_knee, mp_ankle, smpl_knee, j_par, j_chi in (
-            (25, 27, 4, 4, 7),   # L: knee joint 4, segment knee(4)→ankle(7)
-            (26, 28, 5, 5, 8),   # R: knee joint 5, segment knee(5)→ankle(8)
+        #
+        # SMPL anatomy: negative X = forward flex, positive X = backward (forbidden).
+        #
+        # For each leg compute the angle between:
+        #   upper_leg_vec = hip → knee
+        #   lower_leg_vec = knee → ankle
+        #
+        # For a standing person both vectors point nearly straight down →
+        # dot ≈ 1.0 → segment_angle ≈ 0 → knee_flex = 0 (straight).
+        #
+        # Only apply flex when the bend is unambiguous (> 20 deg) AND the
+        # ankle is NOT simply below the knee (which is the normal standing case).
+        for (mp_hip, mp_knee, mp_ankle, smpl_knee) in (
+            (23, 25, 27, 4),   # left
+            (24, 26, 28, 5),   # right
         ):
-            pk, pa = _lm(mp_knee), _lm(mp_ankle)
-            if pk is None or pa is None or ppu is None:
+            # Always start straight
+            pose[smpl_knee, 0] = 0.0
+            pose[smpl_knee, 1] = 0.0
+            pose[smpl_knee, 2] = 0.0
+
+            ph = _lm(mp_hip)
+            pk = _lm(mp_knee)
+            pa = _lm(mp_ankle)
+            if ph is None or pk is None or pa is None:
                 continue
-            seg_px      = float(np.hypot(pa[0] - pk[0], pa[1] - pk[1]))
-            rest_seg_px = _rest_len(j_par, j_chi) * ppu
-            if rest_seg_px > 1e-6:
-                ratio = np.clip(seg_px / rest_seg_px, 0.0, 1.0)
-                # Ignore small foreshortening changes typical of standing straight poses
-                if ratio > 0.85:
-                    flex_angle = 0.0
-                else:
-                    # SMPL knees bend naturally with negative X rotation
-                    flex_angle = -float(np.arccos(ratio))
-                
-                pose[smpl_knee, 0] = self._clamp_angle(flex_angle, limit=1.8)
-                pose[smpl_knee, 1] = 0.0
-                pose[smpl_knee, 2] = 0.0
+
+            # Upper leg vector: hip → knee
+            upper_vec = np.array([pk[0] - ph[0], pk[1] - ph[1]], dtype=np.float64)
+            # Lower leg vector: knee → ankle
+            lower_vec = np.array([pa[0] - pk[0], pa[1] - pk[1]], dtype=np.float64)
+
+            upper_len = float(np.linalg.norm(upper_vec))
+            lower_len = float(np.linalg.norm(lower_vec))
+            if upper_len < 1e-6 or lower_len < 1e-6:
+                continue
+
+            upper_unit = upper_vec / upper_len
+            lower_unit = lower_vec / lower_len
+
+            dot = float(np.clip(np.dot(upper_unit, lower_unit), -1.0, 1.0))
+            segment_angle = float(np.arccos(dot))  # 0 = straight, increases when bent
+
+            # Standing person: ankle is below knee (pa[1] > pk[1] in y-down image).
+            # If ankle is below knee AND bend is small → definitely straight.
+            ankle_below_knee = pa[1] > pk[1]
+            if ankle_below_knee and segment_angle < 0.35:   # < ~20 degrees
+                # Straight standing leg — keep at zero
+                continue
+
+            # Only apply if bend is clearly visible (> 20 deg) to avoid noise
+            if segment_angle < 0.35:
+                continue
+
+            # Negative X = forward flex only, clamp to anatomical limit
+            pose[smpl_knee, 0] = float(np.clip(-segment_angle, -1.8, 0.0))
 
         # ── Shoulders (16=L, 17=R) ────────────────────────────────────────────
         # SMPL T-pose: arms horizontal at ~90 deg outward.
@@ -667,15 +702,7 @@ class SMPLEstimator:
             rest_seg_px = _rest_len(j_par, j_chi) * ppu
             if rest_seg_px > 1e-6:
                 ratio = np.clip(seg_px / rest_seg_px, 0.0, 1.0)
-                # Apply a strict threshold: ignore slight differences likely caused by camera perspective or noisy landmarks
-                if ratio > 0.85:
-                    flex_angle = 0.0
-                else:
-                    # Depending on SMPL, elbows bend naturally with positive or negative rotation. 
-                    # We will assume positive similar to knees if left unchanged, but clamp it better.
-                    flex_angle = float(np.arccos(ratio))
-                
-                pose[smpl_elb, 0] = self._clamp_angle(flex_angle, limit=2.0)
+                pose[smpl_elb, 0] = self._clamp_angle(float(np.arccos(ratio)), limit=2.0)
                 pose[smpl_elb, 1] = 0.0
                 pose[smpl_elb, 2] = 0.0
 
