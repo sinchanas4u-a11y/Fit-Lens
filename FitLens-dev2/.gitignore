@@ -212,3 +212,8 @@ FitLens-dev2/models/*.npz
 pifuhd/
 pifuhd/
 pifuhd/
+
+# Additional Environments and Modules
+fitlens_env/
+.venv/
+node_modules/
