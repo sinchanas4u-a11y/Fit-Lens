@@ -12,6 +12,7 @@ import base64
 import io
 from PIL import Image
 import traceback
+# pyre-ignore-all-errors[21]
 import sys
 import os
 import hashlib
@@ -21,6 +22,7 @@ import json
 import datetime
 import xml.etree.ElementTree as ET
 from flask import Flask, request, jsonify, send_file
+from typing import Any, Dict, List, Optional, Union, Tuple
 
 # Add parent directory to path to import modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,6 +47,7 @@ except Exception as smpl_import_err:
 from smpl.smpl_estimator import SMPLEstimator
 from processing.smplifyx_runner import run_smplifyx
 from processing.smplifyx_reader import SMPLifyXReader
+from processing.mesh_circumference import MeshCircumferenceExtractor
 
 # LandmarkDetector will be imported and initialized on startup
 landmark_detector = None
@@ -287,19 +290,29 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Live Session State
 class LiveSession:
-    def __init__(self):
+    captured_images: Dict[str, str]
+    processed_results: Dict[str, Any]
+    current_view: str
+    stability_start_time: Optional[float]
+    is_stable: bool
+    last_instruction: str
+    last_instruction_time: float
+    user_height_cm: float
+    scale_factor: float
+
+    def __init__(self) -> None:
         self.reset()
 
-    def reset(self):
+    def reset(self) -> None:
         self.captured_images = {} # Original base64
         self.processed_results = {} # Measurements + Visualizations
         self.current_view = 'front'  # front, right, back, left
         self.stability_start_time = None
         self.is_stable = False
         self.last_instruction = ""
-        self.last_instruction_time = 0
-        self.user_height_cm = 0
-        self.scale_factor = 0
+        self.last_instruction_time = 0.0
+        self.user_height_cm = 0.0
+        self.scale_factor = 0.0
 
 live_session = LiveSession()
 
@@ -423,9 +436,9 @@ def handle_retake(data):
     view = data.get('view')
     print(f"Retake requested for {view}")
     if view in live_session.captured_images:
-        del live_session.captured_images[view]
+        live_session.captured_images.pop(view, None)
     if view in live_session.processed_results:
-        del live_session.processed_results[view]
+        live_session.processed_results.pop(view, None)
     live_session.stability_start_time = None
     live_session.current_view = view
 
@@ -514,6 +527,9 @@ def handle_process_selection(data):
         else: # auto
             # Process view with the same pipeline used by upload mode.
             ld = get_landmark_detector()
+            if ld is None:
+                emit('selection_processed', {'error': 'Landmark detector not initialized.'})
+                return
             landmarks = ld.detect(img)
             landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
             if landmarks is None:
@@ -1026,7 +1042,11 @@ def visualize_measurements(image, landmarks, measurements):
     # Overlay a compact summary so live view has immediate feedback.
     if isinstance(measurements, dict):
         y = 28
-        for name, data in list(measurements.items())[:6]:
+        count = 0
+        for name, data in measurements.items():
+            if count >= 6:
+                break
+            count += 1
             value = data.get('value_cm') if isinstance(data, dict) else None
             if value is None:
                 continue
@@ -1154,12 +1174,13 @@ def process_all_captured_images():
         if scale == 0 and 'front' in live_session.captured_images:
             front_img = decode_image(live_session.captured_images['front'])
             ld = get_landmark_detector()
-            landmarks = ld.detect(front_img)
-            landmarks = _ensure_pixel_landmarks(landmarks, front_img.shape) if landmarks is not None else None
-            if landmarks is not None:
-                nose = landmarks[0]
-                left_ankle = landmarks[27]
-                right_ankle = landmarks[28]
+            if ld is not None:
+                landmarks = ld.detect(front_img)
+                landmarks = _ensure_pixel_landmarks(landmarks, front_img.shape) if landmarks is not None else None
+                if landmarks is not None:
+                    nose = landmarks[0]
+                    left_ankle = landmarks[27]
+                    right_ankle = landmarks[28]
                 height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
                 scale = _compute_scale_from_height_px(live_session.user_height_cm, height_px, fallback=scale)
                 if scale > 0:
@@ -1354,7 +1375,8 @@ def verify_identity():
             
             if has_warning:
                  response_data['warning'] = True
-                 response_data['message'] += ' (uncertain range)'
+                 msg = str(response_data.get('message', ''))
+                 response_data['message'] = msg + ' (uncertain range)'
                  
         else:
             # Verification Failed
@@ -1724,6 +1746,62 @@ def process_images():
         else:
             mesh_data = None
             smplx_status = 'unavailable'
+
+        # Extract TRUE circumferences from 3D mesh
+        mesh_circs = {}
+        try:
+            # Find the generated mesh
+            generated_dir = os.path.join(
+                os.path.dirname(__file__),
+                'generated_meshes'
+            )
+
+            extractor = (
+                MeshCircumferenceExtractor
+                .from_latest_mesh(
+                    generated_dir,
+                    user_height_cm
+                )
+            )
+
+            # Pass scale_factor for integrated
+            # pixel-to-scale regression
+            mesh_circs = extractor.extract_all(
+                scale_factor=scale_factor
+            )
+
+            print(f"\nMesh circumferences:")
+            for k, v in mesh_circs.items():
+                if v:
+                    print(f"  {k}: {v:.1f} cm")
+
+        except Exception as circ_err:
+            print(f"Mesh circumference error: "
+                  f"{circ_err}")
+            import traceback
+            traceback.print_exc()
+
+        # Override measurements with
+        # TRUE mesh circumferences
+        if mesh_circs:
+            for key, val in mesh_circs.items():
+                if val and key in (
+                    front_results.get(
+                        'measurements', {}
+                    )
+                ):
+                    front_results[
+                        'measurements'
+                    ][key] = {
+                        **front_results[
+                            'measurements'
+                        ].get(key, {}),
+                        'value_cm': val,
+                        'source':   'Mesh 3D Slice',
+                        'method':   'true_circumference'
+                    }
+                    print(f"Updated {key}: "
+                          f"{val:.1f} cm")
 
         # Add original images to results for display
         if front_results.get('success'):
@@ -2831,6 +2909,43 @@ def estimate_height_from_landmarks(landmarks, image_height):
         return max(height_estimates)
     
     return 0
+
+
+# --- CALIBRATION ENDPOINT ---
+
+@app.route('/api/calibrate', methods=['POST'])
+def calibrate_measurement():
+    """
+    Add a new data point to the self-updating regression corrector.
+    Expects JSON with:
+    - measurement_name (e.g., 'chest_circumference')
+    - measured_cm (the value our system predicted)
+    - actual_cm (the ground truth from the user)
+    """
+    try:
+        data = request.json
+        name = data.get('measurement_name')
+        measured = data.get('measured_cm')
+        actual = data.get('actual_cm')
+        
+        if not all([name, measured, actual]):
+            return jsonify({'success': False, 'error': 'Missing required fields: measurement_name, measured_cm, actual_cm'}), 400
+            
+        measured_val = float(measured)
+        actual_val = float(actual)
+        
+        from backend.measurement_engine import RegressionCorrector
+        RegressionCorrector.add_data_point(name, measured_val, actual_val)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Calibration point added for {name}',
+            'model_stats': RegressionCorrector._models.get(name, {})
+        })
+    except Exception as e:
+        print(f"Calibration Error: {e}")
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # --- EXPORT ENDPOINTS ---

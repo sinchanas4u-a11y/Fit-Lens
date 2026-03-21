@@ -5,7 +5,129 @@ Measurement Engine - Hybrid Vision Approach
 - Keeps all existing pixel-to-scale conversion logic unchanged
 """
 import numpy as np
+import json
+import os
 from typing import Dict, Tuple, Optional
+
+class RegressionCorrector:
+    """
+    Self-updating regression corrector.
+    Stores data points and recomputes
+    regression for any n datasets.
+
+    Formula: actual = slope × measured
+                      + intercept
+    Minimum R² to apply correction
+    Below this threshold use raw value
+    """
+    MIN_R2 = 0.85
+    MIN_POINTS = 3
+    
+    _data = {}
+    _models = {}
+    _DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "regression_data.json")
+    _loaded = False
+
+    @classmethod
+    def load_data(cls):
+        if cls._loaded:
+            return
+        if os.path.exists(cls._DATA_FILE):
+            try:
+                with open(cls._DATA_FILE, 'r') as f:
+                    cls._data = json.load(f)
+                cls._recompute_all()
+            except Exception as e:
+                print(f"Error loading regression data: {e}")
+        cls._loaded = True
+
+    @classmethod
+    def save_data(cls):
+        try:
+            with open(cls._DATA_FILE, 'w') as f:
+                json.dump(cls._data, f, indent=4)
+        except Exception as e:
+            print(f"Error saving regression data: {e}")
+
+    @classmethod
+    def add_data_point(cls, measurement_name: str, measured_cm: float, actual_cm: float):
+        cls.load_data()
+        if measurement_name not in cls._data:
+            cls._data[measurement_name] = []
+        cls._data[measurement_name].append((measured_cm, actual_cm))
+        cls.save_data()
+        cls._recompute(measurement_name)
+
+    @classmethod
+    def _recompute_all(cls):
+        for name in cls._data:
+            cls._recompute(name)
+
+    @classmethod
+    def _recompute(cls, measurement_name: str):
+        points = cls._data.get(measurement_name, [])
+        if len(points) < cls.MIN_POINTS:
+            cls._models[measurement_name] = {
+                'slope':     1.0,
+                'intercept': 0.0,
+                'r2':        0.0,
+                'n':         len(points),
+                'valid':     False
+            }
+            return cls._models[measurement_name]
+
+        x = np.array([p[0] for p in points])
+        y = np.array([p[1] for p in points])
+        n = len(points)
+
+        # OLS formula
+        sum_x   = np.sum(x)
+        sum_y   = np.sum(y)
+        sum_xy  = np.sum(x * y)
+        sum_x2  = np.sum(x ** 2)
+
+        denom = n * sum_x2 - sum_x ** 2
+
+        if abs(denom) < 1e-10:
+            # Vertical line — cannot fit
+            cls._models[measurement_name] = {
+                'slope':     1.0,
+                'intercept': 0.0,
+                'r2':        0.0,
+                'n':         n,
+                'valid':     False,
+                'reason':    'x values too similar'
+            }
+            return cls._models[measurement_name]
+
+        slope     = (n * sum_xy - sum_x * sum_y) / denom
+        intercept = (sum_y - slope * sum_x) / n
+
+        # R² calculation
+        y_pred  = slope * x + intercept
+        ss_res  = np.sum((y - y_pred) ** 2)
+        ss_tot  = np.sum((y - np.mean(y)) ** 2)
+
+        r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+        cls._models[measurement_name] = {
+            'slope': slope,
+            'intercept': intercept,
+            'r2': r2,
+            'n': n,
+            'valid': r2 >= cls.MIN_R2
+        }
+        return cls._models[measurement_name]
+
+    @classmethod
+    def apply(cls, measurement_name: str, raw_px: float, scale_factor: float) -> float:
+        cls.load_data()
+        raw_cm = raw_px * scale_factor
+        model = cls._models.get(measurement_name)
+        if model and model.get('valid'):
+            corrected = (model['slope'] * raw_cm) + model['intercept']
+            return max(0.1, corrected)
+        return raw_cm
 
 
 class MeasurementEngine:
@@ -126,8 +248,8 @@ class MeasurementEngine:
                 else:
                     continue
             
-            # Convert to cm using scale factor: measurement_cm = pixel_dist * (user_height_cm / height_px)
-            cm_dist = pixel_dist * scale_factor
+            # Convert to cm using scale factor with regression correction
+            cm_dist = RegressionCorrector.apply(name, pixel_dist, scale_factor)
             measurements[name] = cm_dist
         
         return measurements
@@ -182,7 +304,7 @@ class MeasurementEngine:
             if name in self.edge_based_measurements and edge_reference_points and edge_reference_points.get('is_valid'):
                 pixel_dist = self._calculate_edge_distance(name, edge_reference_points)
                 if pixel_dist > 0:
-                    measurement_value = pixel_dist * scale_factor
+                    measurement_value = RegressionCorrector.apply(name, pixel_dist, scale_factor)
                     confidence = 0.95  # High confidence for contour-based
                     source = "Canny+findContours Edge"
             
@@ -194,8 +316,8 @@ class MeasurementEngine:
                     p2 = landmark_dict[p2_name]
                     # OpenCV distance calculation
                     pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
-                    # Apply height-based scaling
-                    measurement_value = pixel_dist * scale_factor
+                    # Apply height-based scaling with regression correction
+                    measurement_value = RegressionCorrector.apply(name, pixel_dist, scale_factor)
                     confidence = (p1[2] + p2[2]) / 2
                     source = "MediaPipe Landmarks (33 points)"
             
@@ -305,7 +427,7 @@ class MeasurementEngine:
         if pixel_dist <= 0:
             return None
         
-        measurement_cm = pixel_dist * scale_factor
+        measurement_cm = RegressionCorrector.apply(measurement_name, pixel_dist, scale_factor)
         
         # Validate the measurement
         is_valid, reason = self.validate_edge_measurement(measurement_name, measurement_cm)
@@ -392,7 +514,7 @@ class MeasurementEngine:
                 p2 = landmark_dict[p2_name]
                 
                 pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
-                cm_dist = pixel_dist * scale_factor
+                cm_dist = RegressionCorrector.apply(name, pixel_dist, scale_factor)
                 
                 # Use refined confidence if available
                 if refined_shoulders and refined_shoulders.get('is_refined'):
