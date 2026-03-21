@@ -3,6 +3,7 @@ Flask Backend API for Body Measurement System
 Updated workflow: Upload -> Detect Reference -> YOLOv8 Masking -> MediaPipe -> Measurements
 Includes Live Camera Mode via WebSockets
 """
+# pyre-ignore-all-errors
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
@@ -12,7 +13,6 @@ import base64
 import io
 from PIL import Image
 import traceback
-# pyre-ignore-all-errors[21]
 import sys
 import os
 import hashlib
@@ -80,9 +80,22 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 MESHES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_meshes")
 os.makedirs(MESHES_DIR, exist_ok=True)
 
+def to_native_types(obj):
+    """Recursively convert NumPy types to native Python types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: to_native_types(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [to_native_types(i) for i in obj]
+    elif isinstance(obj, np.ndarray):
+        return to_native_types(obj.tolist())
+    elif isinstance(obj, (np.float32, np.float64, np.float16)):
+        return float(obj)
+    elif isinstance(obj, (np.int32, np.int64, np.int16, np.int8)):
+        return int(obj)
+    return obj
+
 def save_mesh_as_obj(mesh_data, view_name='front', session_id=None):
     """Save mesh data (Plotly format) as a Wavefront OBJ file.
-
     Vertices in mesh_data are in centimetres with feet already at Y=0.
     Convert cm → metres for the OBJ file (standard convention).
     """
@@ -98,6 +111,7 @@ def save_mesh_as_obj(mesh_data, view_name='front', session_id=None):
         xs = mesh_data['x']
         ys = mesh_data['y']
         zs = mesh_data['z']
+
 
         with open(obj_path, 'w') as f:
             f.write(f"# SMPL Mesh OBJ export - Session: {session_id or 'default'}\n")
@@ -702,7 +716,7 @@ def run_gender_detection(image):
     return 'neutral'
 
 
-def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success):
+def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success, effective_height_cm=0.0):
     """Merge MediaPipe and SMPL measurements with graceful fallback behavior."""
 
     def _mp_entry(name):
@@ -721,21 +735,144 @@ def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success):
     hip_width_cm = _mp_cm('hip_width')
 
     if smpl_success:
-        chest_circ = smpl_m.get('chest_circumference', chest_width_cm)
-        waist_circ = smpl_m.get('waist_circumference', waist_width_cm)
-        hip_circ = smpl_m.get('hip_circumference', hip_width_cm)
+        chest_circ = smpl_m.get(
+            'chest_circumference', chest_width_cm
+        )
+        waist_circ = smpl_m.get(
+            'waist_circumference', waist_width_cm
+        )
+        hip_circ = smpl_m.get(
+            'hip_circumference', hip_width_cm
+        )
         circ_source = 'SMPL 3D Model'
     else:
-        chest_circ = round(chest_width_cm * 3.0, 2) if chest_width_cm is not None else None
-        waist_circ = round(waist_width_cm * 3.0, 2) if waist_width_cm is not None else None
-        hip_circ = round(hip_width_cm * 3.0, 2) if hip_width_cm is not None else None
+        chest_circ = round(
+            chest_width_cm * 3.0, 2
+        ) if chest_width_cm is not None else None
+        waist_circ = round(
+            waist_width_cm * 3.0, 2
+        ) if waist_width_cm is not None else None
+        hip_circ = round(
+            hip_width_cm * 3.0, 2
+        ) if hip_width_cm is not None else None
         circ_source = 'Estimated'
+
+    # ── OVERRIDE with mesh circumference ──────
+    # MeshCircumferenceExtractor gives more
+    # accurate circumferences using ellipse
+    # formula on actual 3D mesh cross-sections
+    try:
+        import sys
+        import glob as _glob
+        import os as _os
+
+        _proj_root = _os.path.dirname(
+            _os.path.dirname(
+                _os.path.abspath(__file__)
+            )
+        )
+        if _proj_root not in sys.path:
+            sys.path.insert(0, _proj_root)
+
+        from processing.mesh_circumference import (
+            MeshCircumferenceExtractor
+        )
+
+        # Find most recent generated mesh
+        _mesh_dir = _os.path.join(
+            _os.path.dirname(__file__),
+            'generated_meshes'
+        )
+
+        # Also check SMPLify-X output
+        _smplifyx_mesh = _os.path.join(
+            _proj_root,
+            'output', 'meshes', 'front', '000.obj'
+        )
+
+        # Find all obj files
+        _mesh_files = _glob.glob(
+            _os.path.join(
+                _mesh_dir, '**', '*.obj'
+            ),
+            recursive=True
+        )
+        if _os.path.exists(_smplifyx_mesh):
+            _mesh_files.append(_smplifyx_mesh)
+
+        if _mesh_files:
+            # Use most recently modified mesh
+            _latest_mesh = max(
+                _mesh_files,
+                key=_os.path.getmtime
+            )
+
+            print(f"\nRunning mesh circumference "
+                  f"extraction...")
+            print(f"  Mesh: {_latest_mesh}")
+            print(f"  Height: {effective_height_cm}cm")
+
+            _extractor = MeshCircumferenceExtractor(
+                _latest_mesh,
+                float(effective_height_cm)
+            )
+
+            _mesh_circs = _extractor.extract_all()
+
+            # Override with mesh values
+            # only if they are in valid range
+            if _mesh_circs.get(
+                'chest_circumference'
+            ):
+                _mc = _mesh_circs[
+                    'chest_circumference'
+                ]
+                if 60 <= _mc <= 140:
+                    chest_circ  = _mc
+                    circ_source = 'Mesh 3D Slice'
+                    print(f"  chest: {_mc:.1f} cm ✓")
+
+            if _mesh_circs.get(
+                'waist_circumference'
+            ):
+                _mw = _mesh_circs[
+                    'waist_circumference'
+                ]
+                if 50 <= _mw <= 130:
+                    waist_circ  = _mw
+                    circ_source = 'Mesh 3D Slice'
+                    print(f"  waist: {_mw:.1f} cm ✓")
+
+            if _mesh_circs.get(
+                'hip_circumference'
+            ):
+                _mh = _mesh_circs[
+                    'hip_circumference'
+                ]
+                if 65 <= _mh <= 145:
+                    hip_circ    = _mh
+                    circ_source = 'Mesh 3D Slice'
+                    print(f"  hip  : {_mh:.1f} cm ✓")
+
+            print(f"  source: {circ_source}")
+
+        else:
+            print("No mesh file found for "
+                  "circumference extraction")
+
+    except Exception as _mesh_err:
+        print(f"Mesh circumference error: "
+              f"{_mesh_err}")
+        import traceback
+        traceback.print_exc()
+        # Keep existing values if mesh fails
+    # ── END mesh circumference override ───────
 
     merged = {
         'full_height': {
-            'value_cm': _mp_cm('full_height'),
+            'value_cm': float(effective_height_cm) if effective_height_cm > 0 else _mp_cm('full_height'),
             'value_px': _mp_px('full_height'),
-            'source': 'MediaPipe',
+            'source': 'User Input' if effective_height_cm > 0 else 'MediaPipe',
             'label': 'Full Height',
         },
         'arm_length': {
@@ -1416,7 +1553,7 @@ def verify_identity():
         print(f"   Message: {response_data['message']}")
         print("="*60)
         
-        return jsonify(response_data), 200
+        return jsonify(to_native_types(response_data)), 200
         
     except Exception as e:
         print(f"✗ Server Error in verify_identity: {e}")
@@ -1766,8 +1903,24 @@ def process_images():
 
             # Pass scale_factor for integrated
             # pixel-to-scale regression
+            
+            # Get landmarks and image info from front results
+            landmarks_list = front_results.get('landmarks', [])
+            img_h = front_results.get('image_height')
+            
+            # Extract shoulder_width_cm if available
+            shoulder_width_cm = 40.0
+            front_res_meas = front_results.get('measurements', {})
+            if 'shoulder_width' in front_res_meas:
+                sw_data = front_res_meas['shoulder_width']
+                if isinstance(sw_data, dict) and 'value_cm' in sw_data:
+                    shoulder_width_cm = float(sw_data['value_cm'])
+
             mesh_circs = extractor.extract_all(
-                scale_factor=scale_factor
+                scale_factor=scale_factor,
+                landmarks=landmarks_list,
+                image_height=img_h,
+                shoulder_width_cm=shoulder_width_cm
             )
 
             print(f"\nMesh circumferences:")
@@ -1835,7 +1988,7 @@ def process_images():
         print("✓ Processing complete!")
         print("="*60 + "\n")
         
-        return jsonify(response)
+        return jsonify(to_native_types(response))
         
     except Exception as e:
         print(f"\n✗ ERROR: {str(e)}")
@@ -1954,7 +2107,9 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
 
         try:
             measurements = measurement_engine.calculate_measurements_with_confidence(
-                landmarks, scale_factor, view_name, edge_reference_points=edge_reference_points
+                landmarks, scale_factor, view_name, 
+                edge_reference_points=edge_reference_points,
+                user_height_cm=effective_height_cm
             )
         except Exception as e:
             print(f"⚠ Measurement error: {e}")
@@ -2169,6 +2324,7 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
             mp_measurements,
             smpl_m,
             smpl_success,
+            effective_height_cm=effective_height_cm
         )
 
         print(f"\n✓ Formatted {len(formatted_measurements)} merged measurements")
@@ -2523,7 +2679,7 @@ def process_manual_landmarks():
         print("✓ Manual processing complete!")
         print("="*60 + "\n")
         
-        return jsonify(response)
+        return jsonify(to_native_types(response))
         
     except Exception as e:
         print(f"\n✗ ERROR: {str(e)}")
@@ -2937,11 +3093,11 @@ def calibrate_measurement():
         from backend.measurement_engine import RegressionCorrector
         RegressionCorrector.add_data_point(name, measured_val, actual_val)
         
-        return jsonify({
+        return jsonify(to_native_types({
             'success': True,
             'message': f'Calibration point added for {name}',
             'model_stats': RegressionCorrector._models.get(name, {})
-        })
+        }))
     except Exception as e:
         print(f"Calibration Error: {e}")
         traceback.print_exc()

@@ -324,6 +324,10 @@ class MeasurementEngine:
             if measurement_value is not None:
                 measurements[name] = (measurement_value, confidence, source)
         
+        # Override full_height with user_height_cm if provided to avoid 2-3cm bias
+        if user_height_cm and float(user_height_cm) > 0:
+            measurements['full_height'] = (float(user_height_cm), 1.0, 'User Input')
+                
         return measurements
     
     def _calculate_edge_distance(self, measurement_name: str, edge_reference_points: Dict) -> float:
