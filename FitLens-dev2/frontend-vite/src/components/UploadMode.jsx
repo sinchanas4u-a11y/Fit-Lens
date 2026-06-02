@@ -148,7 +148,7 @@ const UploadMode = () => {
     }
   };
 
-  const resizeImage = (file, maxWidth = 800, maxHeight = 800) => {
+  const resizeImage = (file, maxWidth = 1920, maxHeight = 1920) => {
     return new Promise((resolve) => {
       const reader = new FileReader();
       reader.onload = (e) => {

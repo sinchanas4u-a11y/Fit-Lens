@@ -59,10 +59,10 @@ class SegmentationModel:
             return self._segment_fallback(image)
     
     def _segment_with_yolo(self, image: np.ndarray, conf_threshold: float) -> Optional[np.ndarray]:
-        """Segment using YOLOv8"""
+        """Segment using YOLOv8 with optimized settings for full body"""
         try:
-            # Run inference
-            results = self.model(image, conf=conf_threshold, verbose=False)
+            # Run inference with higher resolution and Retina Masks
+            results = self.model(image, conf=conf_threshold, imgsz=1024, retina_masks=True, verbose=False)
             
             if len(results) == 0:
                 return None

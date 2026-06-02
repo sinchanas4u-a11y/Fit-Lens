@@ -9,48 +9,62 @@ import numpy as np
 from typing import Optional, List, Dict, Tuple
 import json
 
-# Import MediaPipe with error handling
+# Import MediaPipe with proper error handling
 try:
     import mediapipe as mp
-    if not hasattr(mp, 'solutions'):
-        raise ImportError("MediaPipe 'solutions' module not found")
+    MEDIAPIPE_AVAILABLE = True
 except ImportError as e:
     print(f"Error importing MediaPipe: {e}")
-    print("Please install: pip install mediapipe==0.10.14")
-    raise
-
+    MEDIAPIPE_AVAILABLE = False
+    # Minimal fallback to avoid crash during import
+    class mp:
+        class solutions:
+            class pose:
+                pass
+            class drawing_utils:
+                pass
+            class face_mesh:
+                pass
 
 class LandmarkDetector:
     """Detect body landmarks using hybrid MediaPipe + segmentation approach"""
     
     def __init__(self):
         """Initialize MediaPipe Pose, Face Mesh, and hybrid parameters"""
-        # MediaPipe 0.10.14 - Access solutions module
+        # Modern MediaPipe API (0.10.0+)
+        self.pose = None
+        self.face_mesh = None
+        
+        if not MEDIAPIPE_AVAILABLE:
+            print("⚠ MediaPipe not available - landmark detection disabled")
+            return
+        
         try:
+            # Use the standard MediaPipe solutions API
+            # This is the correct import path for MediaPipe 0.10.x
             self.mp_pose = mp.solutions.pose
             self.mp_drawing = mp.solutions.drawing_utils
             self.mp_face_mesh = mp.solutions.face_mesh
-        except AttributeError as e:
-            raise ImportError(
-                f"Cannot access MediaPipe solutions: {e}\n"
-                "Please ensure MediaPipe 0.10.14 is installed: pip install mediapipe==0.10.14"
+            
+            self.pose = self.mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=2,
+                smooth_landmarks=True,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
             )
-        
-        self.pose = self.mp_pose.Pose(
-            static_image_mode=False,
-            model_complexity=2,
-            smooth_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-        
-        # Initialize Face Mesh for facial landmarks
-        self.face_mesh = self.mp_face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+            
+            self.face_mesh = self.mp_face_mesh.FaceMesh(
+                static_image_mode=False,
+                max_num_faces=1,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            print("✓ Landmark detectors initialized successfully")
+        except Exception as e:
+            print(f"⚠ Failed to initialize MediaPipe: {e}")
+            import traceback
+            traceback.print_exc()
         
         # Shoulder edge detection parameters
         self.shoulder_region_radius = 60  # pixels

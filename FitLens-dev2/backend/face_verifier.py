@@ -35,10 +35,12 @@ class FaceVerifier:
         self.is_ready = INSIGHTFACE_AVAILABLE
         self.app = None
         
-        # Similarity thresholds as per requirements
-        self.SAME_PERSON_THRESHOLD = 0.65  # >= 0.65 → same person
-        self.DIFFERENT_PERSON_THRESHOLD = 0.50  # < 0.50 → different person
-        # Between 0.50-0.65 → uncertain but allow with warning
+        # Similarity thresholds tuned for front+side view pairs.
+        # Side-view faces are partially turned, so ArcFace scores are naturally
+        # lower than front+front comparisons. Thresholds are relaxed accordingly.
+        self.SAME_PERSON_THRESHOLD = 0.35      # >= 0.35 → verified
+        self.DIFFERENT_PERSON_THRESHOLD = 0.20  # < 0.20 → likely different person
+        # Between 0.20–0.35 → uncertain, allow with warning
         
         if self.is_ready:
             try:
@@ -224,12 +226,15 @@ class FaceVerifier:
     def verify_person(self, img1_array, img2_array, threshold=None):
         """
         Verify if two images belong to the same person with quality checks.
-        
+
+        Thresholds are relaxed for front+side pairs because a side-profile
+        face naturally scores lower with ArcFace than two front-facing photos.
+
         Args:
             img1_array: Front image (numpy array BGR)
             img2_array: Side/Other image (numpy array BGR)
-            threshold: Optional custom threshold override (default: 0.65)
-            
+            threshold: Optional custom threshold override (default: 0.35)
+
         Returns:
             dict: {
                 'verified': bool,
@@ -238,7 +243,7 @@ class FaceVerifier:
                 'warning': bool,
                 'no_face': bool,
                 'error': str,
-                'issues': {'front': [], 'side': []} 
+                'issues': {'front': [], 'side': []}
             }
         """
         result = {

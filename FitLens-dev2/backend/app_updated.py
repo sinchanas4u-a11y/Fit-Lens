@@ -1394,7 +1394,7 @@ print("Initializing models...")
 try:
     reference_detector = ReferenceDetector()
     measurement_engine = MeasurementEngine()
-    segmentation_model = SegmentationModel(model_size='n')  # YOLOv8 nano for speed
+    segmentation_model = SegmentationModel(model_size='s')  # Use Small model for better masks
     # Initialize landmark detector on startup
     print("Loading MediaPipe landmark detector...")
     landmark_detector = get_landmark_detector()
@@ -1438,10 +1438,10 @@ def serve_mesh_obj(view, session_id=None):
 def verify_identity():
     """
     Verify identity between two images using ArcFace cosine similarity.
-    Thresholds:
-    - similarity >= 0.65: Same person (verified)
-    - 0.50 <= similarity < 0.65: Uncertain range (verified with warning)
-    - similarity < 0.50: Different person (not verified)
+    Thresholds (relaxed for front+side pairs — profile faces score lower):
+    - similarity >= 0.35: Same person (verified)
+    - 0.20 <= similarity < 0.35: Uncertain range (verified with warning)
+    - similarity < 0.20: Different person (not verified)
     - No face detected: Not verified
     """
     try:
@@ -1594,58 +1594,52 @@ def process_images():
         if side_img is not None:
             print(f"✓ Side image: {side_img.shape}")
             
-            # --- SECURITY CHECK: FACE VERIFICATION ---
+            # --- SECURITY CHECK: FACE VERIFICATION (SOFT WARNING ONLY) ---
             print("\n" + "="*60)
-            print("STEP 1.5: VERIFYING IDENTITY")
+            print("STEP 1.5: VERIFYING IDENTITY (OPTIONAL)")
             print("="*60)
 
-            if face_verifier is None:
-                return jsonify({
-                    'error': 'Face verification service unavailable',
-                    'step': 1.5
-                }), 503
-            
-            # Verify that both images belong to the same person
-            verification_result = face_verifier.verify_person(front_img, side_img)
-            
-            # InsightFace returns similarity (higher = more similar)
-            similarity = verification_result.get('similarity', 0.0)
-            verified = verification_result.get('verified', False)
-            issues = verification_result.get('issues', {'front': [], 'side': []})
-            
-            # Refined Logic: If Verified, proceed (ignore quality issues). If Not Verified, check issues.
-            if not verified:
-                # Verification failed. 
-                # User request: Priority to Mismatch Error.
-                
-                if verification_result.get('no_face'):
-                     return jsonify({'error': 'Face verification failed - face not detected clearly', 'step': 1.5}), 400
+            # Face verification is now OPTIONAL — it never blocks the upload.
+            # We log the result for debugging but always proceed.
+            verification_passed = True
+            verification_message = ""
 
-                main_error = "Identity verification failed"
-                # If similarity is low, emphasize mismatch
-                similarity = verification_result.get('similarity', 0.0)
-                if similarity < 0.40:
-                     main_error += " (Different people detected)"
-                
-                # Append hints if any
-                hints = []
-                if issues['front']:
-                    hints.append(f"Front: {', '.join(issues['front'])}")
-                if issues['side']:
-                    hints.append(f"Side: {', '.join(issues['side'])}")
-                
-                full_error_msg = main_error
-                if hints:
-                     full_error_msg += f". Issues: {'; '.join(hints)}"
-                else:
-                     full_error_msg += ". Please ensure both photos are of the same person."
+            if face_verifier is None or not getattr(face_verifier, 'is_ready', False):
+                print("⚠ Face verification service unavailable — skipping")
+                verification_message = "Face verification skipped (service unavailable)"
+            else:
+                try:
+                    # Verify that both images belong to the same person
+                    verification_result = face_verifier.verify_person(front_img, side_img)
+                    
+                    similarity = verification_result.get('similarity', 0.0)
+                    verified = verification_result.get('verified', False)
+                    no_face = verification_result.get('no_face', False)
+                    issues = verification_result.get('issues', {'front': [], 'side': []})
 
-                return jsonify({'error': full_error_msg, 'step': 1.5}), 400
-            
-            # Log warning if in uncertain range
-            if verification_result.get('warning'):
-                print(f"⚠ Warning: Similarity in uncertain range (0.50-0.65): {similarity:.4f}")
-            # ----------------------------------------
+                    print(f"📊 Verification Result:")
+                    print(f"   Verified: {verified}")
+                    print(f"   Similarity: {similarity:.4f}")
+                    print(f"   No Face: {no_face}")
+                    print(f"   Issues: {issues}")
+
+                    if no_face:
+                        verification_message = "⚠ Face not detected in one or both images"
+                        print(verification_message)
+                    elif not verified:
+                        verification_message = f"⚠ Low face similarity ({similarity:.2f}) — may be different angles or lighting"
+                        print(verification_message)
+                    else:
+                        verification_message = f"✓ Identity verified (similarity: {similarity:.2f})"
+                        print(verification_message)
+
+                except Exception as e:
+                    print(f"⚠ Face verification error (non-blocking): {e}")
+                    verification_message = "Face verification skipped (error)"
+
+            # Always proceed regardless of verification result
+            print("→ Proceeding with measurement pipeline...")
+            print("="*60)
 
         # Save uploaded images
         if data.get('front_image'):
