@@ -61,8 +61,18 @@ class SegmentationModel:
     def _segment_with_yolo(self, image: np.ndarray, conf_threshold: float) -> Optional[np.ndarray]:
         """Segment using YOLOv8 with optimized settings for full body"""
         try:
-            # Run inference with higher resolution and Retina Masks
-            results = self.model(image, conf=conf_threshold, imgsz=1024, retina_masks=True, verbose=False)
+            h_orig, w_orig = image.shape[:2]
+            
+            # Fix 2: Add padding to input image before inference (10% on all sides)
+            # This ensures persons near the edge (head/feet) are not clipped by the model
+            pad_h = int(h_orig * 0.1)
+            pad_w = int(w_orig * 0.1)
+            padded_image = cv2.copyMakeBorder(image, pad_h, pad_h, pad_w, pad_w, 
+                                             cv2.BORDER_CONSTANT, value=[0, 0, 0])
+            
+            # Run inference on padded image with high resolution and Retina Masks
+            results = self.model(padded_image, conf=conf_threshold, imgsz=1024, 
+                                retina_masks=True, verbose=False)
             
             if len(results) == 0:
                 return None
@@ -88,12 +98,17 @@ class SegmentationModel:
             person_confidences = confidences[person_indices]
             best_person_idx = person_indices[np.argmax(person_confidences)]
             
-            # Get the mask for the best person
+            # Fix 1: Correct mask-to-original remapping
+            # When retina_masks=True, YOLO returns masks at input size (padded_image)
             mask_data = result.masks.data[best_person_idx].cpu().numpy()
             
-            # Resize mask to original image size
-            h, w = image.shape[:2]
-            mask = cv2.resize(mask_data, (w, h), interpolation=cv2.INTER_LINEAR)
+            # Ensure mask exactly matches padded image size
+            ph, pw = padded_image.shape[:2]
+            if mask_data.shape[0] != ph or mask_data.shape[1] != pw:
+                mask_data = cv2.resize(mask_data, (pw, ph), interpolation=cv2.INTER_LINEAR)
+            
+            # Crop the mask back to the original image dimensions
+            mask = mask_data[pad_h:pad_h+h_orig, pad_w:pad_w+w_orig]
             
             # Convert to binary mask (0-255)
             mask = (mask > 0.5).astype(np.uint8) * 255
