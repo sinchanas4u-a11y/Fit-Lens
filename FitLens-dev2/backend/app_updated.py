@@ -3112,13 +3112,44 @@ def calibrate_measurement():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
-
-# --- EXPORT ENDPOINTS ---
-
-    return 0
-
-
 # --- EXPORT HELPERS ---
+
+def parse_measurement(data, scale_factor=None):
+    """
+    Parse a measurement dictionary, supporting both:
+    - {'value_cm': 95.2, 'value_px': 476.0, 'source': 'MediaPipe', ...}
+    - {'value': 95.2, 'unit': 'cm', ...}
+    """
+    if not isinstance(data, dict):
+        return 0.0, 0.0, 'N/A'
+
+    # Get CM value
+    value_cm = 0.0
+    if 'value_cm' in data:
+        value_cm = float(data['value_cm'] or 0)
+    elif 'value' in data:
+        # Check unit
+        val = float(data['value'] or 0)
+        unit = data.get('unit', 'cm').lower()
+        if unit == 'inches' or unit == 'in':
+            value_cm = val * 2.54
+        elif unit == 'feet' or unit == 'ft':
+            value_cm = val * 30.48
+        else:
+            value_cm = val
+
+    # Get PX value
+    value_px = 0.0
+    if 'value_px' in data:
+        value_px = float(data['value_px'] or 0)
+    elif scale_factor and scale_factor > 0:
+        value_px = value_cm / scale_factor
+
+    # Get Source
+    source = data.get('source') or data.get('method') or 'N/A'
+    
+    return value_cm, value_px, source
+
 
 def export_pdf(measurements_data, user_id, output_path):
     """
@@ -3172,15 +3203,18 @@ def export_pdf(measurements_data, user_id, output_path):
     
     # Add measurements from all views
     results = measurements_data.get('results', {})
+    calibration = measurements_data.get('calibration', {})
+    scale_factor = float(calibration.get('scale_factor', 0) or 0)
     
     def process_measurements(m_dict):
         for name, data in m_dict.items():
             if isinstance(data, dict):
+                val_cm, val_px, source = parse_measurement(data, scale_factor)
                 table_data.append([
                     name.replace('_', ' ').title(),
-                    f"{data.get('value_cm', 0):.2f}",
-                    f"{data.get('value_px', 0):.2f}",
-                    data.get('source', 'N/A')
+                    f"{val_cm:.2f}",
+                    f"{val_px:.2f}",
+                    source
                 ])
 
     for view_name, view_data in results.items():
@@ -3249,15 +3283,18 @@ def export_docx(measurements_data, user_id, output_path):
         run.bold = True
         
     results = measurements_data.get('results', {})
+    calibration = measurements_data.get('calibration', {})
+    scale_factor = float(calibration.get('scale_factor', 0) or 0)
     
     def add_rows(m_dict):
         for name, data in m_dict.items():
             if isinstance(data, dict):
+                val_cm, val_px, source = parse_measurement(data, scale_factor)
                 row_cells = table.add_row().cells
                 row_cells[0].text = name.replace('_', ' ').title()
-                row_cells[1].text = f"{data.get('value_cm', 0):.2f}"
-                row_cells[2].text = f"{data.get('value_px', 0):.2f}"
-                row_cells[3].text = data.get('source', 'N/A')
+                row_cells[1].text = f"{val_cm:.2f}"
+                row_cells[2].text = f"{val_px:.2f}"
+                row_cells[3].text = source
 
     for view_name, view_data in results.items():
         if isinstance(view_data, dict) and 'measurements' in view_data:
@@ -3325,6 +3362,8 @@ def download_xml():
     try:
         data = request.json
         results = data.get('results', {})
+        calibration = data.get('calibration', {})
+        scale_factor = float(calibration.get('scale_factor', 0) or 0)
         user_id = data.get('user_id', 'Guest_User')
         
         root = ET.Element("FitLensMeasurementReport")
@@ -3336,10 +3375,11 @@ def download_xml():
         def add_measurement_to_xml(m_name, m_val):
             m_node = ET.SubElement(measurements_node, "Measurement")
             ET.SubElement(m_node, "Name").text = m_name
-            ET.SubElement(m_node, "ValueCM").text = str(m_val.get('value_cm', 0))
-            ET.SubElement(m_node, "ValuePX").text = str(m_val.get('value_px', 0))
-            ET.SubElement(m_node, "Confidence").text = str(m_val.get('confidence', 0))
-            ET.SubElement(m_node, "Source").text = str(m_val.get('source', 'N/A'))
+            val_cm, val_px, source = parse_measurement(m_val, scale_factor)
+            ET.SubElement(m_node, "ValueCM").text = f"{val_cm:.2f}"
+            ET.SubElement(m_node, "ValuePX").text = f"{val_px:.2f}"
+            ET.SubElement(m_node, "Confidence").text = str(m_val.get('confidence', 0.95))
+            ET.SubElement(m_node, "Source").text = str(source)
 
         for view_name, view_data in results.items():
             if isinstance(view_data, dict) and 'measurements' in view_data:
@@ -3362,6 +3402,7 @@ def download_xml():
         print(f"XML Export Error: {e}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
 
 
 if __name__ == '__main__':

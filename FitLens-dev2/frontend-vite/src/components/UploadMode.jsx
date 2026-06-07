@@ -437,9 +437,14 @@ const UploadMode = () => {
 
   const downloadReport = async (format) => {
     try {
+      if (!results) {
+        console.error("No results available for download");
+        return;
+      }
+
       const response = await axios.post(`/api/download/${format}`, {
-        results: results.results,
-        calibration: results.calibration,
+        results: results?.results || {},
+        calibration: results?.calibration || {},
         user_id: 'User_' + Math.floor(1000 + Math.random() * 9000) // Simple ID for now
       }, {
         responseType: 'blob', // Important for handling binary data
@@ -452,7 +457,7 @@ const UploadMode = () => {
       link.href = url;
       
       // Extract filename from content-disposition if available, else use a default
-      const contentDisposition = response.headers['content-disposition'];
+      const contentDisposition = response.headers ? response.headers['content-disposition'] : null;
       let filename = `FitLens_Report.${format}`;
       if (contentDisposition && contentDisposition.indexOf('filename=') !== -1) {
         filename = contentDisposition.split('filename=')[1].replace(/["']/g, '');
@@ -463,7 +468,9 @@ const UploadMode = () => {
       link.click();
       
       // Cleanup
-      link.parentNode.removeChild(link);
+      if (link.parentNode) {
+        link.parentNode.removeChild(link);
+      }
       window.URL.revokeObjectURL(url);
     } catch (err) {
       console.error(`❌ ${format.toUpperCase()} export error:`, err);
