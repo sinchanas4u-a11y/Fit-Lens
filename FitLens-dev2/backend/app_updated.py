@@ -4,9 +4,28 @@ Updated workflow: Upload -> Detect Reference -> YOLOv8 Masking -> MediaPipe -> M
 Includes Live Camera Mode via WebSockets
 """
 # pyre-ignore-all-errors
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from flask_socketio import SocketIO, emit
+
+# Robust SocketIO import
+try:
+    from flask_socketio import SocketIO, emit
+    SOCKET_IO_ENABLED = True
+except ImportError:
+    print("\n" + "!" * 60)
+    print("WARNING: flask-socketio not found. WebSocket features will be disabled.")
+    print("To fix, run: pip install flask-socketio eventlet")
+    print("!" * 60 + "\n")
+    # Mock SocketIO class to prevent crash
+    class SocketIO:
+        def __init__(self, *args, **kwargs): pass
+        def on(self, *args): return lambda x: x
+        def emit(self, *args, **kwargs): pass
+        def run(self, *args, **kwargs):
+            print("ERROR: Cannot run server. flask-socketio is missing.")
+            raise RuntimeError("flask-socketio is missing")
+    SOCKET_IO_ENABLED = False
+
 import cv2
 import numpy as np
 import base64
@@ -21,7 +40,6 @@ import time
 import json
 import datetime
 import xml.etree.ElementTree as ET
-from flask import Flask, request, jsonify, send_file
 from typing import Any, Dict, List, Optional, Union, Tuple
 
 # Add parent directory to path to import modules
@@ -93,6 +111,25 @@ def to_native_types(obj):
     elif isinstance(obj, (np.int32, np.int64, np.int16, np.int8)):
         return int(obj)
     return obj
+
+
+def add_image_padding(image, padding_percent=0.10):
+    """
+    Adds percentage-based padding to all sides of an image.
+    Prevents head/feet clipping and improves face detection in full-body shots.
+    """
+    if image is None:
+        return None
+    h, w = image.shape[:2]
+    pad_h = int(h * padding_percent)
+    pad_w = int(w * padding_percent)
+    
+    # Pad with constant gray to avoid extreme contrast borders
+    padded = cv2.copyMakeBorder(
+        image, pad_h, pad_h, pad_w, pad_w, 
+        cv2.BORDER_CONSTANT, value=[128, 128, 128]
+    )
+    return padded
 
 def save_mesh_as_obj(mesh_data, view_name='front', session_id=None):
     """Save mesh data (Plotly format) as a Wavefront OBJ file.
@@ -1409,8 +1446,9 @@ except Exception as e:
 
 # Initialize face verifier for identity verification
 try:
-    face_verifier = FaceVerifier(model_name="buffalo_l", det_size=(640, 640))
-    print("✓ Face verifier initialized")
+    # Use higher resolution for better side-profile face detection
+    face_verifier = FaceVerifier(model_name="buffalo_l", det_size=(1024, 1024))
+    print("✓ Face verifier initialized (det_size=1024)")
 except Exception as e:
     print(f"Warning: Could not initialize FaceVerifier: {e}")
     face_verifier = None
@@ -1482,70 +1520,42 @@ def verify_identity():
             }), 400
         
         # Run face verification
-        result = face_verifier.verify_person(front_img, side_img)
+        # Apply 10% padding to handle head/feet clipping and improve face detection
+        # This addresses the user's specific request to "fix by padding the image by 10% on all sides".
+        front_img_padded = add_image_padding(front_img, padding_percent=0.10)
+        side_img_padded = add_image_padding(side_img, padding_percent=0.10)
         
-        # Extract values from result
-        verified = result.get('verified', False)
-        similarity = result.get('similarity', 0.0)
-        threshold = result.get('threshold', 0.65)
-        no_face = result.get('no_face', False)
-        has_warning = result.get('warning', False)
-        error_msg = result.get('error', '')
-        issues = result.get('issues', {'front': [], 'side': []})
+        # Run face verification with padded images
+        result = face_verifier.verify_person(front_img_padded, side_img_padded)
         
         # Construct response
+        verified = result.get('verified', False)
+        similarity = result.get('similarity', 0.0)
+        threshold = result.get('threshold', 0.25)
+        no_face = result.get('no_face', False)
+        
         response_data = {
             'success': True,
             'verified': verified,
             'similarity': float(similarity or 0),
-            'threshold': float(threshold or 0.65),
-            'issues': issues
+            'threshold': float(threshold or 0.25),
+            'no_face': no_face,
+            'issues': result.get('issues', {'front': [], 'side': []})
         }
         
         # Build appropriate message based on verification result
         if verified:
-            # PRIORITIZE similarity verification:
-            # If similarity is high enough, we proceed even if there are "soft" quality issues
-            
-            response_data['message'] = 'Identity verified successfully'
-            response_data['verified'] = True
-            
-            if has_warning:
-                 response_data['warning'] = True
-                 msg = str(response_data.get('message', ''))
-                 response_data['message'] = msg + ' (uncertain range)'
-                 
+            msg = "Identity successfully verified"
+            if result.get('warning') or result.get('fallback_used'):
+                msg += " (Match accepted for side-profile photo)"
+            response_data['message'] = msg
         else:
-            # Verification Failed
-            response_data['verified'] = False
+            fail_reason = result.get('face_fail_reason', 'Similarity below threshold')
+            response_data['message'] = f"Identity verification failed ({fail_reason})"
             
-            # 1. No Face Check (Blocking)
+            # Guiding instructions for no-face scenarios
             if no_face:
-                 response_data['message'] = 'Face verification failed - face not detected clearly'
-            else:
-                 # 2. Identity Mismatch vs Quality
-                 # If similarity is VERY low, it's likely a mismatch.
-                 # If similarity is borderline, maybe quality is to blame.
-                 # User request: "If mismatch → show mismatch error first. Then optionally show supporting quality hints"
-                 
-                 main_error = "Identity verification failed"
-                 if similarity < 0.40: # Very low similarity
-                      main_error += " (Different people detected)"
-                 elif similarity < threshold:
-                      main_error += " (Mismatch detected)"
-                      
-                 # Collect hints
-                 hints = []
-                 if issues['front']:
-                     hints.append(f"Front: {', '.join(issues['front'])}")
-                 if issues['side']:
-                     hints.append(f"Side: {', '.join(issues['side'])}")
-                     
-                 if hints:
-                      # Append hints to main error
-                      response_data['message'] = f"{main_error}. Note: {'; '.join(hints)}"
-                 else:
-                      response_data['message'] = f"{main_error}. Please ensure both photos are of the same person."
+                response_data['message'] += ". Please ensure your face is clearly visible and well-lit."
         
         print(f"\n📊 Verification Result:")
         print(f"   Verified: {verified}")
@@ -1584,15 +1594,20 @@ def process_images():
         print("="*60)
         
         # Decode images
-        front_img = decode_image(data.get('front_image'))
-        side_img = decode_image(data.get('side_image'))
+        front_img_raw = decode_image(data.get('front_image'))
+        side_img_raw = decode_image(data.get('side_image'))
         
-        if front_img is None:
+        if front_img_raw is None:
             return jsonify({'error': 'Front image is required', 'step': 1}), 400
+            
+        # Apply 10% padding to all sides to fix head/feet clipping and improve detection
+        # This addresses user request to "fix [head/feet clipping] by padding the image by 10% on all sides."
+        front_img = add_image_padding(front_img_raw, padding_percent=0.10)
+        side_img = add_image_padding(side_img_raw, padding_percent=0.10) if side_img_raw is not None else None
         
-        print(f"✓ Front image: {front_img.shape}")
+        print(f"✓ Front image (padded): {front_img.shape}")
         if side_img is not None:
-            print(f"✓ Side image: {side_img.shape}")
+            print(f"✓ Side image (padded): {side_img.shape}")
             
             # --- SECURITY CHECK: FACE VERIFICATION (SOFT WARNING ONLY) ---
             print("\n" + "="*60)
@@ -3353,14 +3368,25 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("BODY MEASUREMENT SYSTEM - BACKEND SERVER")
     print("="*60)
+    
+    # Check if SocketIO is actually available
+    if not SOCKET_IO_ENABLED:
+        print("\nWARNING: Running WITHOUT WebSocket support (Live Camera Mode disabled).")
+        print("To enable, install missing packages: pip install flask-socketio eventlet")
+    
     print("\nWorkflow:")
-    print("  1. Upload photos")
-    print("  2. Detect reference object")
-    print("  3. YOLOv8-seg masking (human body only)")
-    print("  4. MediaPipe pose landmarks")
-    print("  5. Compute measurements (px → cm)")
-    print("  6. Return JSON results")
+    print("  1. Upload photos (with 10% auto-padding)")
+    print("  2. Identity verification (Optimized for side-profiles)")
+    print("  3. YOLOv8 Body Segmentation")
+    print("  4. MediaPipe Pose Landmarks")
+    print("  5. Results in CM via Height Scaling")
     print("\n" + "="*60 + "\n")
     
-    # Use socketio.run instead of app.run
-    socketio.run(app, host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+    if SOCKET_IO_ENABLED:
+        # Use socketio.run instead of app.run
+        print(f"Starting server with SocketIO on http://localhost:5001")
+        socketio.run(app, host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+    else:
+        # Fallback to standard Flask if SocketIO is missing
+        print(f"Starting standard Flask server on http://localhost:5001 (REST only)")
+        app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)

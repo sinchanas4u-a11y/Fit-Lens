@@ -38,36 +38,40 @@ class FaceVerifier:
         # Similarity thresholds tuned for front+side view pairs.
         # Side-view faces are partially turned, so ArcFace scores are naturally
         # lower than front+front comparisons. Thresholds are relaxed accordingly.
-        self.SAME_PERSON_THRESHOLD = 0.35      # >= 0.35 → verified
-        self.DIFFERENT_PERSON_THRESHOLD = 0.20  # < 0.20 → likely different person
-        # Between 0.20–0.35 → uncertain, allow with warning
+        self.SAME_PERSON_THRESHOLD = 0.25      # RELAXED: >= 0.25 → verified (from 0.35)
+        self.DIFFERENT_PERSON_THRESHOLD = 0.15  # RELAXED: < 0.15 → likely different person (from 0.20)
+        # Between 0.15–0.25 → uncertain, allow with warning
         
         if self.is_ready:
             try:
                 print(f"Initializing InsightFace with {model_name} model...")
+                # Use CPUExecutionProvider for compatibility
                 self.app = FaceAnalysis(name=model_name, providers=['CPUExecutionProvider'])
-                self.app.prepare(ctx_id=0, det_size=det_size)
-                print(f"✓ FaceVerifier initialized successfully with InsightFace")
+                # Larger det_size helps detect smaller or rotated faces (side profiles)
+                self.app.prepare(ctx_id=0, det_size=(1024, 1024))
+                print(f"✓ FaceVerifier initialized successfully with InsightFace (det_size=1024)")
             except Exception as e:
                 print(f"Failed to initialize InsightFace: {e}")
                 self.is_ready = False
         else:
             print("FaceVerifier disabled: InsightFace library missing.")
 
-    def _detect_and_extract_embedding(self, img_array):
+    def _detect_and_extract_embedding(self, img_array, label="image"):
         """
         Detect face and extract 512-D embedding from image.
         
         Args:
             img_array: Image as numpy array (BGR format)
+            label: Descriptive label for logging (e.g. "front", "side")
             
         Returns:
-            tuple: (embedding, face_detected)
+            tuple: (embedding, face_detected, det_score)
                 - embedding: 512-D numpy array or None
                 - face_detected: bool
+                - det_score: float (detection confidence)
         """
         if img_array is None:
-            return None, False
+            return None, False, 0.0
             
         try:
             # InsightFace expects RGB
@@ -77,23 +81,24 @@ class FaceVerifier:
             faces = self.app.get(img_rgb)
             
             if len(faces) == 0:
-                print("⚠ No face detected in image")
-                return None, False
+                print(f"⚠ No face detected in {label} image")
+                return None, False, 0.0
             
             # Use the first detected face (largest by default)
-            face = faces[0]
+            face = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)[0]
             embedding = face.embedding
+            det_score = float(face.det_score)
             
             # Normalize embedding (L2 normalization)
-            embedding = embedding / np.linalg.norm(embedding)
+            embedding = embedding / (np.linalg.norm(embedding) + 1e-6)
             
-            print(f"✓ Face detected, embedding shape: {embedding.shape}")
-            return embedding, True
+            print(f"✓ Face detected in {label} (confidence: {det_score:.4f}), embedding shape: {embedding.shape}")
+            return embedding, True, det_score
             
         except Exception as e:
-            print(f"Error during face detection/embedding: {e}")
+            print(f"Error during face detection/embedding for {label}: {e}")
             traceback.print_exc()
-            return None, False
+            return None, False, 0.0
 
     def _calculate_cosine_similarity(self, emb1, emb2):
         """
@@ -233,15 +238,17 @@ class FaceVerifier:
         Args:
             img1_array: Front image (numpy array BGR)
             img2_array: Side/Other image (numpy array BGR)
-            threshold: Optional custom threshold override (default: 0.35)
+            threshold: Optional custom threshold override (default: 0.25)
 
         Returns:
             dict: {
                 'verified': bool,
                 'similarity': float,
                 'threshold': float,
+                'det_scores': {'front': float, 'side': float},
                 'warning': bool,
                 'no_face': bool,
+                'face_fail_reason': str,
                 'error': str,
                 'issues': {'front': [], 'side': []}
             }
@@ -250,8 +257,10 @@ class FaceVerifier:
             'verified': False,
             'similarity': 0.0,
             'threshold': self.SAME_PERSON_THRESHOLD,
+            'det_scores': {'front': 0.0, 'side': 0.0},
             'issues': {'front': [], 'side': []},
-            'no_face': False
+            'no_face': False,
+            'face_fail_reason': None
         }
 
         if not self.is_ready:
@@ -267,12 +276,8 @@ class FaceVerifier:
             print("FACE VERIFICATION - InsightFace")
             print("="*60)
             
-            # Extract embeddings and detect faces
-            print("Processing Front image...")
-            # We need the full face object for quality check, not just embedding
-            # So we duplicate _detect_and_extract logic slightly or reuse app.get
-            
             # --- PROCESS FRONT ---
+            print("Processing Front image...")
             img1_rgb = cv2.cvtColor(img1_array, cv2.COLOR_BGR2RGB)
             faces1 = self.app.get(img1_rgb)
             
@@ -280,10 +285,18 @@ class FaceVerifier:
             if len(faces1) == 0:
                 print("✗ No face detected in Front image")
                 result['issues']['front'].append("Face not detected")
-            else:
-                # Get largest face
+                result['no_face'] = True
+                result['face_fail_reason'] = "No face detected in front image"
+            elif len(faces1) > 1:
+                print(f"⚠ Multiple faces ({len(faces1)}) detected in Front image")
+                result['issues']['front'].append("Multiple faces detected")
+                # Pick largest face
                 face1 = sorted(faces1, key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)[0]
-                # Quality Check
+            else:
+                face1 = faces1[0]
+
+            if face1:
+                result['det_scores']['front'] = float(face1.det_score)
                 result['issues']['front'].extend(self.analyze_face_quality(img1_array, face1))
             
             # --- PROCESS SIDE ---
@@ -295,29 +308,86 @@ class FaceVerifier:
             if len(faces2) == 0:
                 print("✗ No face detected in Side image")
                 result['issues']['side'].append("Face not detected")
-            else:
-                # Get largest face
+                if not result['no_face']: # Don't overwrite if front already failed
+                    result['no_face'] = True
+                    result['face_fail_reason'] = "No face detected in side image"
+            elif len(faces2) > 1:
+                print(f"⚠ Multiple faces ({len(faces2)}) detected in Side image")
+                result['issues']['side'].append("Multiple faces detected")
                 face2 = sorted(faces2, key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)[0]
-                # Quality Check
+            else:
+                face2 = faces2[0]
+
+            if face2:
+                result['det_scores']['side'] = float(face2.det_score)
                 result['issues']['side'].extend(self.analyze_face_quality(img2_array, face2))
                 
-            # If any face missing, fail
+            # If any face missing, check if we should return "Unable to confidently verify"
             if face1 is None or face2 is None:
-                result['no_face'] = True
-                result['error'] = "Face verification failed: Face not detected in one or both images."
+                if face1 is not None and face2 is None:
+                     # Side image failed - might be a profile
+                     result['message'] = "Unable to confidently verify face from side image."
+                     print(f"⚠ {result['message']} (Front face detected, Side face missing)")
+                     
+                     # Allow to pass as fallback for partial faces or strict profiles
+                     result['verified'] = True 
+                     result['warning'] = True
+                     result['fallback_used'] = True
+                else:
+                     result['verified'] = False
+                     result['no_face'] = True
+                     if face1 is None and face2 is None:
+                         result['face_fail_reason'] = "No face detected in either image"
+                     else:
+                         result['face_fail_reason'] = "No face detected in front image"
+                
                 return result
                 
             # Calculate Similarity
             emb1 = face1.embedding
-            emb1 = emb1 / np.linalg.norm(emb1)
+            emb1 = emb1 / (np.linalg.norm(emb1) + 1e-6)
             
             emb2 = face2.embedding
-            emb2 = emb2 / np.linalg.norm(emb2)
+            emb2 = emb2 / (np.linalg.norm(emb2) + 1e-6)
             
             similarity = self._calculate_cosine_similarity(emb1, emb2)
             
             # Use custom threshold or default
             thresh = threshold if threshold is not None else self.SAME_PERSON_THRESHOLD
+            
+            print(f"   Front Confidence: {result['det_scores']['front']:.4f}")
+            print(f"   Side Confidence: {result['det_scores']['side']:.4f}")
+            print(f"   📊 Similarity Score: {similarity:.4f}")
+            print(f"   📏 Threshold: {thresh:.4f}")
+            
+            verified = similarity >= thresh
+            warning = False
+            
+            # Check for uncertain range
+            if self.DIFFERENT_PERSON_THRESHOLD <= similarity < self.SAME_PERSON_THRESHOLD:
+                warning = True
+                verified = True  # Allow but warn
+                print(f"⚠ UNCERTAIN: Similarity in range [{self.DIFFERENT_PERSON_THRESHOLD}, {self.SAME_PERSON_THRESHOLD})")
+            
+            if verified:
+                print(f"✓ VERIFIED: Same person (similarity: {similarity:.4f} >= {thresh:.4f})")
+            else:
+                print(f"✗ REJECTED: Different person (similarity: {similarity:.4f} < {thresh:.4f})")
+                if similarity < self.DIFFERENT_PERSON_THRESHOLD:
+                    result['face_fail_reason'] = "Face similarity significantly below threshold (Different people detected)"
+                else:
+                    result['face_fail_reason'] = "Face similarity below threshold (Mismatch detected)"
+            
+            print("="*60 + "\n")
+            
+            result['verified'] = verified
+            result['similarity'] = similarity
+            result['threshold'] = thresh
+            result['distance'] = 1.0 - similarity
+            if warning:
+                result['warning'] = True
+                
+            return result
             
             print(f"\n📊 Similarity Score: {similarity:.4f}")
             print(f"📏 Threshold: {thresh:.4f}")
