@@ -44,8 +44,8 @@ The system doesn't just measure; it **guides**. Users receive real-time feedback
 | Layer | Technologies |
 | :--- | :--- |
 | **Frontend** | React 18, Vite, Three.js (3D Mesh Visualization), Axios, Socket.IO |
-| **Backend** | Python 3.10, Flask, Flask-SocketIO, Gunicorn |
-| **Vision/ML** | YOLOv8 (Ultralytics), MediaPipe, PyTorch, Detectron2, InsightFace |
+| **Backend** | Python 3.10, Flask, Flask-SocketIO |
+| **Vision/ML** | YOLOv8 (Ultralytics), MediaPipe, PyTorch, Detectron2 (Desktop Standalone), InsightFace |
 | **Core Logic** | OpenCV, NumPy, SciPy, SMPLify-X |
 | **Reporting** | ReportLab (PDF), python-docx (Word) |
 
