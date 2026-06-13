@@ -43,7 +43,7 @@ The system doesn't just measure; it **guides**. Users receive real-time feedback
 
 | Layer | Technologies |
 | :--- | :--- |
-| **Frontend** | React 18, Vite, Plotly.js (3D Visualization), Three.js, Axios, Socket.IO |
+| **Frontend** | React 18, Vite, Three.js (3D Mesh Visualization), Axios, Socket.IO |
 | **Backend** | Python 3.10, Flask, Flask-SocketIO, Gunicorn |
 | **Vision/ML** | YOLOv8 (Ultralytics), MediaPipe, PyTorch, Detectron2, InsightFace |
 | **Core Logic** | OpenCV, NumPy, SciPy, SMPLify-X |
@@ -85,7 +85,7 @@ FitLens-dev2/
 │   ├── landmark_detector.py # MediaPipe & Shoulder refinement
 │   └── smpl/               # SMPL model & 3D estimators
 ├── frontend-vite/          # Modern React + Vite Dashboard
-│   ├── src/                # UI Components & Plotly views
+│   ├── src/                # UI Components & 3D mesh views
 │   └── package.json        # Frontend Dependencies
 ├── processing/             # SMPLify-X heavy processing
 ├── models/                 # Model weights (.pt, .onnx)
