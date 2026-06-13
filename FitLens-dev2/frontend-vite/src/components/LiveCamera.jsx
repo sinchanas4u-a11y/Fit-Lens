@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Webcam from 'react-webcam';
 import io from 'socket.io-client';
+import axios from 'axios';
 import ManualLandmarkMarker from './ManualLandmarkMarker';
 import './LiveCamera.css';
 
@@ -108,6 +109,10 @@ const LiveCamera = () => {
     const VIEW_ORDER = ['front', 'right', 'back', 'left'];
     const [captureSequenceComplete, setCaptureSequenceComplete] = useState(false);
     const [markingMode, setMarkingMode] = useState(null); // 'manual' | 'auto'
+    
+    // Validation state for person count check
+    const [validationError, setValidationError] = useState(null);
+    const [isValidating, setIsValidating] = useState(false);
     const [markingViewIndex, setMarkingViewIndex] = useState(0);
     const [autoProgress, setAutoProgress] = useState({}); // {front: 'done', right: 'processing', ...}
     const [autoViewOrder, setAutoViewOrder] = useState([]);
@@ -285,6 +290,8 @@ const LiveCamera = () => {
         setCapturedImages({});
         setCapturedRawImages({});
         setCompletedViews([]);
+        setValidationError(null);
+        setIsValidating(false);
         setLastCapturedImage(null);
         setAwaitingSelection(false);
         setShowManualMarker(false);
@@ -313,28 +320,53 @@ const LiveCamera = () => {
 
 
     // Core capture logic shared by both auto and manual triggers
-    const doCapture = useCallback((view) => {
+    const doCapture = useCallback(async (view) => {
         if (!webcamRef.current) return;
         const imageSrc = webcamRef.current.getScreenshot();
         if (!imageSrc) return;
 
-        setCapturedImages(prev => ({ ...prev, [view]: imageSrc }));
-        setCapturedRawImages(prev => ({ ...prev, [view]: imageSrc }));
-        setCompletedViews(prev => [...new Set([...prev, view])]);
         setCameraActive(false);
-        setAlignment('red');
+        setIsValidating(true);
+        setValidationError(null);
 
-        const currentIndex = VIEW_ORDER.indexOf(view);
-        if (currentIndex < 3) {
-            const nextView = VIEW_ORDER[currentIndex + 1];
-            speak(`${view} captured. Now turn to show your ${nextView}.`);
-            setTimeout(() => {
-                setCurrentView(nextView);
-                setCameraActive(true);
-            }, 600);
-        } else {
-            setIsReviewing(true);
-            speak('All views captured. Please review your photos.');
+        try {
+            console.log(`🔍 Validating person count for ${view} view...`);
+            const response = await axios.post('/api/validate-person', {
+                image: imageSrc
+            }, {
+                timeout: 30000
+            });
+
+            if (response.data.success) {
+                console.log(`✓ Person count validation passed for ${view}`);
+                
+                setCapturedImages(prev => ({ ...prev, [view]: imageSrc }));
+                setCapturedRawImages(prev => ({ ...prev, [view]: imageSrc }));
+                setCompletedViews(prev => [...new Set([...prev, view])]);
+                setAlignment('red');
+
+                const currentIndex = VIEW_ORDER.indexOf(view);
+                if (currentIndex < 3) {
+                    const nextView = VIEW_ORDER[currentIndex + 1];
+                    speak(`${view} captured. Now turn to show your ${nextView}.`);
+                    setTimeout(() => {
+                        setCurrentView(nextView);
+                        setCameraActive(true);
+                    }, 600);
+                } else {
+                    setIsReviewing(true);
+                    speak('All views captured. Please review your photos.');
+                }
+            } else {
+                setValidationError(response.data.error || 'Validation failed');
+            }
+        } catch (err) {
+            console.error('❌ Validation error:', err);
+            const apiError = err.response?.data?.error || 'Validation failed. Please ensure exactly one person is visible.';
+            setValidationError(apiError);
+            speak(apiError);
+        } finally {
+            setIsValidating(false);
         }
     }, [VIEW_ORDER]);
 
@@ -870,6 +902,31 @@ const LiveCamera = () => {
                             </div>
                         )}
 
+                        {isValidating && (
+                            <div className="camera-loading" style={{ background: 'rgba(0,0,0,0.75)', color: 'white', zIndex: 30 }}>
+                                <div className="spinner-large" style={{ borderTopColor: '#00FF88' }}></div>
+                                <p>Validating photo...</p>
+                            </div>
+                        )}
+
+                        {validationError && (
+                            <div className="validation-error-overlay">
+                                <div className="validation-error-content">
+                                    <div className="error-icon">⚠️</div>
+                                    <p className="error-msg-text">{validationError}</p>
+                                    <button 
+                                        onClick={() => { 
+                                            setValidationError(null); 
+                                            setCameraActive(true); 
+                                        }} 
+                                        className="validation-retry-btn"
+                                    >
+                                        Retake Photo
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
                         <SilhouetteOverlay view={currentView} alignment={alignment} />
 
                         {/* Auto-capture countdown overlay */}
@@ -920,9 +977,18 @@ const LiveCamera = () => {
                     </div>
 
                     <div className="camera-controls">
-                        <button onClick={handleManualCapture} className="capture-btn-main">
-                            <div className="capture-inner"></div>
-                        </button>
+                        {(() => {
+                            const isCaptureDisabled = instruction && instruction.includes("Multiple people detected");
+                            return (
+                                <button 
+                                    onClick={handleManualCapture} 
+                                    className="capture-btn-main"
+                                    disabled={isCaptureDisabled || isValidating || !!validationError}
+                                >
+                                    <div className="capture-inner"></div>
+                                </button>
+                            );
+                        })()}
                         <button onClick={resetSession} className="cancel-text-btn">Cancel</button>
                     </div>
                 </div>

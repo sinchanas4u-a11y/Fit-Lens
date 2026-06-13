@@ -459,12 +459,46 @@
   .input-group {
     flex-direction: column;
   }
+}
 
-  .visualizations {
-    grid-template-columns: 1fr;
-  }
+.validation-error-box {
+  background: #fff1f0;
+  border: 1px solid #ffa39e;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 25px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  animation: slideIn 0.3s ease;
+}
 
-  .action-buttons {
-    flex-direction: column;
-  }
+.validation-error-box .error-icon {
+  font-size: 20px;
+  color: #ff4d4f;
+  margin-top: 2px;
+}
+
+.validation-error-box .error-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+}
+
+.validation-error-box .error-content strong {
+  font-size: 15px;
+  font-weight: 700;
+  color: #cf1322;
+}
+
+.validation-error-box .error-content p {
+  font-size: 14px;
+  color: #434343;
+  margin: 0;
+}
+
+@keyframes slideIn {
+  from { transform: translateY(-10px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
 }

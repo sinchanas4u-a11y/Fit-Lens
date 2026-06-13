@@ -434,39 +434,61 @@ def handle_frame(data):
 
         # Auto-capture logic
         if countdown == 0:
-            # Capture!
-            print(f"Capturing {view} view!")
-            live_session.captured_images[view] = image_data # Store base64
+            # Let's count people as a final safety check
+            num_people = 1
+            if segmentation_model is not None and segmentation_model.model is not None:
+                try:
+                    pad_h = int(img.shape[0] * 0.1)
+                    pad_w = int(img.shape[1] * 0.1)
+                    padded = cv2.copyMakeBorder(img, pad_h, pad_h, pad_w, pad_w, 
+                                               cv2.BORDER_CONSTANT, value=[128, 128, 128])
+                    results = segmentation_model.model(padded, conf=0.5, imgsz=1024, verbose=False, classes=[0])
+                    num_people = len(results[0].boxes) if len(results) > 0 and results[0].boxes is not None else 0
+                except Exception as e:
+                    print(f"Error checking person count in auto-capture: {e}")
             
-            # Save captured image
-            save_measurement_image(image_data, view, source='camera')
-            
-            # Determine next view
-            next_view = get_next_view(view)
-            live_session.current_view = next_view
-            live_session.stability_start_time = None # Reset timer
-            
-            # Generate "after capture" voice alert
-            after_capture_alerts = {
-                'front': 'Front view captured.',
-                'right': 'Right side view captured.',
-                'back': 'Back view captured.',
-                'left': 'Left side view captured.'
-            }
-            
-            # Simple "turn left" message for all except last
-            before_msg = 'Turn towards your left.' if next_view != 'complete' else ''
-            
-            # Combine messages
-            after_msg = after_capture_alerts.get(view, '')
-            voice_message = f"{after_msg} {before_msg}".strip()
-            
-            emit('capture_complete', {
-                'view': view,
-                'image': image_data,
-                'next_view': next_view,
-                'voice_message': voice_message
-            })
+            if num_people == 1:
+                # Capture!
+                print(f"Capturing {view} view!")
+                live_session.captured_images[view] = image_data # Store base64
+                
+                # Save captured image
+                save_measurement_image(image_data, view, source='camera')
+                
+                # Determine next view
+                next_view = get_next_view(view)
+                live_session.current_view = next_view
+                live_session.stability_start_time = None # Reset timer
+                
+                # Generate "after capture" voice alert
+                after_capture_alerts = {
+                    'front': 'Front view captured.',
+                    'right': 'Right side view captured.',
+                    'back': 'Back view captured.',
+                    'left': 'Left side view captured.'
+                }
+                
+                # Simple "turn left" message for all except last
+                before_msg = 'Turn towards your left.' if next_view != 'complete' else ''
+                
+                # Combine messages
+                after_msg = after_capture_alerts.get(view, '')
+                voice_message = f"{after_msg} {before_msg}".strip()
+                
+                emit('capture_complete', {
+                    'view': view,
+                    'image': image_data,
+                    'next_view': next_view,
+                    'voice_message': voice_message
+                })
+            else:
+                print(f"Auto-capture blocked because person count was {num_people}")
+                countdown = None
+                alignment = 'red'
+                if num_people > 1:
+                    instruction = "Multiple people detected. Please ensure only one person is visible in the camera."
+                else:
+                    instruction = "No person detected. Please stand in front of camera."
             
             # Note: Final processing is now triggered by 'finalize_session' from frontend
 
@@ -519,6 +541,16 @@ def handle_process_selection(data):
         if img is None:
             emit('selection_processed', {'error': 'Invalid image data'})
             return
+
+        if selection_type == 'auto':
+            try:
+                segmentation_model.segment_person(img, conf_threshold=0.5)
+            except ValueError as e:
+                emit('selection_processed', {
+                    'error': str(e),
+                    'view': view
+                })
+                return
 
         if selection_type == 'manual':
             # Reuse process_manual_view
@@ -1263,6 +1295,26 @@ def process_alignment(image, view):
     3. User centered in frame
     """
     h, w, _ = image.shape
+    
+    # 0. CHECK PERSON COUNT
+    if segmentation_model is not None and segmentation_model.model is not None:
+        try:
+            pad_h = int(h * 0.1)
+            pad_w = int(w * 0.1)
+            padded = cv2.copyMakeBorder(image, pad_h, pad_h, pad_w, pad_w, 
+                                       cv2.BORDER_CONSTANT, value=[128, 128, 128])
+            results = segmentation_model.model(padded, conf=0.5, imgsz=1024, verbose=False, classes=[0])
+            num_people = len(results[0].boxes) if len(results) > 0 and results[0].boxes is not None else 0
+            
+            if num_people > 1:
+                live_session.stability_start_time = None
+                return 'red', "Multiple people detected. Please ensure only one person is visible in the camera.", None
+            elif num_people == 0:
+                live_session.stability_start_time = None
+                return 'red', "No person detected. Please stand in front of camera.", None
+        except Exception as e:
+            print(f"Error checking person count in process_alignment: {e}")
+
     ld = get_landmark_detector()
     if ld is None:
         return 'red', 'Landmark detector unavailable', None
@@ -1553,6 +1605,27 @@ def verify_identity():
                 'error': 'Invalid image data'
             }), 400
         
+        # Person count validation check runs before face verification
+        if segmentation_model is not None and segmentation_model.model is not None:
+            front_img_padded = add_image_padding(front_img, padding_percent=0.10)
+            side_img_padded = add_image_padding(side_img, padding_percent=0.10)
+            try:
+                segmentation_model.segment_person(front_img_padded, conf_threshold=0.5)
+            except ValueError as e:
+                return jsonify({
+                    'success': False,
+                    'verified': False,
+                    'error': str(e)
+                }), 400
+            try:
+                segmentation_model.segment_person(side_img_padded, conf_threshold=0.5)
+            except ValueError as e:
+                return jsonify({
+                    'success': False,
+                    'verified': False,
+                    'error': str(e)
+                }), 400
+        
         # Run face verification
         # Apply 10% padding to handle head/feet clipping and improve face detection
         # This addresses the user's specific request to "fix by padding the image by 10% on all sides".
@@ -1608,6 +1681,31 @@ def verify_identity():
             'error': f'Server error: {str(e)}'
         }), 500
 
+@app.route('/api/validate-person', methods=['POST'])
+def validate_person_route():
+    """Validate that exactly one person is present in the image."""
+    try:
+        data = request.json
+        image_b64 = data.get('image')
+        if not image_b64:
+            return jsonify({'error': 'Image is required'}), 400
+        
+        img = decode_image(image_b64)
+        if img is None:
+            return jsonify({'error': 'Invalid image data'}), 400
+            
+        front_img = add_image_padding(img, padding_percent=0.10)
+        
+        if segmentation_model is not None and segmentation_model.model is not None:
+            segmentation_model.segment_person(front_img, conf_threshold=0.5)
+            
+        return jsonify({'success': True, 'message': 'Exactly 1 person detected'})
+        
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'Validation failed: {str(e)}'}), 500
+
 @app.route('/api/process', methods=['POST'])
 def process_images():
     """
@@ -1638,6 +1736,12 @@ def process_images():
         # This addresses user request to "fix [head/feet clipping] by padding the image by 10% on all sides."
         front_img = add_image_padding(front_img_raw, padding_percent=0.10)
         side_img = add_image_padding(side_img_raw, padding_percent=0.10) if side_img_raw is not None else None
+        
+        # Person count validation check runs before any measurement processing
+        if segmentation_model is not None and segmentation_model.model is not None:
+            segmentation_model.segment_person(front_img, conf_threshold=0.5)
+            if side_img is not None:
+                segmentation_model.segment_person(side_img, conf_threshold=0.5)
         
         print(f"✓ Front image (padded): {front_img.shape}")
         if side_img is not None:
@@ -2052,6 +2156,10 @@ def process_images():
         
         return jsonify(to_native_types(response))
         
+    except ValueError as e:
+        error_msg = str(e)
+        print(f"\n✗ Validation Error: {error_msg}")
+        return jsonify({'error': error_msg}), 400
     except Exception as e:
         print(f"\n✗ ERROR: {str(e)}")
         traceback.print_exc()
@@ -2496,6 +2604,9 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
             }
         }
         
+    except ValueError as e:
+        # Re-raise ValueError for person count validation
+        raise
     except Exception as e:
         print(f"✗ Processing error: {e}")
         traceback.print_exc()
@@ -2674,6 +2785,15 @@ def process_manual_landmarks():
         front_img = decode_image(data.get('front_image'))
         side_img = decode_image(data.get('side_image'))
         
+        # Person count validation check runs before any manual processing
+        if segmentation_model is not None and segmentation_model.model is not None:
+            if front_img is not None:
+                front_img_padded = add_image_padding(front_img, padding_percent=0.10)
+                segmentation_model.segment_person(front_img_padded, conf_threshold=0.5)
+            if side_img is not None:
+                side_img_padded = add_image_padding(side_img, padding_percent=0.10)
+                segmentation_model.segment_person(side_img_padded, conf_threshold=0.5)
+        
         if front_img is not None:
             print(f"✓ Front image received: {front_img.shape}")
         
@@ -2743,6 +2863,10 @@ def process_manual_landmarks():
         
         return jsonify(to_native_types(response))
         
+    except ValueError as e:
+        error_msg = str(e)
+        print(f"\n✗ Validation Error in manual processing: {error_msg}")
+        return jsonify({'error': error_msg}), 400
     except Exception as e:
         print(f"\n✗ ERROR: {str(e)}")
         traceback.print_exc()

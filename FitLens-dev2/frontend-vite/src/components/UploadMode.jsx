@@ -80,10 +80,18 @@ const UploadMode = () => {
     };
   };
 
-  // Effect to trigger verification when both images are present
+  // Effect to trigger verification when both images are present, or skip if only front is present
   useEffect(() => {
-    if (frontImage && sideImage && !isVerified && !isVerifying) {
-      handleIdentityVerification();
+    if (frontImage && sideImage) {
+      if (!isVerified && !isVerifying) {
+        handleIdentityVerification();
+      }
+    } else if (frontImage && !sideImage) {
+      setIsVerified(true);
+      setVerificationError(null);
+      setVerificationIssues({ front: [], side: [] });
+    } else {
+      setIsVerified(false);
     }
   }, [frontImage, sideImage]);
 
@@ -140,6 +148,7 @@ const UploadMode = () => {
       setIsVerified(false); // Reset verification if images change
       setVerificationError(null);
       setVerificationIssues({ front: [], side: [] }); // Clear issues on new upload
+      setError(null); // Clear validation/person count errors on new upload
       const reader = new FileReader();
       reader.onloadend = () => {
         setPreview(reader.result);
@@ -638,8 +647,12 @@ const UploadMode = () => {
 
           {/* Error Message */}
           {error && (
-            <div className="error-message">
-              <strong>Error:</strong> {error}
+            <div className="validation-error-box">
+              <span className="error-icon">⚠️</span>
+              <div className="error-content">
+                <strong>Validation Error</strong>
+                <p>{error}</p>
+              </div>
             </div>
           )}
 
@@ -648,7 +661,7 @@ const UploadMode = () => {
             <button
               className="process-button"
               onClick={handleProcess}
-              disabled={processing || !frontImage || !userHeight}
+              disabled={processing || !frontImage || !userHeight || error}
             >
               {processing ? 'Processing...' : 'Process Images'}
             </button>

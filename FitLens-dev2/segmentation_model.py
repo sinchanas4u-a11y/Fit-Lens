@@ -72,12 +72,19 @@ class SegmentationModel:
             
             # Run inference on padded image with high resolution and Retina Masks
             results = self.model(padded_image, conf=conf_threshold, imgsz=1024, 
-                                retina_masks=True, verbose=False)
+                                retina_masks=True, verbose=False, classes=[0])
             
             if len(results) == 0:
-                return None
+                raise ValueError("No person detected. Please upload a valid image containing one person.")
             
             result = results[0]
+            
+            # Check person count using results[0].boxes
+            num_people = len(result.boxes) if result.boxes is not None else 0
+            if num_people == 0:
+                raise ValueError("No person detected. Please upload a valid image containing one person.")
+            elif num_people > 1:
+                raise ValueError("Multiple people detected in the image. Please upload an image containing only one person.")
             
             # Check if masks are available
             if result.masks is None or len(result.masks) == 0:
@@ -115,6 +122,8 @@ class SegmentationModel:
             
             return mask
             
+        except ValueError as e:
+            raise
         except Exception as e:
             print(f"YOLOv8 segmentation error: {e}")
             import traceback
