@@ -150,6 +150,10 @@ class MeasurementEngine:
             'side': {
                 'torso_length': ('shoulder', 'hip'),
                 'leg_length': ('hip', 'ankle'),
+                'chest_depth': ('chest_left', 'chest_right'),
+                'waist_depth': ('waist_left', 'waist_right'),
+                'stomach_depth': ('waist_left', 'waist_right'),
+                'hip_depth': ('hip_left', 'hip_right'),
             }
         }
         
@@ -161,6 +165,10 @@ class MeasurementEngine:
             'hip_width',
             'chest_width',
             'waist_width',
+            'chest_depth',
+            'waist_depth',
+            'stomach_depth',
+            'hip_depth',
         }
         
         # Measurements that use MediaPipe joints
@@ -230,6 +238,30 @@ class MeasurementEngine:
         # Get landmark dictionary for joint-based measurements
         landmark_dict = self._landmarks_to_dict(landmarks) if landmarks is not None else {}
         
+        # Resolve side-agnostic names like 'shoulder', 'hip', 'ankle' dynamically to left/right versions
+        def get_landmark_val(name):
+            if name in landmark_dict:
+                return landmark_dict[name]
+            if name == 'shoulder':
+                l_pt = landmark_dict.get('left_shoulder')
+                r_pt = landmark_dict.get('right_shoulder')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'hip':
+                l_pt = landmark_dict.get('left_hip')
+                r_pt = landmark_dict.get('right_hip')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'ankle':
+                l_pt = landmark_dict.get('left_ankle')
+                r_pt = landmark_dict.get('right_ankle')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            return None
+
         # Calculate each measurement using appropriate source
         for name, points in self.measurements.get(view, {}).items():
             # Use segmentation edges if available for edge-based measurements
@@ -239,9 +271,9 @@ class MeasurementEngine:
                 # Fall back to MediaPipe measurements
                 if len(points) == 2:
                     p1_name, p2_name = points
-                    if p1_name in landmark_dict and p2_name in landmark_dict:
-                        p1 = landmark_dict[p1_name]
-                        p2 = landmark_dict[p2_name]
+                    p1 = get_landmark_val(p1_name)
+                    p2 = get_landmark_val(p2_name)
+                    if p1 is not None and p2 is not None:
                         pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
                     else:
                         continue
@@ -295,6 +327,30 @@ class MeasurementEngine:
         
         landmark_dict = self._landmarks_to_dict(landmarks) if landmarks is not None else {}
         
+        # Resolve side-agnostic names like 'shoulder', 'hip', 'ankle' dynamically to left/right versions
+        def get_landmark_val(name):
+            if name in landmark_dict:
+                return landmark_dict[name]
+            if name == 'shoulder':
+                l_pt = landmark_dict.get('left_shoulder')
+                r_pt = landmark_dict.get('right_shoulder')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'hip':
+                l_pt = landmark_dict.get('left_hip')
+                r_pt = landmark_dict.get('right_hip')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'ankle':
+                l_pt = landmark_dict.get('left_ankle')
+                r_pt = landmark_dict.get('right_ankle')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            return None
+
         for name, points in self.measurements.get(view, {}).items():
             measurement_value = None
             confidence = 0.9
@@ -311,9 +367,9 @@ class MeasurementEngine:
             # Fall back to MediaPipe for skeletal measurements (all 33 landmarks)
             if measurement_value is None and len(points) == 2:
                 p1_name, p2_name = points
-                if p1_name in landmark_dict and p2_name in landmark_dict:
-                    p1 = landmark_dict[p1_name]
-                    p2 = landmark_dict[p2_name]
+                p1 = get_landmark_val(p1_name)
+                p2 = get_landmark_val(p2_name)
+                if p1 is not None and p2 is not None:
                     # OpenCV distance calculation
                     pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
                     # Apply height-based scaling with regression correction
@@ -343,7 +399,7 @@ class MeasurementEngine:
         """
         left_point = right_point = None
         
-        if measurement_name in ('shoulder_width', 'chest_circumference', 'chest_width'):
+        if measurement_name in ('shoulder_width', 'chest_circumference', 'chest_width', 'chest_depth'):
             left_point = edge_reference_points.get('shoulder_left') if measurement_name == 'shoulder_width' else edge_reference_points.get('chest_left')
             right_point = edge_reference_points.get('shoulder_right') if measurement_name == 'shoulder_width' else edge_reference_points.get('chest_right')
             
@@ -354,7 +410,7 @@ class MeasurementEngine:
                 width_px = float(np.linalg.norm(right_array - left_array))
                 return width_px * 3.0
 
-        elif measurement_name in ('waist_circumference', 'waist_width'):
+        elif measurement_name in ('waist_circumference', 'waist_width', 'waist_depth', 'stomach_depth'):
             left_point = edge_reference_points.get('waist_left')
             right_point = edge_reference_points.get('waist_right')
             
@@ -365,7 +421,7 @@ class MeasurementEngine:
                 width_px = float(np.linalg.norm(right_array - left_array))
                 return width_px * 2.8
 
-        elif measurement_name == 'hip_width':
+        elif measurement_name in ('hip_width', 'hip_depth'):
             left_point = edge_reference_points.get('hip_left')
             right_point = edge_reference_points.get('hip_right')
         

@@ -50,9 +50,13 @@ class MeasurementEngine:
                 'full_height': ('nose', 'left_ankle'),
             },
             'side': {
-                'torso_length': ('left_shoulder', 'left_hip'),
-                'leg_length': ('left_hip', 'left_ankle'),
-                'full_height': ('nose', 'left_ankle'),
+                'torso_length': ('shoulder', 'hip'),
+                'leg_length': ('hip', 'ankle'),
+                'chest_depth': ('chest_left', 'chest_right'),
+                'waist_depth': ('waist_left', 'waist_right'),
+                'stomach_depth': ('waist_left', 'waist_right'),
+                'hip_depth': ('hip_left', 'hip_right'),
+                'full_height': ('nose', 'ankle'),
             }
         }
     
@@ -81,15 +85,38 @@ class MeasurementEngine:
         # Get landmark dictionary
         landmark_dict = self._landmarks_to_dict(landmarks)
         
+        # Resolve side-agnostic names like 'shoulder', 'hip', 'ankle' dynamically to left/right versions
+        def get_landmark_val(name):
+            if name in landmark_dict:
+                return landmark_dict[name]
+            if name == 'shoulder':
+                l_pt = landmark_dict.get('left_shoulder')
+                r_pt = landmark_dict.get('right_shoulder')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'hip':
+                l_pt = landmark_dict.get('left_hip')
+                r_pt = landmark_dict.get('right_hip')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'ankle':
+                l_pt = landmark_dict.get('left_ankle')
+                r_pt = landmark_dict.get('right_ankle')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            return None
+
         # Calculate each measurement
         for name, points in self.measurements.get(view, {}).items():
             if len(points) == 2:
                 # Direct distance measurement
                 p1_name, p2_name = points
-                if p1_name in landmark_dict and p2_name in landmark_dict:
-                    p1 = landmark_dict[p1_name]
-                    p2 = landmark_dict[p2_name]
-                    
+                p1 = get_landmark_val(p1_name)
+                p2 = get_landmark_val(p2_name)
+                if p1 is not None and p2 is not None:
                     # Calculate pixel distance
                     pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
                     
@@ -118,16 +145,39 @@ class MeasurementEngine:
         measurements = {}
         landmark_dict = self._landmarks_to_dict(landmarks)
         
+        # Resolve side-agnostic names like 'shoulder', 'hip', 'ankle' dynamically to left/right versions
+        def get_landmark_val(name):
+            if name in landmark_dict:
+                return landmark_dict[name]
+            if name == 'shoulder':
+                l_pt = landmark_dict.get('left_shoulder')
+                r_pt = landmark_dict.get('right_shoulder')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'hip':
+                l_pt = landmark_dict.get('left_hip')
+                r_pt = landmark_dict.get('right_hip')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'ankle':
+                l_pt = landmark_dict.get('left_ankle')
+                r_pt = landmark_dict.get('right_ankle')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            return None
+
         measurement_defs = self.measurements.get(view, {})
         
         for name, points in measurement_defs.items():
             if len(points) == 2:
                 p1_name, p2_name = points
                 
-                if p1_name in landmark_dict and p2_name in landmark_dict:
-                    p1 = landmark_dict[p1_name]
-                    p2 = landmark_dict[p2_name]
-                    
+                p1 = get_landmark_val(p1_name)
+                p2 = get_landmark_val(p2_name)
+                if p1 is not None and p2 is not None:
                     # Pixel distance between landmarks
                     pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
                     # Pure pixel-to-scale conversion

@@ -538,19 +538,26 @@ def handle_process_selection(data):
                 return
             
             # Build upload-mode style visuals (mask + landmarks) for consistency.
-            scale = live_session.scale_factor
-            if view == 'front' or scale == 0:
-                ld = get_landmark_detector()
-                landmarks = ld.detect(img) if ld is not None else None
-                landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
-                if landmarks is not None:
-                    nose = landmarks[0]
-                    left_ankle = landmarks[27]
-                    right_ankle = landmarks[28]
-                    height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
-                    scale = _compute_scale_from_height_px(user_height_cm, height_px, fallback=scale)
-                    if view == 'front' and scale > 0:
-                        live_session.scale_factor = scale
+            ld = get_landmark_detector()
+            landmarks = ld.detect(img) if ld is not None else None
+            landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
+            
+            # Calculate scale independently for each view
+            view_scale = live_session.scale_factor
+            if landmarks is not None:
+                nose = landmarks[0]
+                left_ankle = landmarks[27]
+                right_ankle = landmarks[28]
+                height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
+                view_scale = _compute_scale_from_height_px(user_height_cm, height_px, fallback=live_session.scale_factor)
+                
+            if view == 'front':
+                if view_scale > 0:
+                    live_session.scale_factor = view_scale
+                scale = live_session.scale_factor
+            else:
+                scale = view_scale
+                print(f"✓ Calculated independent scale factor for manual {view} view: {scale:.4f} cm/px")
 
             engine_view = _normalize_engine_view(view)
             auto_visuals = process_single_view(img, scale, engine_view, user_height_cm=user_height_cm)
@@ -610,16 +617,21 @@ def handle_process_selection(data):
                     return formatted
                 globals()['compute_measurements'] = compute_measurements
             
-            # We'll calculate a temporary scale if it's the front view
-            scale = live_session.scale_factor
-            if view == 'front' or scale == 0:
-                nose = landmarks[0]
-                left_ankle = landmarks[27]
-                right_ankle = landmarks[28]
-                height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
-                scale = _compute_scale_from_height_px(user_height_cm, height_px, fallback=scale)
-                if view == 'front' and scale > 0:
-                    live_session.scale_factor = scale
+            # Calculate scale independently for each view
+            view_scale = live_session.scale_factor
+            nose = landmarks[0]
+            left_ankle = landmarks[27]
+            right_ankle = landmarks[28]
+            height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
+            view_scale = _compute_scale_from_height_px(user_height_cm, height_px, fallback=live_session.scale_factor)
+            
+            if view == 'front':
+                if view_scale > 0:
+                    live_session.scale_factor = view_scale
+                scale = live_session.scale_factor
+            else:
+                scale = view_scale
+                print(f"✓ Calculated independent scale factor for auto {view} view: {scale:.4f} cm/px")
 
             engine_view = _normalize_engine_view(view)
             auto_results = process_single_view(img, scale, engine_view, user_height_cm=user_height_cm)
@@ -1375,8 +1387,19 @@ def process_all_captured_images():
                 if (not visualization_b64 or not mask_b64 or not measurements) and v in live_session.captured_images:
                     img = decode_image(live_session.captured_images[v])
                     if img is not None:
+                        rebuilt_scale = scale
+                        rebuilt_ld = get_landmark_detector()
+                        if rebuilt_ld is not None:
+                            rebuilt_lm = rebuilt_ld.detect(img)
+                            rebuilt_lm = _ensure_pixel_landmarks(rebuilt_lm, img.shape) if rebuilt_lm is not None else None
+                            if rebuilt_lm is not None:
+                                r_nose = rebuilt_lm[0]
+                                r_left_ankle = rebuilt_lm[27]
+                                r_right_ankle = rebuilt_lm[28]
+                                r_height_px = max(r_left_ankle[1], r_right_ankle[1]) - r_nose[1]
+                                rebuilt_scale = _compute_scale_from_height_px(live_session.user_height_cm, r_height_px, fallback=scale)
                         engine_view = _normalize_engine_view(v)
-                        rebuilt = process_single_view(img, scale, engine_view, user_height_cm=live_session.user_height_cm)
+                        rebuilt = process_single_view(img, rebuilt_scale, engine_view, user_height_cm=live_session.user_height_cm)
                         if rebuilt.get('success'):
                             visualization_b64 = visualization_b64 or rebuilt.get('visualization')
                             mask_b64 = mask_b64 or rebuilt.get('mask')
@@ -1395,8 +1418,19 @@ def process_all_captured_images():
                 # Fallback to auto-processing if not already processed
                 img = decode_image(live_session.captured_images[v])
                 if img is not None:
+                    view_scale = scale
+                    view_ld = get_landmark_detector()
+                    if view_ld is not None:
+                        view_lm = view_ld.detect(img)
+                        view_lm = _ensure_pixel_landmarks(view_lm, img.shape) if view_lm is not None else None
+                        if view_lm is not None:
+                            v_nose = view_lm[0]
+                            v_left_ankle = view_lm[27]
+                            v_right_ankle = view_lm[28]
+                            v_height_px = max(v_left_ankle[1], v_right_ankle[1]) - v_nose[1]
+                            view_scale = _compute_scale_from_height_px(live_session.user_height_cm, v_height_px, fallback=scale)
                     engine_view = _normalize_engine_view(v)
-                    auto_results = process_single_view(img, scale, engine_view, user_height_cm=live_session.user_height_cm)
+                    auto_results = process_single_view(img, view_scale, engine_view, user_height_cm=live_session.user_height_cm)
                     if auto_results.get('success'):
                         final_results[v] = {
                             'measurements': auto_results.get('measurements', {}),
@@ -1757,8 +1791,27 @@ def process_images():
             print("PROCESSING SIDE VIEW")
             print("="*60)
 
+            # Detect landmarks in side view to calculate scale factor independently
+            side_scale_factor = None
+            side_landmarks_temp = ld.detect(side_img)
+            if side_landmarks_temp is not None:
+                side_landmarks_temp = _ensure_pixel_landmarks(side_landmarks_temp, side_img.shape)
+                side_nose = side_landmarks_temp[0]
+                side_left_ankle = side_landmarks_temp[27]
+                side_right_ankle = side_landmarks_temp[28]
+                side_ankle_y = max(side_left_ankle[1], side_right_ankle[1])
+                side_height_px = side_ankle_y - side_nose[1]
+                if side_height_px > 0:
+                    side_scale_factor = user_height_cm / side_height_px
+                    print(f"✓ Side height in image: {side_height_px:.2f} pixels")
+                    print(f"✓ Side scale factor (independent): {side_scale_factor:.4f} cm/px")
+            
+            if side_scale_factor is None or side_scale_factor <= 0:
+                side_scale_factor = scale_factor
+                print(f"⚠ Warning: Could not calculate side scale factor from side view landmarks, falling back to front scale factor: {scale_factor:.4f} cm/px")
+
             side_results = process_single_view(
-                side_img, scale_factor, 'side', user_height_cm=user_height_cm
+                side_img, side_scale_factor, 'side', user_height_cm=user_height_cm
             )
             results['side'] = side_results
 

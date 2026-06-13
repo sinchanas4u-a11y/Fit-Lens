@@ -610,6 +610,13 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
             except (TypeError, ValueError):
                 pass
 
+        # Calculate scale factor independently using the person's detected height in this specific image
+        if effective_height_cm > 0:
+            height_px = _estimate_height_from_landmarks_px(landmarks)
+            if height_px > 0:
+                scale_factor = effective_height_cm / height_px
+                print(f"✓ Calculated independent scale factor for {view} view: {scale_factor:.4f} cm/px")
+
         smpl_success = False
         smpl_m = {}
         smpl_error = None
@@ -658,7 +665,7 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
         # Calculate measurements with hybrid approach
         # Uses edge points for width measurements, MediaPipe for others
         measurements = measurement_engine.calculate_measurements_with_confidence(
-            landmarks, scale_factor, view, edge_reference_points=edge_reference_points
+            landmarks, scale_factor, view, edge_reference_points=edge_reference_points, user_height_cm=effective_height_cm
         )
         
         print(f"Measurements calculated: {len(measurements)} measurements")
