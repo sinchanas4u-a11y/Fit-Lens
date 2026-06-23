@@ -1706,6 +1706,104 @@ def validate_person_route():
     except Exception as e:
         return jsonify({'error': f'Validation failed: {str(e)}'}), 500
 
+@app.route('/validate/person-count', methods=['POST'])
+@app.route('/api/validate/person-count', methods=['POST'])
+def validate_person_count():
+    """
+    Validate that exactly one person is present in the image, check for cropped body,
+    and identify invalid/unsupported formats.
+    """
+    try:
+        data = request.json or {}
+        image_b64 = data.get('image')
+        view = data.get('view', 'front')
+        
+        # 1. Invalid image (missing image or empty)
+        if not image_b64:
+            return jsonify({'success': False, 'error': 'Invalid image. Please upload a valid image file.'}), 400
+            
+        # Check for unsupported format
+        if ',' in image_b64:
+            header = image_b64.split(',')[0]
+            if 'data:image/' in header:
+                mime_type = header.split(';')[0].split(':')[1]
+                allowed_mimes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
+                if mime_type not in allowed_mimes:
+                    return jsonify({'success': False, 'error': 'Unsupported image. Please upload a JPEG, PNG, or WEBP image.'}), 400
+                    
+        # 2. Decode image (Invalid image if decode fails)
+        img = decode_image(image_b64)
+        if img is None:
+            return jsonify({'success': False, 'error': 'Invalid image format or corrupted file. Please upload a valid image.'}), 400
+            
+        # 3. Person count check using YOLOv8-seg model
+        if segmentation_model is None or segmentation_model.model is None:
+            return jsonify({'success': False, 'error': 'Segmentation model not initialized.'}), 500
+            
+        # Run YOLO on padded image
+        h_orig, w_orig = img.shape[:2]
+        pad_h = int(h_orig * 0.1)
+        pad_w = int(w_orig * 0.1)
+        padded_image = cv2.copyMakeBorder(img, pad_h, pad_h, pad_w, pad_w, 
+                                         cv2.BORDER_CONSTANT, value=[128, 128, 128])
+                                         
+        results = segmentation_model.model(padded_image, conf=0.5, imgsz=1024, retina_masks=True, verbose=False, classes=[0])
+        
+        num_people = 0
+        if len(results) > 0 and results[0].boxes is not None:
+            num_people = len(results[0].boxes)
+            
+        if num_people == 0:
+            return jsonify({'success': False, 'error': 'No person detected in the image. Please upload a valid image containing one person.'}), 400
+        elif num_people > 1:
+            if view == 'front':
+                err_msg = 'Multiple persons detected in front view. Please upload an image with only one person.'
+            else:
+                err_msg = 'Multiple persons detected in side view. Please upload an image with only one person.'
+            return jsonify({'success': False, 'error': err_msg}), 400
+            
+        # 4. Landmark detection & Cropped body check
+        ld = get_landmark_detector()
+        if ld is None:
+            return jsonify({'success': False, 'error': 'Landmark detector not initialized.'}), 500
+            
+        landmarks = ld.detect(img)
+        landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
+        
+        if landmarks is None or len(landmarks) < 33:
+            return jsonify({'success': False, 'error': 'No person detected in the image. Please upload a valid image containing one person.'}), 400
+            
+        # Cropped body check
+        # Check if ankles or nose are cropped (too close to boundaries or visibility < 0.5)
+        critical_indices = [0, 11, 12, 23, 24, 27, 28]
+        nose = landmarks[0]
+        left_ankle = landmarks[27]
+        right_ankle = landmarks[28]
+        
+        cropped = False
+        if left_ankle[1] > h_orig * 0.98 or right_ankle[1] > h_orig * 0.98:
+            cropped = True
+        elif nose[1] < h_orig * 0.02:
+            cropped = True
+            
+        # Also check visibility of critical landmarks
+        for idx in critical_indices:
+            lm = landmarks[idx]
+            if len(lm) >= 3 and lm[2] < 0.5:
+                cropped = True
+                break
+                
+        if cropped:
+            return jsonify({'success': False, 'error': 'Cropped body detected. Please ensure your entire body (from head to toe) is visible in the photo.'}), 400
+            
+        return jsonify({'success': True, 'message': 'Image successfully validated containing exactly one person.'}), 200
+        
+    except Exception as e:
+        print(f"Error in validate_person_count: {e}")
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Validation failed: {str(e)}'}), 500
+
+
 @app.route('/api/process', methods=['POST'])
 def process_images():
     """

@@ -36,6 +36,67 @@ const UploadMode = () => {
   const [verificationError, setVerificationError] = useState(null);
   const [verificationIssues, setVerificationIssues] = useState({ front: [], side: [] }); // New: detailed issues
 
+  // New states for image validation
+  const [isValidatingFront, setIsValidatingFront] = useState(false);
+  const [isValidatingSide, setIsValidatingSide] = useState(false);
+  const [isFrontValidated, setIsFrontValidated] = useState(false);
+  const [isSideValidated, setIsSideValidated] = useState(false);
+
+  const validateImage = async (file, view, fileInput) => {
+    if (view === 'front') {
+      setIsValidatingFront(true);
+      setIsFrontValidated(false);
+    } else {
+      setIsValidatingSide(true);
+      setIsSideValidated(false);
+    }
+    setError(null);
+
+    try {
+      const base64 = await imageToBase64(file);
+      const response = await axios.post('/validate/person-count', {
+        image: base64,
+        view: view
+      });
+
+      if (response.data.success) {
+        if (view === 'front') {
+          setIsFrontValidated(true);
+        } else {
+          setIsSideValidated(true);
+        }
+      } else {
+        setError(response.data.error || `Validation failed for ${view} view.`);
+        if (fileInput) fileInput.value = "";
+        if (view === 'front') {
+          setFrontImage(null);
+          setFrontPreview(null);
+        } else {
+          setSideImage(null);
+          setSidePreview(null);
+        }
+      }
+    } catch (err) {
+      console.error(`Validation error for ${view} view:`, err);
+      const errMsg = err.response?.data?.error || `Validation failed for ${view} view. Please try again.`;
+      setError(errMsg);
+      if (fileInput) fileInput.value = "";
+      if (view === 'front') {
+        setFrontImage(null);
+        setFrontPreview(null);
+      } else {
+        setSideImage(null);
+        setSidePreview(null);
+      }
+    } finally {
+      if (view === 'front') {
+        setIsValidatingFront(false);
+      } else {
+        setIsValidatingSide(false);
+      }
+    }
+  };
+
   const steps = [
     'Upload Photos',
     'Verify Identity', // Added verification step
@@ -83,17 +144,21 @@ const UploadMode = () => {
   // Effect to trigger verification when both images are present, or skip if only front is present
   useEffect(() => {
     if (frontImage && sideImage) {
-      if (!isVerified && !isVerifying) {
+      if (isFrontValidated && isSideValidated && !isVerified && !isVerifying) {
         handleIdentityVerification();
       }
     } else if (frontImage && !sideImage) {
-      setIsVerified(true);
-      setVerificationError(null);
-      setVerificationIssues({ front: [], side: [] });
+      if (isFrontValidated) {
+        setIsVerified(true);
+        setVerificationError(null);
+        setVerificationIssues({ front: [], side: [] });
+      } else {
+        setIsVerified(false);
+      }
     } else {
       setIsVerified(false);
     }
-  }, [frontImage, sideImage]);
+  }, [frontImage, sideImage, isFrontValidated, isSideValidated]);
 
   const handleIdentityVerification = async () => {
     setIsVerifying(true);
@@ -140,10 +205,14 @@ const UploadMode = () => {
     }
   };
 
-  const handleImageUpload = (e, setImage, setPreview) => {
+  const handleImageUpload = async (e, setImage, setPreview, view) => {
+    if (e.target.files && e.target.files.length > 1) {
+      setError("Please upload only one image at a time.");
+      e.target.value = ""; // Clear input field
+      return;
+    }
     const file = e.target.files[0];
     if (file) {
-      setImage(file);
       setImage(file);
       setIsVerified(false); // Reset verification if images change
       setVerificationError(null);
@@ -154,6 +223,18 @@ const UploadMode = () => {
         setPreview(reader.result);
       };
       reader.readAsDataURL(file);
+
+      // Reset validation states and clean other view values if front changes
+      if (view === 'front') {
+        setIsFrontValidated(false);
+        setSideImage(null);
+        setSidePreview(null);
+        setIsSideValidated(false);
+      } else {
+        setIsSideValidated(false);
+      }
+
+      await validateImage(file, view, e.target);
     }
   };
 
@@ -442,6 +523,10 @@ const UploadMode = () => {
     setIsVerified(false);
     setIsVerifying(false);
     setVerificationError(null);
+    setIsValidatingFront(false);
+    setIsValidatingSide(false);
+    setIsFrontValidated(false);
+    setIsSideValidated(false);
   };
 
   const downloadReport = async (format) => {
@@ -519,10 +604,23 @@ const UploadMode = () => {
               <input
                 type="file"
                 accept="image/*"
-                onChange={(e) => handleImageUpload(e, setFrontImage, setFrontPreview)}
-                disabled={processing}
+                onChange={(e) => handleImageUpload(e, setFrontImage, setFrontPreview, 'front')}
+                disabled={processing || isValidatingFront}
               />
-              {frontPreview && (
+              {isValidatingFront && (
+                <div className="validation-spinner" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', color: '#1890ff' }}>
+                  <div className="spinner" style={{
+                    width: '16px',
+                    height: '16px',
+                    border: '2px solid #f3f3f3',
+                    borderTop: '2px solid #1890ff',
+                    borderRadius: '50%',
+                    animation: 'spin 1s linear infinite'
+                  }}></div>
+                  <span style={{ fontSize: '13px' }}>Validating photo...</span>
+                </div>
+              )}
+              {frontPreview && !isValidatingFront && (
                 <div className="image-preview">
                   <img src={frontPreview} alt="Front view" />
                 </div>
@@ -541,34 +639,49 @@ const UploadMode = () => {
             </div>
 
             {/* Side Image */}
-            <div className="upload-box">
-              <h3>Side View (Optional)</h3>
-              <p style={{ fontSize: '14px', color: '#666', marginBottom: '10px' }}>
-                Side profile, full body visible
-              </p>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(e) => handleImageUpload(e, setSideImage, setSidePreview)}
-                disabled={processing}
-              />
-              {sidePreview && (
-                <div className="image-preview">
-                  <img src={sidePreview} alt="Side view" />
-                </div>
-              )}
-              {/* Side Image Error Display */}
-              {verificationIssues?.side && verificationIssues.side.length > 0 && (
-                <div style={{ marginTop: '5px', padding: '8px', background: '#fff1f0', border: '1px solid #ffa39e', borderRadius: '4px', color: '#cf1322', fontSize: '13px' }}>
-                  <strong>Issues:</strong>
-                  <ul style={{ margin: '5px 0 0 20px', padding: 0 }}>
-                    {verificationIssues.side.map((issue, i) => (
-                      <li key={i}>{issue}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
+            {isFrontValidated && (
+              <div className="upload-box">
+                <h3>Side View (Optional)</h3>
+                <p style={{ fontSize: '14px', color: '#666', marginBottom: '10px' }}>
+                  Side profile, full body visible
+                </p>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => handleImageUpload(e, setSideImage, setSidePreview, 'side')}
+                  disabled={processing || isValidatingSide}
+                />
+                {isValidatingSide && (
+                  <div className="validation-spinner" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', color: '#1890ff' }}>
+                    <div className="spinner" style={{
+                      width: '16px',
+                      height: '16px',
+                      border: '2px solid #f3f3f3',
+                      borderTop: '2px solid #1890ff',
+                      borderRadius: '50%',
+                      animation: 'spin 1s linear infinite'
+                    }}></div>
+                    <span style={{ fontSize: '13px' }}>Validating photo...</span>
+                  </div>
+                )}
+                {sidePreview && !isValidatingSide && (
+                  <div className="image-preview">
+                    <img src={sidePreview} alt="Side view" />
+                  </div>
+                )}
+                {/* Side Image Error Display */}
+                {verificationIssues?.side && verificationIssues.side.length > 0 && (
+                  <div style={{ marginTop: '5px', padding: '8px', background: '#fff1f0', border: '1px solid #ffa39e', borderRadius: '4px', color: '#cf1322', fontSize: '13px' }}>
+                    <strong>Issues:</strong>
+                    <ul style={{ margin: '5px 0 0 20px', padding: 0 }}>
+                      {verificationIssues.side.map((issue, i) => (
+                        <li key={i}>{issue}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Identity Verification Status */}
