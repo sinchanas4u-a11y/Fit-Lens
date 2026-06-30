@@ -12,12 +12,14 @@ from PIL import Image
 import threading
 import queue
 import time
+import json
+import traceback
 
 from reference_detector import ReferenceDetector
 from temporal_stabilizer import TemporalStabilizer
-from measurement_engine import MeasurementEngine
+from backend.measurement_engine import MeasurementEngine
 from segmentation_model import SegmentationModel
-from landmark_detector import LandmarkDetector
+from backend.landmark_detector import LandmarkDetector
 from smpl.smpl_pipeline import run_smpl_pipeline
 from smpl.smpl_estimator import SMPLEstimator
 
@@ -216,7 +218,7 @@ def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success):
             'label': 'Hip Circumference',
         },
         'shoulder_width': {
-            'value_cm': smpl_m.get('shoulder_width', _mp_cm('shoulder_width')),
+            'value_cm': _mp_cm('shoulder_width') or smpl_m.get('shoulder_width'),
             'value_px': _mp_px('shoulder_width'),
             'source': 'SMPL + MediaPipe',
             'label': 'Shoulder Width',
@@ -326,17 +328,136 @@ def health_check():
     })
 
 
+@app.route('/validate/person-count', methods=['POST'])
+@app.route('/api/validate/person-count', methods=['POST'])
+def validate_person_count():
+    """
+    Validate that exactly one person is present in the image, check for cropped body,
+    and identify invalid/unsupported formats.
+    """
+    try:
+        # Read from files (multipart/form-data)
+        file = request.files.get('image')
+        view = request.form.get('view', 'front')
+        
+        # 1. Invalid image (missing image or empty)
+        if not file or file.filename == '':
+            return jsonify({'success': False, 'error': 'Invalid image. Please upload a valid image file.'}), 400
+            
+        # Check for unsupported format
+        allowed_mimes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
+        if file.mimetype not in allowed_mimes:
+            ext = os.path.splitext(file.filename)[1].lower()
+            if ext not in ['.jpg', '.jpeg', '.png', '.webp']:
+                return jsonify({'success': False, 'error': 'Unsupported image. Please upload a JPEG, PNG, or WEBP image.'}), 400
+                
+        # 2. Decode image
+        file_bytes = np.frombuffer(file.read(), np.uint8)
+        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        if img is None:
+            return jsonify({'success': False, 'error': 'Invalid image format or corrupted file. Please upload a valid image.'}), 400
+            
+        # 3. Person count check using YOLOv8-seg model
+        if segmentation_model is None or segmentation_model.model is None:
+            return jsonify({'success': False, 'error': 'Segmentation model not initialized.'}), 500
+            
+        # Run YOLO on padded image
+        h_orig, w_orig = img.shape[:2]
+        pad_h = int(h_orig * 0.1)
+        pad_w = int(w_orig * 0.1)
+        padded_image = cv2.copyMakeBorder(img, pad_h, pad_h, pad_w, pad_w, 
+                                         cv2.BORDER_CONSTANT, value=[128, 128, 128])
+                                         
+        results = segmentation_model.model(padded_image, conf=0.5, imgsz=1024, retina_masks=True, verbose=False, classes=[0])
+        
+        num_people = 0
+        if len(results) > 0 and results[0].boxes is not None:
+            num_people = len(results[0].boxes)
+            
+        if num_people == 0:
+            return jsonify({'success': False, 'error': 'No person detected in the image. Please upload a valid image containing one person.'}), 400
+        elif num_people > 1:
+            if view == 'front':
+                err_msg = 'Multiple persons detected in front view. Please upload an image with only one person.'
+            else:
+                err_msg = 'Multiple persons detected in side view. Please upload an image with only one person.'
+            return jsonify({'success': False, 'error': err_msg}), 400
+            
+        # 4. Landmark detection & Cropped body check
+        if landmark_detector is None:
+            return jsonify({'success': False, 'error': 'Landmark detector not initialized.'}), 500
+            
+        landmarks = landmark_detector.detect(img)
+        
+        if landmarks is None or len(landmarks) < 33:
+            return jsonify({'success': False, 'error': 'No person detected in the image. Please upload a valid image containing one person.'}), 400
+            
+        # Cropped body check
+        # Check if ankles or nose are cropped (too close to boundaries or visibility < 0.5)
+        critical_indices = [0, 11, 12, 23, 24, 27, 28]
+        nose = landmarks[0]
+        left_ankle = landmarks[27]
+        right_ankle = landmarks[28]
+        
+        cropped = False
+        if left_ankle[1] > h_orig * 0.98 or right_ankle[1] > h_orig * 0.98:
+            cropped = True
+        elif nose[1] < h_orig * 0.02:
+            cropped = True
+            
+        # Also check visibility of critical landmarks
+        for idx in critical_indices:
+            lm = landmarks[idx]
+            if len(lm) >= 3 and lm[2] < 0.5:
+                cropped = True
+                break
+                
+        if cropped:
+            return jsonify({'success': False, 'error': 'Cropped body detected. Please ensure your entire body (from head to toe) is visible in the photo.'}), 400
+            
+        return jsonify({'success': True, 'message': 'Image successfully validated containing exactly one person.'}), 200
+        
+    except Exception as e:
+        print(f"Error in validate_person_count: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': f'Validation failed: {str(e)}'}), 500
+
+
+@app.route('/api/verify-identity', methods=['POST'])
+def verify_identity_stub():
+    return jsonify({'success': True, 'verified': True}), 200
+
+
+@app.route('/api/process-manual', methods=['POST'])
+def process_manual_stub():
+    return jsonify({'success': True, 'results': {}}), 200
+
+
+@app.route('/api/process', methods=['POST'])
+def process():
+    return process_upload()
+
+
+@app.route('/api/validate-person', methods=['POST'])
+def validate_person_stub():
+    return jsonify({'success': True}), 200
+
+
 @app.route('/api/upload/process', methods=['POST'])
 def process_upload():
     """Process uploaded images"""
     try:
-        data = request.json
+        data = request.json or {}
         
-        # Decode images
-        front_img = decode_image(data['front_image'])
+        # Decode images safely
+        front_img = decode_image(data.get('front_image'))
         side_img = decode_image(data.get('side_image'))
-        ref_img = decode_image(data['reference_image'])
+        ref_img = decode_image(data.get('reference_image') or data.get('front_image'))
         
+        if front_img is None:
+            return jsonify({'error': 'Front image is required'}), 400
+            
         # Get reference parameters safely
         try:
             ref_size = float(data.get('reference_size', 29.7))
@@ -345,24 +466,57 @@ def process_upload():
             
         ref_axis = data.get('reference_axis', 'height')
         
-        # Detect reference
-        ref_px = reference_detector.detect_reference(ref_img, ref_axis)
-        
-        if ref_px is None:
-            return jsonify({'error': 'Reference object not detected'}), 400
+        # Detect reference if ref_img is provided
+        ref_px = None
+        if ref_img is not None:
+            ref_px = reference_detector.detect_reference(ref_img, ref_axis)
         
         # Calculate scale factor safely
-        try:
-            scale_factor = float(ref_size) / float(ref_px)
-        except (TypeError, ValueError, ZeroDivisionError):
-            scale_factor = 0.0
-
+        scale_factor = 0.0
+        if ref_px is not None and ref_px > 0:
+            try:
+                scale_factor = float(ref_size) / float(ref_px)
+            except (TypeError, ValueError, ZeroDivisionError):
+                scale_factor = 0.0
+            print(f"✓ Reference-based scale factor: {scale_factor:.4f} cm/px")
+            
         user_height_cm = None
         if data.get('user_height') is not None:
             try:
                 user_height_cm = float(data.get('user_height'))
             except (TypeError, ValueError):
                 user_height_cm = None
+        elif data.get('height') is not None:
+            try:
+                user_height_cm = float(data.get('height'))
+            except (TypeError, ValueError):
+                user_height_cm = None
+                
+        # Fallback to height-based calibration if reference calibration is not available or failed
+        if scale_factor <= 0.0:
+            if front_img is not None:
+                landmarks = landmark_detector.detect(front_img)
+                if landmarks is not None and len(landmarks) >= 33:
+                    nose = landmarks[0]
+                    left_ankle = landmarks[27]
+                    right_ankle = landmarks[28]
+                    # Use lower ankle
+                    ankle_y = max(left_ankle[1], right_ankle[1])
+                    height_px = ankle_y - nose[1]
+                    if height_px > 0:
+                        try:
+                            # Use user_height_cm if provided, otherwise default to 170.0 cm
+                            calib_height = float(user_height_cm or 170.0)
+                            scale_factor = calib_height / height_px
+                            # Populate ref_px and ref_size for visual formula compatibility
+                            ref_size = calib_height
+                            ref_px = height_px
+                            print(f"✓ Fallback height-based scale factor: {scale_factor:.4f} cm/px")
+                        except (TypeError, ValueError, ZeroDivisionError):
+                            scale_factor = 0.0
+
+        if scale_factor <= 0.0:
+            return jsonify({'error': 'Could not calculate scale factor. Please ensure full body or reference object is visible.'}), 400
 
         requested_gender = data.get('gender', 'neutral')
         
@@ -391,7 +545,6 @@ def process_upload():
             os.path.dirname(front_temp_path),
             exist_ok=True
         )
-        # front_img is a numpy array (cv2 image)
         cv2.imwrite(front_temp_path, front_img)
         print(f"Saved front image: {front_temp_path}")
 
@@ -424,7 +577,7 @@ def process_upload():
                 # Priority 2: from request JSON body
                 elif (request.is_json and
                       request.get_json() and
-                      request.get_json().get('user_height')): # Checking for user_height which is in data
+                      request.get_json().get('user_height')):
                     user_height_safe = float(
                         request.get_json().get('user_height')
                     )
@@ -520,7 +673,49 @@ def process_upload():
                                     'source': 'SMPLify-X',
                                     'label': key.replace('_', ' ').title()
                                 }
-                        results['front']['measurements'] = m
+                        if m:
+                            results['front']['measurements'] = m
+
+                    if 'side' in results:
+                        m_side = results['side'].get(
+                            'measurements', {}
+                        ) or {}
+                        for key in [
+                            'chest_circumference',
+                            'waist_circumference',
+                            'hip_circumference',
+                            'shoulder_width'
+                        ]:
+                            val = smplx_meas.get(key)
+                            if val is not None:
+                                m_side[key] = {
+                                    'value_cm': float(val),
+                                    'source': 'SMPLify-X',
+                                    'label': key.replace('_', ' ').title()
+                                }
+                        if m_side:
+                            results['side']['measurements'] = m_side
+
+                    if 'merged' in results:
+                        m_merged = results['merged'].get(
+                            'measurements', {}
+                        ) or {}
+                        for key in [
+                            'chest_circumference',
+                            'waist_circumference',
+                            'hip_circumference',
+                            'shoulder_width'
+                        ]:
+                            val = smplx_meas.get(key)
+                            if val is not None:
+                                m_merged[key] = {
+                                    'value_cm': float(val),
+                                    'source': 'SMPLify-X',
+                                    'label': key.replace('_', ' ').title()
+                                }
+                        if m_merged:
+                            results['merged']['measurements'] = m_merged
+
                 except Exception as merge_err:
                     print(f"Measurement merge error: {merge_err}")
 
@@ -534,6 +729,18 @@ def process_upload():
             print(f"SMPLify-X exception: {e}")
             import traceback
             traceback.print_exc()
+
+        # Debug log to confirm measurements survive
+        if 'front' in results:
+            front_meas_count = len(results['front'].get('measurements', {}))
+            print(f"[DEBUG] Front view measurements surviving: {front_meas_count}")
+        if 'side' in results:
+            side_meas_count = len(results['side'].get('measurements', {}))
+            print(f"[DEBUG] Side view measurements surviving: {side_meas_count}")
+        if 'merged' in results:
+            merged_meas_count = len(results['merged'].get('measurements', {}))
+            print(f"[DEBUG] Merged measurements surviving: {merged_meas_count}")
+
         # ── End SMPLify-X ─────────────────────────
 
         return jsonify({
@@ -542,13 +749,15 @@ def process_upload():
             'reference_px': ref_px,
             'calibration': {
                 'reference_size_cm': ref_size,
-                'reference_size_px': float(ref_px),
+                'reference_size_px': float(ref_px) if ref_px is not None else 0.0,
                 'scale_factor':      float(scale_factor),
+                'user_height_cm':    final_height,
+                'height_in_image_px': float(final_height / scale_factor) if scale_factor > 0 else 0.0,
                 'formula': (
-                    f'{ref_size} cm ÷ '
+                    f'{ref_size:.2f} cm ÷ '
                     f'{ref_px:.2f} px = '
                     f'{scale_factor:.4f} cm/px'
-                ),
+                ) if ref_px is not None else f'Estimated scale factor: {scale_factor:.4f} cm/px',
                 'description': (
                     f'1 pixel = {scale_factor:.4f} cm'
                 )
@@ -662,8 +871,13 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
                 print(f"Warning: Could not extract edge points: {e}")
                 edge_reference_points = None
         
-        # Calculate measurements with hybrid approach
-        # Uses edge points for width measurements, MediaPipe for others
+        # TEMP DEBUG
+        print(f"DEBUG landmarks[11] = {landmarks[11]}")  # left shoulder
+        print(f"DEBUG landmarks[23] = {landmarks[23]}")  # left hip  
+        print(f"DEBUG scale_factor = {scale_factor}")
+        arm_test = np.linalg.norm(landmarks[11][:2] - landmarks[13][:2]) + np.linalg.norm(landmarks[13][:2] - landmarks[15][:2])
+        print(f"DEBUG arm px (11->13->15) = {arm_test}")
+        print(f"DEBUG arm cm = {arm_test * scale_factor}")
         measurements = measurement_engine.calculate_measurements_with_confidence(
             landmarks, scale_factor, view, edge_reference_points=edge_reference_points, user_height_cm=effective_height_cm
         )
@@ -740,9 +954,11 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
         vis_img = landmark_detector.draw_landmarks(image, landmarks)
         _draw_edge_width_overlays(vis_img, edge_reference_points)
         vis_base64 = encode_image(vis_img)
+        mask_base64 = encode_image(mask) if mask is not None else None
         return {
             'measurements': {},
             'visualization': vis_base64,
+            'mask': mask_base64,
             'landmark_count': len(landmarks),
             'smpl': {
                 'enabled': True,
@@ -784,6 +1000,7 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
         y_offset += 25
     
     vis_base64 = encode_image(vis_img)
+    mask_base64 = encode_image(mask) if mask is not None else None
     
     print(f"Returning {len(measurements_with_pixels)} measurements")
     
@@ -798,6 +1015,7 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
     return {
         'measurements': measurements_with_pixels,
         'visualization': vis_base64,
+        'mask': mask_base64,
         'landmark_count': len(landmarks),
         'smpl': {
             'enabled': True,
@@ -1380,6 +1598,7 @@ def export_shoulder_json():
     }
     """
     try:
+        import json
         data = request.json
         
         if 'image' not in data:
@@ -2113,3 +2332,4 @@ def download_xml():
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+

@@ -139,17 +139,17 @@ class MeasurementEngine:
         self.measurements = {
             'front': {
                 'shoulder_width': ('left_shoulder', 'right_shoulder'),
-                'arm_length': ('left_shoulder', 'left_wrist'),
+                'arm_length': ('left_shoulder', 'left_elbow', 'left_wrist'),
                 'chest_circumference': ('left_shoulder', 'right_shoulder'),
                 'waist_circumference': ('left_hip', 'right_hip'),
                 'hip_width': ('left_hip', 'right_hip'),
                 'torso_length': ('left_shoulder', 'left_hip'),
-                'leg_length': ('left_hip', 'left_ankle'),
+                'leg_length': ('left_hip', 'left_knee', 'left_ankle'),
                 'full_height': ('nose', 'left_ankle'),
             },
             'side': {
                 'torso_length': ('shoulder', 'hip'),
-                'leg_length': ('hip', 'ankle'),
+                'leg_length': ('hip', 'knee', 'ankle'),
                 'chest_depth': ('chest_left', 'chest_right'),
                 'waist_depth': ('waist_left', 'waist_right'),
                 'stomach_depth': ('waist_left', 'waist_right'),
@@ -238,7 +238,7 @@ class MeasurementEngine:
         # Get landmark dictionary for joint-based measurements
         landmark_dict = self._landmarks_to_dict(landmarks) if landmarks is not None else {}
         
-        # Resolve side-agnostic names like 'shoulder', 'hip', 'ankle' dynamically to left/right versions
+        # Resolve side-agnostic names like 'shoulder', 'hip', 'knee', 'ankle' dynamically to left/right versions
         def get_landmark_val(name):
             if name in landmark_dict:
                 return landmark_dict[name]
@@ -251,6 +251,12 @@ class MeasurementEngine:
             if name == 'hip':
                 l_pt = landmark_dict.get('left_hip')
                 r_pt = landmark_dict.get('right_hip')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'knee':
+                l_pt = landmark_dict.get('left_knee')
+                r_pt = landmark_dict.get('right_knee')
                 if l_pt is not None and r_pt is not None:
                     return l_pt if l_pt[2] >= r_pt[2] else r_pt
                 return l_pt if l_pt is not None else r_pt
@@ -274,7 +280,19 @@ class MeasurementEngine:
                     p1 = get_landmark_val(p1_name)
                     p2 = get_landmark_val(p2_name)
                     if p1 is not None and p2 is not None:
-                        pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
+                        if name == 'shoulder_width':
+                            pixel_dist = abs(p2[0] - p1[0])
+                        else:
+                            pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
+                    else:
+                        continue
+                elif len(points) == 3:
+                    p1_name, p2_name, p3_name = points
+                    p1 = get_landmark_val(p1_name)
+                    p2 = get_landmark_val(p2_name)
+                    p3 = get_landmark_val(p3_name)
+                    if p1 is not None and p2 is not None and p3 is not None:
+                        pixel_dist = np.linalg.norm(p1[:2] - p2[:2]) + np.linalg.norm(p2[:2] - p3[:2])
                     else:
                         continue
                 else:
@@ -327,7 +345,7 @@ class MeasurementEngine:
         
         landmark_dict = self._landmarks_to_dict(landmarks) if landmarks is not None else {}
         
-        # Resolve side-agnostic names like 'shoulder', 'hip', 'ankle' dynamically to left/right versions
+        # Resolve side-agnostic names like 'shoulder', 'hip', 'knee', 'ankle' dynamically to left/right versions
         def get_landmark_val(name):
             if name in landmark_dict:
                 return landmark_dict[name]
@@ -340,6 +358,12 @@ class MeasurementEngine:
             if name == 'hip':
                 l_pt = landmark_dict.get('left_hip')
                 r_pt = landmark_dict.get('right_hip')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'knee':
+                l_pt = landmark_dict.get('left_knee')
+                r_pt = landmark_dict.get('right_knee')
                 if l_pt is not None and r_pt is not None:
                     return l_pt if l_pt[2] >= r_pt[2] else r_pt
                 return l_pt if l_pt is not None else r_pt
@@ -357,7 +381,11 @@ class MeasurementEngine:
             source = "Unknown"
             
             # Use segmentation edges for width measurements (Canny + findContours)
-            if name in self.edge_based_measurements and edge_reference_points and edge_reference_points.get('is_valid'):
+            # Ensure arm_length and leg_length are explicitly excluded from the edge-based path
+            if (name in self.edge_based_measurements and 
+                name not in ('arm_length', 'leg_length') and 
+                edge_reference_points and 
+                edge_reference_points.get('is_valid')):
                 pixel_dist = self._calculate_edge_distance(name, edge_reference_points)
                 if pixel_dist > 0:
                     measurement_value = RegressionCorrector.apply(name, pixel_dist, scale_factor)
@@ -365,17 +393,37 @@ class MeasurementEngine:
                     source = "Canny+findContours Edge"
             
             # Fall back to MediaPipe for skeletal measurements (all 33 landmarks)
-            if measurement_value is None and len(points) == 2:
-                p1_name, p2_name = points
-                p1 = get_landmark_val(p1_name)
-                p2 = get_landmark_val(p2_name)
-                if p1 is not None and p2 is not None:
-                    # OpenCV distance calculation
-                    pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
-                    # Apply height-based scaling with regression correction
-                    measurement_value = RegressionCorrector.apply(name, pixel_dist, scale_factor)
-                    confidence = (p1[2] + p2[2]) / 2
-                    source = "MediaPipe Landmarks (33 points)"
+            if measurement_value is None:
+                if len(points) == 2:
+                    p1_name, p2_name = points
+                    p1 = get_landmark_val(p1_name)
+                    p2 = get_landmark_val(p2_name)
+                    if p1 is not None and p2 is not None:
+                        # OpenCV distance calculation
+                        if name == 'shoulder_width':
+                            pixel_dist = abs(p2[0] - p1[0])
+                        else:
+                            pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
+                        # Apply height-based scaling with regression correction
+                        measurement_value = RegressionCorrector.apply(name, pixel_dist, scale_factor)
+                        confidence = (p1[2] + p2[2]) / 2
+                        source = "MediaPipe Landmarks (33 points)"
+                elif len(points) == 3:
+                    p1_name, p2_name, p3_name = points
+                    p1 = get_landmark_val(p1_name)
+                    p2 = get_landmark_val(p2_name)
+                    p3 = get_landmark_val(p3_name)
+                    if p1 is not None and p2 is not None and p3 is not None:
+                        # OpenCV distance calculation (sum of segments)
+                        pixel_dist = np.linalg.norm(p1[:2] - p2[:2]) + np.linalg.norm(p2[:2] - p3[:2])
+                        
+                        # Debug print to confirm 3-point calculation is reached
+                        print(f"[DEBUG] 3-point calculation reached for {name}: points={points}, pixel_dist={pixel_dist:.2f}")
+                        
+                        # Apply height-based scaling with regression correction
+                        measurement_value = RegressionCorrector.apply(name, pixel_dist, scale_factor)
+                        confidence = (p1[2] + p2[2] + p3[2]) / 3
+                        source = "MediaPipe Landmarks (33 points)"
             
             if measurement_value is not None:
                 measurements[name] = (measurement_value, confidence, source)
@@ -397,6 +445,9 @@ class MeasurementEngine:
         Returns:
             Distance in pixels
         """
+        if measurement_name in ('arm_length', 'leg_length'):
+            return 0.0
+            
         left_point = right_point = None
         
         if measurement_name in ('shoulder_width', 'chest_circumference', 'chest_width', 'chest_depth'):
@@ -573,7 +624,10 @@ class MeasurementEngine:
                 p1 = landmark_dict[p1_name]
                 p2 = landmark_dict[p2_name]
                 
-                pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
+                if name == 'shoulder_width':
+                    pixel_dist = abs(p2[0] - p1[0])
+                else:
+                    pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
                 cm_dist = RegressionCorrector.apply(name, pixel_dist, scale_factor)
                 
                 # Use refined confidence if available

@@ -184,7 +184,7 @@ const LiveCamera = () => {
 
     // Initialize Socket.io
     useEffect(() => {
-        const newSocket = io('http://localhost:5001');
+        const newSocket = io('http://localhost:5000');
 
         newSocket.on('connect', () => {
             console.log('Connected to backend');

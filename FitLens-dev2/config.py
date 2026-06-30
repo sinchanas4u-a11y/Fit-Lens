@@ -60,7 +60,7 @@ class Config:
         'shoulder_width': ('left_shoulder', 'right_shoulder'),
         'arm_length_left': ('left_shoulder', 'left_elbow', 'left_wrist'),
         'arm_length_right': ('right_shoulder', 'right_elbow', 'right_wrist'),
-        'torso_length': ('neck', 'left_hip', 'right_hip'),
+        'torso_length': ('left_shoulder', 'left_hip'),
         'hip_width': ('left_hip', 'right_hip'),
         'leg_length_left': ('left_hip', 'left_knee', 'left_ankle'),
         'leg_length_right': ('right_hip', 'right_knee', 'right_ankle'),

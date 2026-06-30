@@ -53,10 +53,14 @@ const UploadMode = () => {
     setError(null);
 
     try {
-      const base64 = await imageToBase64(file);
-      const response = await axios.post('/validate/person-count', {
-        image: base64,
-        view: view
+      const formData = new FormData();
+      formData.append('image', file);
+      formData.append('view', view);
+
+      const response = await axios.post('/validate/person-count', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
       });
 
       if (response.data.success) {
@@ -784,7 +788,7 @@ const UploadMode = () => {
         <div className="results-section">
           <h2>
             Measurement Results
-            {results.mode && (
+            {results?.mode && (
               <span style={{
                 fontSize: '16px',
                 marginLeft: '10px',
@@ -800,7 +804,7 @@ const UploadMode = () => {
           </h2>
 
           {/* Manual Mode Note */}
-          {results.mode === 'manual' && (
+          {results?.mode === 'manual' && (
             <div style={{
               background: '#fff3cd',
               border: '1px solid #ff9800',
@@ -813,7 +817,7 @@ const UploadMode = () => {
           )}
 
           {/* Automatic Mode Note */}
-          {results.mode === 'automatic' && (
+          {results?.mode !== 'manual' && (
             <div style={{
               background: '#e8f5e9',
               border: '1px solid #4caf50',
@@ -834,16 +838,18 @@ const UploadMode = () => {
           </details>
 
           {/* Calibration Info */}
-          <div className="calibration-info">
-            <h3>Height-Based Calibration</h3>
-            <p><strong>Your Height:</strong> {results.calibration.user_height_cm} cm</p>
-            <p><strong>Height in Image:</strong> {results.calibration.height_in_image_px.toFixed(2)} pixels</p>
-            <p><strong>Scale Factor:</strong> {results.calibration.scale_factor.toFixed(4)} cm/px</p>
-            <p className="formula">{results.calibration.formula}</p>
-            <p style={{ fontSize: '14px', marginTop: '10px', fontStyle: 'italic' }}>
-              {results.calibration.description}
-            </p>
-          </div>
+          {results?.calibration && (
+            <div className="calibration-info">
+              <h3>Height-Based Calibration</h3>
+              <p><strong>Your Height:</strong> {results.calibration?.user_height_cm} cm</p>
+              <p><strong>Height in Image:</strong> {results.calibration?.height_in_image_px?.toFixed(2)} pixels</p>
+              <p><strong>Scale Factor:</strong> {results.calibration?.scale_factor?.toFixed(4)} cm/px</p>
+              <p className="formula">{results.calibration?.formula}</p>
+              <p style={{ fontSize: '14px', marginTop: '10px', fontStyle: 'italic' }}>
+                {results.calibration?.description}
+              </p>
+            </div>
+          )}
 
           {/* Debug Info */}
           {console.log('🔍 Rendering results:', {
@@ -859,7 +865,7 @@ const UploadMode = () => {
           })}
 
           {/* MANUAL MODE: Consolidated Single Table */}
-          {results.mode === 'manual' && results.results.merged && results.results.merged.success && (
+          {results?.mode === 'manual' && results?.results?.merged && results?.results?.merged?.success && (
             <div className="view-results">
               <h3>Consolidated Body Measurements</h3>
               <p style={{
@@ -874,7 +880,7 @@ const UploadMode = () => {
               {/* Visualizations - Show both Front and Side */}
               <div className="visualizations">
                 {/* Front View Visualization and Mask */}
-                {results.results.merged.front_visualization && (
+                {results?.results?.merged?.front_visualization && (
                   <>
                     <div className="vis-item">
                       <h4>Front View - Marked Landmarks</h4>
@@ -890,7 +896,7 @@ const UploadMode = () => {
                 )}
 
                 {/* Side View Visualization and Mask */}
-                {results.results.merged.side_visualization && (
+                {results?.results?.merged?.side_visualization && (
                   <>
                     <div className="vis-item">
                       <h4>Side View - Marked Landmarks</h4>
@@ -906,7 +912,7 @@ const UploadMode = () => {
                 )}
 
                 {/* Fallback to legacy fields if new fields not available */}
-                {!results.results.merged.front_visualization && !results.results.merged.side_visualization && results.results.merged.visualization && (
+                {!results?.results?.merged?.front_visualization && !results?.results?.merged?.side_visualization && results?.results?.merged?.visualization && (
                   <>
                     <div className="vis-item">
                       <h4>Marked Landmarks</h4>
@@ -924,19 +930,19 @@ const UploadMode = () => {
 
               {/* Consolidated Measurements Table */}
               <div className="measurements-table">
-                <h4>Body Measurements ({results.results.merged.measurements ? Object.keys(results.results.merged.measurements).length : 0} measurements)</h4>
+                <h4>Body Measurements ({results?.results?.merged?.measurements ? Object.keys(results.results.merged.measurements).length : 0} measurements)</h4>
 
-                {!results.results.merged.measurements || Object.keys(results.results.merged.measurements).length === 0 ? (
+                {!results?.results?.merged?.measurements || Object.keys(results.results.merged.measurements).length === 0 ? (
                   <div className="error-message">
                     <strong>Debug:</strong> No measurements found in merged result.
-                    <pre>{JSON.stringify(results.results.merged, null, 2)}</pre>
+                    <pre>{JSON.stringify(results?.results?.merged, null, 2)}</pre>
                   </div>
                 ) : (
                   <>
                     {/* Simple list view as fallback */}
                     <div style={{ marginBottom: '20px', padding: '15px', background: '#f9f9f9', borderRadius: '5px' }}>
                       <h5>Measurements List:</h5>
-                      {Object.entries(results.results.merged.measurements).map(([name, data]) => (
+                      {Object.entries(results?.results?.merged?.measurements || {}).map(([name, data]) => (
                         <div key={name} style={{ padding: '8px', borderBottom: '1px solid #ddd' }}>
                           <strong>{name.replace(/_/g, ' ').toUpperCase()}:</strong>{' '}
                           {formatCmValue(data.value_cm)} ({formatPxValue(data.value_px)})
@@ -959,7 +965,7 @@ const UploadMode = () => {
                         </tr>
                       </thead>
                       <tbody>
-                        {Object.entries(results.results.merged.measurements).map(([name, data]) => {
+                        {Object.entries(results?.results?.merged?.measurements || {}).map(([name, data]) => {
                           console.log(`📏 Rendering merged measurement: ${name}`, data);
                           // Determine which view the measurement came from
                           let viewBadge = data.source || 'Manual';
@@ -993,13 +999,13 @@ const UploadMode = () => {
           )}
 
           {/* AUTOMATIC MODE: Separate Front and Side Tables */}
-          {results.mode === 'automatic' && results.results?.front && (
+          {results?.results?.front && results?.mode !== 'manual' && (
             <div className="view-results">
               <h3>Front View Measurements</h3>
               {(() => {
                 // Preserve existing panels and table; only compute data used by 3D viewer.
-                const frontResult = results.results.front;
-                const frontMeshData = frontResult?.mesh_data || results.mesh_data;
+                const frontResult = results?.results?.front;
+                const frontMeshData = frontResult?.mesh_data || results?.mesh_data;
                 const apiSmplxStatus = frontResult?.smplx_status || results?.smplx_status;
                 const showModelLoading = processing && (frontResult?.smpl?.status === 'active' || frontResult?.smpl?.status === 'estimated');
                 const hasModel = !!(
@@ -1044,12 +1050,12 @@ const UploadMode = () => {
                     </p>
 
                     {/* Debug: Show raw data */}
-                    {console.log('📊 Front measurements:', frontResult.measurements)}
+                    {console.log('📊 Front measurements:', frontResult?.measurements)}
 
                     {/* Visualizations */}
                     <div className="visualizations">
                       {/* Original Image */}
-                      {frontResult.original_image && (
+                      {frontResult?.original_image && (
                         <div className="vis-item">
                           <h4>Original Image</h4>
                           <img src={frontResult.original_image} alt="Original front" />
@@ -1057,11 +1063,11 @@ const UploadMode = () => {
                       )}
                       <div className="vis-item">
                         <h4>Segmentation Mask</h4>
-                        <img src={frontResult.mask} alt="Front mask" />
+                        <img src={frontResult?.mask} alt="Front mask" />
                       </div>
                       <div className="vis-item">
                         <h4>Landmark Detection</h4>
-                        <img src={frontResult.visualization} alt="Front landmarks" />
+                        <img src={frontResult?.visualization} alt="Front landmarks" />
                       </div>
                     </div>
 
@@ -1126,7 +1132,7 @@ const UploadMode = () => {
                     </div>
 
                     {/* Hybrid Approach Info */}
-                    {frontResult.hybrid_approach && frontResult.hybrid_approach.enabled && (
+                    {frontResult?.hybrid_approach && frontResult.hybrid_approach.enabled && (
                       <div style={{
                         background: '#e8f5e9',
                         border: '1px solid #4caf50',
@@ -1144,13 +1150,13 @@ const UploadMode = () => {
 
                     {/* Measurements Table */}
                     <div className="measurements-table">
-                      <h4>Body Measurements ({frontResult.measurements ? Object.keys(frontResult.measurements).length : 0} measurements)</h4>
+                      <h4>Body Measurements ({frontResult?.measurements ? Object.keys(frontResult.measurements).length : 0} measurements)</h4>
                       <div className={`smpl-status-badge ${frontSmplStatus.className}`}>
                         {smplStatusText}
                       </div>
 
                       {/* Debug: Check if measurements exist */}
-                      {!frontResult.measurements || Object.keys(frontResult.measurements).length === 0 ? (
+                      {!frontResult?.measurements || Object.keys(frontResult.measurements).length === 0 ? (
                         <div className="error-message">
                           <strong>Debug:</strong> No measurements found in response.
                           <pre>{JSON.stringify(frontResult, null, 2)}</pre>
@@ -1160,7 +1166,7 @@ const UploadMode = () => {
                           {/* Simple list view as fallback */}
                           <div style={{ marginBottom: '20px', padding: '15px', background: '#f9f9f9', borderRadius: '5px' }}>
                             <h5>Measurements List:</h5>
-                            {Object.entries(frontResult.measurements).map(([name, data]) => (
+                            {Object.entries(frontResult?.measurements || {}).map(([name, data]) => (
                               <div key={name} style={{ padding: '8px', borderBottom: '1px solid #ddd' }}>
                                 <strong>{name.replace(/_/g, ' ').toUpperCase()}:</strong>{' '}
                                 {formatCmValue(data.value_cm)} ({formatPxValue(data.value_px)})
@@ -1180,7 +1186,7 @@ const UploadMode = () => {
                               </tr>
                             </thead>
                             <tbody>
-                              {Object.entries(frontResult.measurements).map(([name, data]) => {
+                              {Object.entries(frontResult?.measurements || {}).map(([name, data]) => {
                                 console.log(`📏 Rendering measurement: ${name}`, data);
                                 const sourceLabel = data.source || 'MediaPipe';
                                 const sourceColor = getSourceColor(sourceLabel);
@@ -1205,95 +1211,101 @@ const UploadMode = () => {
           )}
 
           {/* Side View Results - Only for Automatic Mode */}
-          {results.mode === 'automatic' && results.results?.side && (
-            <div className="view-results">
-              <h3>Side View Measurements</h3>
-              
-              {/* Mode badge */}
-              <p style={{
-                color: '#4caf50',
-                fontSize: '14px',
-                fontStyle: 'italic',
-                marginBottom: '15px'
-              }}>
-                🤖 Automatic Mode: AI-powered body measurements
-              </p>
+          {results?.results?.side && results?.mode !== 'manual' && (
+            (() => {
+              const sideResult = results.results.side;
+              const sideSmplStatus = getSmplStatusBadge(sideResult?.smpl);
+              return (
+                <div className="view-results">
+                  <h3>Side View Measurements</h3>
+                  
+                  {/* Mode badge */}
+                  <p style={{
+                    color: '#4caf50',
+                    fontSize: '14px',
+                    fontStyle: 'italic',
+                    marginBottom: '15px'
+                  }}>
+                    🤖 Automatic Mode: AI-powered body measurements
+                  </p>
 
-              {/* Visualizations */}
-              <div className="visualizations">
-                {/* Original Image */}
-                {results.results.side.original_image && (
-                  <div className="vis-item">
-                    <h4>Original Image</h4>
-                    <img src={results.results.side.original_image} alt="Original side" />
+                  {/* Visualizations */}
+                  <div className="visualizations">
+                    {/* Original Image */}
+                    {sideResult?.original_image && (
+                      <div className="vis-item">
+                        <h4>Original Image</h4>
+                        <img src={sideResult.original_image} alt="Original side" />
+                      </div>
+                    )}
+                    <div className="vis-item">
+                      <h4>Segmentation Mask</h4>
+                      <img src={sideResult?.mask} alt="Side mask" />
+                    </div>
+                    <div className="vis-item">
+                      <h4>Landmark Detection</h4>
+                      <img src={sideResult?.visualization} alt="Side landmarks" />
+                    </div>
                   </div>
-                )}
-                <div className="vis-item">
-                  <h4>Segmentation Mask</h4>
-                  <img src={results.results.side.mask} alt="Side mask" />
-                </div>
-                <div className="vis-item">
-                  <h4>Landmark Detection</h4>
-                  <img src={results.results.side.visualization} alt="Side landmarks" />
-                </div>
-              </div>
 
-              {/* Hybrid Approach Info */}
-              {results.results.side.hybrid_approach && results.results.side.hybrid_approach.enabled && (
-                <div style={{
-                  background: '#e8f5e9',
-                  border: '1px solid #4caf50',
-                  padding: '12px',
-                  borderRadius: '5px',
-                  marginBottom: '20px'
-                }}>
-                  <strong>🔬 Hybrid Vision Approach:</strong>
-                  <ul style={{ margin: '8px 0 0 20px', padding: 0 }}>
-                    <li>Edge-based measurements: {results.results.side.hybrid_approach.source_summary?.segmentation_edge || 0}</li>
-                    <li>MediaPipe joint measurements: {results.results.side.hybrid_approach.source_summary?.mediapipe_landmarks || 0}</li>
-                  </ul>
-                </div>
-              )}
+                  {/* Hybrid Approach Info */}
+                  {sideResult?.hybrid_approach && sideResult.hybrid_approach.enabled && (
+                    <div style={{
+                      background: '#e8f5e9',
+                      border: '1px solid #4caf50',
+                      padding: '12px',
+                      borderRadius: '5px',
+                      marginBottom: '20px'
+                    }}>
+                      <strong>🔬 Hybrid Vision Approach:</strong>
+                      <ul style={{ margin: '8px 0 0 20px', padding: 0 }}>
+                        <li>Edge-based measurements: {sideResult.hybrid_approach.source_summary?.segmentation_edge || 0}</li>
+                        <li>MediaPipe joint measurements: {sideResult.hybrid_approach.source_summary?.mediapipe_landmarks || 0}</li>
+                      </ul>
+                    </div>
+                  )}
 
-              {/* Measurements Table */}
-              <div className="measurements-table">
-                <h4>Body Measurements ({results.results.side.measurements ? Object.keys(results.results.side.measurements).length : 0})</h4>
-                <div className={`smpl-status-badge ${getSmplStatusBadge(results.results.side.smpl).className}`}>
-                  {getSmplStatusBadge(results.results.side.smpl).text}
-                </div>
-                
-                {!results.results.side.measurements || Object.keys(results.results.side.measurements).length === 0 ? (
-                  <div className="error-message">
-                    <strong>No measurements found in side view.</strong>
-                  </div>
-                ) : (
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Measurement</th>
-                        <th>Value (cm)</th>
-                        <th>Value (px)</th>
-                        <th>Source</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Object.entries(results.results.side.measurements).map(([name, data]) => {
-                        const sourceLabel = data.source || 'MediaPipe';
-                        const sourceColor = getSourceColor(sourceLabel);
-                        return (
-                          <tr key={name}>
-                            <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
-                            <td>{formatCmValue(data.value_cm)}</td>
-                            <td>{formatPxValue(data.value_px)}</td>
-                            <td style={{ color: sourceColor, fontSize: '12px', fontWeight: 'bold' }}>{sourceLabel}</td>
+                  {/* Measurements Table */}
+                  <div className="measurements-table">
+                    <h4>Body Measurements ({sideResult?.measurements ? Object.keys(sideResult.measurements).length : 0})</h4>
+                    <div className={`smpl-status-badge ${sideSmplStatus.className}`}>
+                      {sideResult?.smpl?.status_text || sideSmplStatus.text}
+                    </div>
+                    
+                    {!sideResult?.measurements || Object.keys(sideResult.measurements).length === 0 ? (
+                      <div className="error-message">
+                        <strong>No measurements found in side view.</strong>
+                      </div>
+                    ) : (
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Measurement</th>
+                            <th>Value (cm)</th>
+                            <th>Value (px)</th>
+                            <th>Source</th>
                           </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            </div>
+                        </thead>
+                        <tbody>
+                          {Object.entries(sideResult.measurements).map(([name, data]) => {
+                            const sourceLabel = data.source || 'MediaPipe';
+                            const sourceColor = getSourceColor(sourceLabel);
+                            return (
+                              <tr key={name}>
+                                <td>{name.replace(/_/g, ' ').toUpperCase()}</td>
+                                <td>{formatCmValue(data.value_cm)}</td>
+                                <td>{formatPxValue(data.value_px)}</td>
+                                <td style={{ color: sourceColor, fontSize: '12px', fontWeight: 'bold' }}>{sourceLabel}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </div>
+              );
+            })()
           )}
 
           {/* Action Buttons */}

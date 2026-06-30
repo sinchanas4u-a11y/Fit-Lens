@@ -8,21 +8,28 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:5001',
+        target: 'http://localhost:5000',
+        changeOrigin: true,
+        secure: false,
+        timeout: 300000,
+        proxyTimeout: 300000
+      },
+      '/validate/person-count': {
+        target: 'http://localhost:5000',
         changeOrigin: true,
         secure: false,
         timeout: 300000,
         proxyTimeout: 300000
       },
       '/validate': {
-        target: 'http://localhost:5001',
+        target: 'http://localhost:5000',
         changeOrigin: true,
         secure: false,
         timeout: 300000,
         proxyTimeout: 300000
       },
       '/mesh': {
-        target: 'http://localhost:5001',
+        target: 'http://localhost:5000',
         changeOrigin: true,
         secure: false
       }

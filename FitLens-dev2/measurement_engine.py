@@ -42,16 +42,16 @@ class MeasurementEngine:
         self.measurements = {
             'front': {
                 'shoulder_width': ('left_shoulder', 'right_shoulder'),
-                'arm_length': ('left_shoulder', 'left_wrist'),
+                'arm_length': ('left_shoulder', 'left_elbow', 'left_wrist'),
                 'chest_circumference': ('left_shoulder', 'right_shoulder'),
                 'waist_circumference': ('left_hip', 'right_hip'),
                 'torso_length': ('left_shoulder', 'left_hip'),
-                'leg_length': ('left_hip', 'left_ankle'),
+                'leg_length': ('left_hip', 'left_knee', 'left_ankle'),
                 'full_height': ('nose', 'left_ankle'),
             },
             'side': {
                 'torso_length': ('shoulder', 'hip'),
-                'leg_length': ('hip', 'ankle'),
+                'leg_length': ('hip', 'knee', 'ankle'),
                 'chest_depth': ('chest_left', 'chest_right'),
                 'waist_depth': ('waist_left', 'waist_right'),
                 'stomach_depth': ('waist_left', 'waist_right'),
@@ -85,7 +85,7 @@ class MeasurementEngine:
         # Get landmark dictionary
         landmark_dict = self._landmarks_to_dict(landmarks)
         
-        # Resolve side-agnostic names like 'shoulder', 'hip', 'ankle' dynamically to left/right versions
+        # Resolve side-agnostic names like 'shoulder', 'hip', 'knee', 'ankle' dynamically to left/right versions
         def get_landmark_val(name):
             if name in landmark_dict:
                 return landmark_dict[name]
@@ -98,6 +98,12 @@ class MeasurementEngine:
             if name == 'hip':
                 l_pt = landmark_dict.get('left_hip')
                 r_pt = landmark_dict.get('right_hip')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'knee':
+                l_pt = landmark_dict.get('left_knee')
+                r_pt = landmark_dict.get('right_knee')
                 if l_pt is not None and r_pt is not None:
                     return l_pt if l_pt[2] >= r_pt[2] else r_pt
                 return l_pt if l_pt is not None else r_pt
@@ -118,11 +124,24 @@ class MeasurementEngine:
                 p2 = get_landmark_val(p2_name)
                 if p1 is not None and p2 is not None:
                     # Calculate pixel distance
-                    pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
+                    if name == 'shoulder_width':
+                        pixel_dist = abs(p2[0] - p1[0])
+                    else:
+                        pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
                     
                     # Convert to cm
                     cm_dist = pixel_dist * scale_factor
                     
+                    measurements[name] = cm_dist
+            elif len(points) == 3:
+                # Sum of two segments
+                p1_name, p2_name, p3_name = points
+                p1 = get_landmark_val(p1_name)
+                p2 = get_landmark_val(p2_name)
+                p3 = get_landmark_val(p3_name)
+                if p1 is not None and p2 is not None and p3 is not None:
+                    pixel_dist = np.linalg.norm(p1[:2] - p2[:2]) + np.linalg.norm(p2[:2] - p3[:2])
+                    cm_dist = pixel_dist * scale_factor
                     measurements[name] = cm_dist
         
         return measurements
@@ -131,7 +150,10 @@ class MeasurementEngine:
         self,
         landmarks: np.ndarray,
         scale_factor: float,
-        view: str = 'front'
+        view: str = 'front',
+        refined_shoulders: Optional[Dict] = None,
+        edge_reference_points: Optional[Dict] = None,
+        user_height_cm: Optional[float] = None
     ) -> Dict[str, Tuple[float, float, str]]:
         """
         Calculate measurements with confidence scores
@@ -145,7 +167,7 @@ class MeasurementEngine:
         measurements = {}
         landmark_dict = self._landmarks_to_dict(landmarks)
         
-        # Resolve side-agnostic names like 'shoulder', 'hip', 'ankle' dynamically to left/right versions
+        # Resolve side-agnostic names like 'shoulder', 'hip', 'knee', 'ankle' dynamically to left/right versions
         def get_landmark_val(name):
             if name in landmark_dict:
                 return landmark_dict[name]
@@ -158,6 +180,12 @@ class MeasurementEngine:
             if name == 'hip':
                 l_pt = landmark_dict.get('left_hip')
                 r_pt = landmark_dict.get('right_hip')
+                if l_pt is not None and r_pt is not None:
+                    return l_pt if l_pt[2] >= r_pt[2] else r_pt
+                return l_pt if l_pt is not None else r_pt
+            if name == 'knee':
+                l_pt = landmark_dict.get('left_knee')
+                r_pt = landmark_dict.get('right_knee')
                 if l_pt is not None and r_pt is not None:
                     return l_pt if l_pt[2] >= r_pt[2] else r_pt
                 return l_pt if l_pt is not None else r_pt
@@ -179,12 +207,38 @@ class MeasurementEngine:
                 p2 = get_landmark_val(p2_name)
                 if p1 is not None and p2 is not None:
                     # Pixel distance between landmarks
-                    pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
+                    if name == 'shoulder_width':
+                        pixel_dist = abs(p2[0] - p1[0])
+                    else:
+                        pixel_dist = np.linalg.norm(p1[:2] - p2[:2])
                     # Pure pixel-to-scale conversion
                     cm_dist = pixel_dist * scale_factor
                     
                     # Calculate confidence (average of point confidences)
                     confidence = (p1[2] + p2[2]) / 2
+                    
+                    # Determine source
+                    source = 'pixel_to_scale'
+                    
+                    measurements[name] = (cm_dist, confidence, source)
+            elif len(points) == 3:
+                p1_name, p2_name, p3_name = points
+                
+                p1 = get_landmark_val(p1_name)
+                p2 = get_landmark_val(p2_name)
+                p3 = get_landmark_val(p3_name)
+                if p1 is not None and p2 is not None and p3 is not None:
+                    # Sum of two segments
+                    pixel_dist = np.linalg.norm(p1[:2] - p2[:2]) + np.linalg.norm(p2[:2] - p3[:2])
+                    
+                    # Debug print to confirm 3-point calculation is reached
+                    print(f"[DEBUG] 3-point calculation reached for {name}: points={points}, pixel_dist={pixel_dist:.2f}")
+                    
+                    # Pure pixel-to-scale conversion
+                    cm_dist = pixel_dist * scale_factor
+                    
+                    # Calculate confidence (average of point confidences)
+                    confidence = (p1[2] + p2[2] + p3[2]) / 3
                     
                     # Determine source
                     source = 'pixel_to_scale'

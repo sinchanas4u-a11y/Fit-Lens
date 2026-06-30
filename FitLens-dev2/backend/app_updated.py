@@ -993,7 +993,7 @@ def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success, effec
             'label': 'Hip Circumference',
         },
         'shoulder_width': {
-            'value_cm': smpl_m.get('shoulder_width', _mp_cm('shoulder_width')),
+            'value_cm': _mp_cm('shoulder_width') or smpl_m.get('shoulder_width'),
             'value_px': _mp_px('shoulder_width'),
             'source': 'SMPL + MediaPipe',
             'label': 'Shoulder Width',
@@ -2074,7 +2074,46 @@ def process_images():
                 if mv_res.get('success') and mv_res.get('mesh_data'):
                     # Overwrite front mesh with the multiview result
                     front_results['mesh_data'] = mv_res['mesh_data']
-                    front_results['measurements'] = mv_res.get('measurements', front_results.get('measurements', {}))
+                    
+                    # Merge measurements structure properly, keeping MediaPipe values if SMPL is missing/None/discarded
+                    mp_m = front_results.get('measurements', {})
+                    smpl_m = mv_res.get('measurements', {})
+                    merged_m = {}
+                    
+                    for key in ['shoulder_width', 'chest_width', 'waist_width', 'hip_width', 
+                                 'chest_circumference', 'waist_circumference', 'hip_circumference',
+                                 'arm_length', 'leg_length', 'torso_length']:
+                        
+                        mp_val = mp_m.get(key)
+                        smpl_val = smpl_m.get(key)
+                        
+                        use_mp = False
+                        if key == 'leg_length':
+                            # Discard SMPL leg length if < 90cm or if None, and fall back to MediaPipe
+                            if smpl_val is None or (isinstance(smpl_val, (int, float)) and smpl_val < 90.0):
+                                use_mp = True
+                                print(f"  ⓘ SMPL leg length ({smpl_val if smpl_val is not None else 'N/A'} cm) < 90cm or None. Discarding and using MediaPipe instead.")
+                        
+                        if smpl_val is not None and not use_mp:
+                            if isinstance(mp_val, dict):
+                                merged_m[key] = mp_val.copy()
+                                merged_m[key]['value_cm'] = float(smpl_val)
+                                merged_m[key]['source'] = 'SMPL 3D Model'
+                            else:
+                                merged_m[key] = {
+                                    'value_cm': float(smpl_val),
+                                    'source': 'SMPL 3D Model',
+                                    'label': key.replace('_', ' ').title()
+                                }
+                        elif mp_val is not None:
+                            merged_m[key] = mp_val
+                            
+                    # Copy any other keys from MediaPipe
+                    for key, mp_val in mp_m.items():
+                        if key not in merged_m:
+                            merged_m[key] = mp_val
+                            
+                    front_results['measurements'] = merged_m
                     front_results['smpl'] = {
                         'success': True,
                         'fitted_to_user': True,
@@ -2795,14 +2834,17 @@ def merge_manual_measurements(front_results, side_results):
         front_measurements = front_results.get('measurements', {})
         
         # Add front measurements
-        # leg_length MUST come from front view
+        # leg_length and arm_length MUST come from front view
         for name, data in front_measurements.items():
             if name == 'leg_length':
                 # Prioritize front view for leg_length
                 merged['measurements'][name] = data
                 print(f"  ✓ Using leg_length from FRONT view: {data.get('value_cm')} cm")
-            elif name != 'arm_length':
-                # Add all other measurements except arm_length (which should come from side)
+            elif name == 'arm_length':
+                # Prioritize front view for arm_length
+                merged['measurements'][name] = data
+                print(f"  ✓ Using arm_length from FRONT view: {data.get('value_cm')} cm")
+            else:
                 merged['measurements'][name] = data
         
         # Store front visualization and metadata
@@ -2819,12 +2861,12 @@ def merge_manual_measurements(front_results, side_results):
         side_measurements = side_results.get('measurements', {})
         
         # Add side measurements
-        # arm_length MUST come from side view
+        # leg_length and arm_length skip side view (both come from front view)
         for name, data in side_measurements.items():
             if name == 'arm_length':
-                # Prioritize side view for arm_length
-                merged['measurements'][name] = data
-                print(f"  ✓ Using arm_length from SIDE view: {data.get('value_cm')} cm")
+                # Skip arm_length from side (already handled from front)
+                print(f"  ⓘ Skipping arm_length from side view (using front view instead)")
+                continue
             elif name == 'leg_length':
                 # Skip leg_length from side (already handled from front)
                 print(f"  ⓘ Skipping leg_length from side view (using front view instead)")
@@ -2848,7 +2890,7 @@ def merge_manual_measurements(front_results, side_results):
     print(f"\n✓ Merged manual measurements: {len(merged['measurements'])} total measurements")
     print(f"  Measurements: {list(merged['measurements'].keys())}")
     if 'arm_length' in merged['measurements']:
-        print(f"  ✓ arm_length: {merged['measurements']['arm_length'].get('value_cm')} cm (from SIDE view)")
+        print(f"  ✓ arm_length: {merged['measurements']['arm_length'].get('value_cm')} cm (from FRONT view)")
     if 'leg_length' in merged['measurements']:
         print(f"  ✓ leg_length: {merged['measurements']['leg_length'].get('value_cm')} cm (from FRONT view)")
     

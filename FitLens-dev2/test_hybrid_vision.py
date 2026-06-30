@@ -10,7 +10,7 @@ import cv2
 # Import backend modules
 from backend.landmark_detector import LandmarkDetector
 from backend.measurement_engine import MeasurementEngine
-from backend.segmentation_model import SegmentationModel
+from segmentation_model import SegmentationModel
 
 
 class TestHybridVisionApproach(unittest.TestCase):

@@ -282,6 +282,8 @@ class MeasurementExtractor:
             return None
         length = (float(np.linalg.norm(j_cm[4] - j_cm[1])) +
                   float(np.linalg.norm(j_cm[7] - j_cm[4])))
+        if length < 90.0:
+            return None
         return round(length, 1) if 60.0 <= length <= 120.0 else None
 
     def _torso_length(self, j_cm: np.ndarray) -> float | None:
