@@ -260,6 +260,121 @@ def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success):
     return cleaned, circ_source
 
 
+def consolidate_measurements(front_results, side_results, user_height_cm=None):
+    """
+    Consolidate front and side view measurements into a single final dictionary
+    using the specified priority rules.
+    """
+    front_meas = front_results.get('measurements', {}) if isinstance(front_results, dict) else {}
+    side_meas = side_results.get('measurements', {}) if isinstance(side_results, dict) else {}
+    
+    merged_meas = {}
+    
+    # Helper to extract a measurement safely
+    def get_meas(key, source_dict):
+        if key in source_dict and isinstance(source_dict[key], dict):
+            return source_dict[key].copy()
+        return None
+
+    # Helper to check if a measurement came from a 3D model
+    def is_3d_source(meas):
+        if not meas:
+            return False
+        src = str(meas.get('source', '')).upper()
+        return 'SMPL' in src or '3D' in src
+
+    # Priority Rules implementation
+    
+    # arm_length -> front
+    arm = get_meas('arm_length', front_meas) or get_meas('arm_length', side_meas)
+    if arm:
+        merged_meas['arm_length'] = arm
+        
+    # leg_length -> front
+    leg = get_meas('leg_length', front_meas) or get_meas('leg_length', side_meas)
+    if leg:
+        merged_meas['leg_length'] = leg
+        
+    # shoulder_width -> front
+    shoulder = get_meas('shoulder_width', front_meas) or get_meas('shoulder_width', side_meas)
+    if shoulder:
+        merged_meas['shoulder_width'] = shoulder
+        
+    # torso_length -> average
+    torso_f = get_meas('torso_length', front_meas)
+    torso_s = get_meas('torso_length', side_meas)
+    if torso_f and torso_s:
+        try:
+            val_f = float(torso_f.get('value_cm', 0))
+            val_s = float(torso_s.get('value_cm', 0))
+            avg_val = round((val_f + val_s) / 2.0, 2)
+            merged_meas['torso_length'] = {
+                'value_cm': avg_val,
+                'value_px': torso_f.get('value_px'),  # fallback to front px
+                'source': 'Average (Front/Side)',
+                'label': 'Torso Length'
+            }
+        except (ValueError, TypeError):
+            merged_meas['torso_length'] = torso_f
+    elif torso_f:
+        merged_meas['torso_length'] = torso_f
+    elif torso_s:
+        merged_meas['torso_length'] = torso_s
+        
+    # chest_circumference, waist_circumference, hip_circumference -> from SMPL/SMPLify-X (front preferred if both)
+    for key in ['chest_circumference', 'waist_circumference', 'hip_circumference']:
+        m_f = get_meas(key, front_meas)
+        m_s = get_meas(key, side_meas)
+        
+        f_is_3d = is_3d_source(m_f)
+        s_is_3d = is_3d_source(m_s)
+        
+        if f_is_3d and s_is_3d:
+            if 'SMPLIFY-X' in str(m_f.get('source', '')).upper():
+                merged_meas[key] = m_f
+            else:
+                merged_meas[key] = m_f
+        elif f_is_3d:
+            merged_meas[key] = m_f
+        elif s_is_3d:
+            merged_meas[key] = m_s
+        else:
+            merged_meas[key] = m_f or m_s
+            
+    # chest_width, waist_width, hip_width -> front
+    for key in ['chest_width', 'waist_width', 'hip_width']:
+        m = get_meas(key, front_meas) or get_meas(key, side_meas)
+        if m:
+            merged_meas[key] = m
+            
+    # chest_depth, waist_depth, hip_depth, stomach_depth -> side
+    for key in ['chest_depth', 'waist_depth', 'hip_depth', 'stomach_depth']:
+        m = get_meas(key, side_meas) or get_meas(key, front_meas)
+        if m:
+            merged_meas[key] = m
+            
+    # full_height -> user input prioritised
+    if user_height_cm is not None and float(user_height_cm) > 0:
+        merged_meas['full_height'] = {
+            'value_cm': float(user_height_cm),
+            'value_px': None,
+            'source': 'User Input',
+            'label': 'Full Height'
+        }
+    else:
+        height = get_meas('full_height', front_meas) or get_meas('full_height', side_meas)
+        if height:
+            merged_meas['full_height'] = height
+
+    # Add any other measurements present in front or side that aren't consolidated yet
+    all_keys = set(front_meas.keys()).union(set(side_meas.keys()))
+    for key in all_keys:
+        if key not in merged_meas:
+            merged_meas[key] = get_meas(key, front_meas) or get_meas(key, side_meas)
+            
+    return merged_meas
+
+
 def _build_smpl_mesh_data(smpl_result, user_height_cm, gender='neutral'):
     """Build Plotly-ready mesh data from fitted SMPL betas or default body."""
     try:
@@ -742,6 +857,19 @@ def process_upload():
             print(f"[DEBUG] Merged measurements surviving: {merged_meas_count}")
 
         # ── End SMPLify-X ─────────────────────────
+
+        # Consolidate measurements and set results['merged']
+        consolidated = consolidate_measurements(results.get('front'), results.get('side'), user_height_cm)
+        results['merged'] = {
+            'success': True,
+            'measurements': consolidated,
+            'front_visualization': results['front'].get('visualization') if 'front' in results else None,
+            'front_mask': results['front'].get('mask') if 'front' in results else None,
+            'side_visualization': results['side'].get('visualization') if 'side' in results else None,
+            'side_mask': results['side'].get('mask') if 'side' in results else None,
+            'visualization': results['front'].get('visualization') if 'front' in results else None,
+            'mask': results['front'].get('mask') if 'front' in results else None,
+        }
 
         return jsonify({
             'success':      True,
