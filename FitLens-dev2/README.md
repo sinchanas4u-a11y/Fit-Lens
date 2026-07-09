@@ -11,7 +11,7 @@ FitLens is a body measurement system that extracts physical dimensions from stan
 
 ## 🎥 Demo
 
-[[🎥 Click here to watch/download the Demo Video](https://img.youtube.com/vi/wRXyd5zMXGU/maxresdefault.jpg)](https://www.youtube.com/watch?v=wRXyd5zMXGU)
+[Demo Video](https://www.youtube.com/watch?v=wRXyd5zMXGU)
 
 ---
 
