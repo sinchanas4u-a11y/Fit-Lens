@@ -1,59 +1,93 @@
-# 🤳 FitLens: Professional AI Body Measurement System
+# 🤳 FitLens: AI-Powered Body Measurement System
 
-[![AI Powered](https://img.shields.io/badge/AI-Powered-blue.svg)](https://github.com/fitlens)
+[![AI Powered](https://img.shields.io/badge/AI--Powered-blue.svg)](https://github.com/sinchanas4u-a11y/Fit-Lens)
 [![Framework](https://img.shields.io/badge/Framework-Flask%20%7C%20React%20%7C%20Vite-green.svg)](https://react.dev/)
 [![ML stack](https://img.shields.io/badge/ML-PyTorch%20%7C%20YOLOv8%20%7C%20MediaPipe-orange.svg)](https://pytorch.org/)
 [![Vision](https://img.shields.io/badge/Vision-OpenCV%20%7C%20Detectron2-red.svg)](https://opencv.org/)
 
-FitLens is a professional-grade body measurement suite that leverages cutting-edge computer vision and deep learning to extract precise physical dimensions from standard 2D images. By combining **YOLOv8 segmentation**, **MediaPipe landmark detection**, and **SMPLify-X 3D body estimation**, FitLens achieves sub-centimeter accuracy for tailoring, fitness tracking, and medical posture analysis.
+FitLens is a body measurement system that extracts physical dimensions from standard 2D images using computer vision and deep learning. It combines YOLOv8 segmentation, MediaPipe landmark detection, and SMPLify-X 3D body estimation to estimate measurements like height, shoulder width, and circumferences without any specialized hardware — just a phone camera and a wall.
+
+Built as a final-year B.Tech project at REVA University, under the guidance of Dr. Argha Sarkar.
+
+---
+
+## 🎥 Demo
+
+[🎥 Click here to watch/download the Demo Video](assets/demo/demo-video.mp4)
+
+---
+
+## 🖼️ Screenshots
+
+### Landing Page — Choose Input Method
+![Landing Page](assets/screenshots/landing-page.png)
+
+### Upload Flow — Front & Side View Capture
+![Upload Flow](assets/screenshots/upload-flow.png)
+
+### Detection Method Selection
+![Detection Method](assets/screenshots/detection-method.png)
+
+### Landmark Detection — Front View
+![Landmark Detection - Front View](assets/screenshots/landmark-front.png)
+
+### Landmark Detection — Side View
+![Landmark Detection - Side View](assets/screenshots/landmark-side.png)
 
 ---
 
 ## 📖 Project Overview
+FitLens offers two ways to interact with the system:
 
-FitLens provides a dual-model experience:
-1.  **🚀 Web Dashboard (Recommended):** A modern React-based interface with a Flask backend, utilizing YOLOv8 and SMPLify-X for 3D reconstruction and circumference measurements.
-2.  **🖥️ Desktop Standalone:** A lightweight R-CNN-powered real-time tracking system for posture correction and direct measurements via a live camera feed.
+*   **🚀 Web Dashboard (Recommended):** A React + Vite frontend backed by a Flask API, using YOLOv8 for segmentation and SMPLify-X for 3D reconstruction and circumference estimation.
+*   **🖥️ Desktop Standalone:** A lightweight real-time tracking mode for posture correction and direct measurement via a live camera feed.
 
-The system doesn't just measure; it **guides**. Users receive real-time feedback on their posture, distance from the camera, and alignment to ensure every capture is photogrammetrically valid.
-
----
+The system provides real-time feedback on posture, distance from camera, and alignment before capturing a photo, so that each image is usable for measurement rather than requiring retakes.
 
 ## ✨ Features
+*   **🎯 Multi-Metric Measurement:** Estimates 15+ body metrics — height, shoulder width, chest/waist/hip circumference, and limb lengths.
+*   **🧊 3D Body Reconstruction:** Generates a personalized SMPL mesh from 2D images to support circumference estimation.
+*   **🤖 Real-Time Guidance:** Posture correction prompts ("Stand straight", "Move back", "Straighten arms") during live capture.
+*   **🖼️ Automatic Segmentation:** Isolates the subject from the background using YOLOv8-seg to reduce background interference.
+*   **📏 Flexible Calibration:** Supports both reference-object calibration (e.g. A4 paper) and user-height-based scaling.
+*   **📄 Report Generation:** Produces PDF and Word reports with annotated keypoints and measurement data.
+*   **🔒 Local-First Processing:** Images are processed in-memory and are not persisted by default.
 
-- **🎯 High-Precision Measurements:** Captures 15+ body metrics including Height, Shoulder Width, Chest/Waist/Hip Circumferences, and Limb Lengths.
-- **🧊 3D Body Reconstruction:** Generates a personalized 3D mesh (SMPL) based on 2D images for accurate volume and circumference extraction.
-- **🤖 Intelligent Guidance:** Real-time posture correction ("Stand straight", "Move back", "Straighten arms").
-- **🖼️ Automatic Segmentation:** Isolates the person from the background using YOLOv8-seg to eliminate environmental measurement interference.
-- **📏 Smart Calibration:** Supports both reference object calibration (e.g., A4 paper) and user-height-based scaling.
-- **📄 Professional Reporting:** Generates detailed PDF and Word reports with highlighted keypoints and dimensional data.
-- **🔒 Privacy First:** All processing can be done locally; images are processed in-memory and not stored by default.
+## ⚠️ Known Limitations
+Being upfront about these because they shape how the results should be interpreted:
 
----
-
-## 🖼️ Screenshots / Demo
-
-| Real-time Guidance | 3D Mesh Reconstruction | Measurement Dashboard |
-| :---: | :---: | :---: |
-| ![Guidance Placeholder](https://via.placeholder.com/300x200?text=Posture+Guidance) | ![3D Mesh Placeholder](https://via.placeholder.com/300x200?text=SMPL+3D+Mesh) | ![Dashboard Placeholder](https://via.placeholder.com/300x200?text=Feature+Inventory) |
-
----
+*   **Regression correction is dataset-limited:** The correction coefficients used to adjust raw measurements were tuned on a small, self-collected dataset and haven't been validated against a broader, independent population — accuracy may vary for body types outside that sample.
+*   **Circumference estimates (chest/waist/hip) are the least validated measurements:** These are approximated using SciPy's ConvexHull on 2D landmark points, not derived from the SMPL 3D mesh — the SMPL fit (via SMPLify-X) is currently used for mesh visualization only and does not feed into circumference calculations. A 2D convex-hull approximation is inherently rougher than a true volumetric estimate, and is more sensitive to lighting, clothing looseness, and pose deviation than direct linear measurements (height, limb length).
+*   **Single-image-per-view input:** The system relies on one front and one (optional) side photo rather than multiple angles or a scan, which limits robustness to pose or lighting variation.
+*   **No clinical validation:** Measurements are estimates for fitting/fitness-tracking use cases, not a substitute for professional/medical measurement.
+*   **Compute-heavy pipeline:** SMPLify-X fitting is slow on CPU; a GPU is recommended for reasonable processing time, which limits easy cloud deployment on free-tier hosting.
+*   **No authentication layer yet:** (see Authentication section below) — not production-ready as-is.
 
 ## 🛠️ Technology Stack
 
-| Layer | Technologies |
-| :--- | :--- |
-| **Frontend** | React 18, Vite, Three.js (3D Mesh Visualization), Axios, Socket.IO |
-| **Backend** | Python 3.10, Flask, Flask-SocketIO |
-| **Vision/ML** | YOLOv8 (Ultralytics), MediaPipe, PyTorch, Detectron2 (Desktop Standalone), InsightFace |
-| **Core Logic** | OpenCV, NumPy, SciPy, SMPLify-X |
-| **Reporting** | ReportLab (PDF), python-docx (Word) |
-
----
+| Layer | Technology | Verified Role |
+| :--- | :--- | :--- |
+| **Frontend** | React 18 + Vite | UI, image upload, results display, silhouette overlay |
+| **Frontend** | Three.js | Renders SMPLify-X 3D body mesh in browser |
+| **Frontend** | Axios | HTTP requests, frontend → Flask backend |
+| **Frontend** | Socket.IO client | Live camera streaming, progress updates, voice guidance |
+| **Backend** | Python 3.10 | Runtime |
+| **Backend** | Flask | REST API server |
+| **Backend** | Flask-SocketIO | Real-time communication for live camera mode |
+| **Vision** | YOLOv8n-seg | Body segmentation mask + person bounding box for height reference |
+| **Vision** | MediaPipe Pose | 33 skeletal landmarks on masked body image |
+| **Vision** | InsightFace buffalo_l | Face identity validation — photo upload mode only |
+| **Vision** | Detectron2 | Alternative segmentation — desktop standalone version only |
+| **ML** | PyTorch | Deep learning runtime |
+| **3D Body** | SMPLify-X | Fits 3D body model to 2D keypoints → mesh visualization only |
+| **3D Body** | SciPy | ConvexHull (attempted circumference), optimize.minimize (pose optimization), sparse (SMPL loading) |
+| **Core** | OpenCV | Image preprocessing, masking, camera capture |
+| **Core** | NumPy | Pixel math, coordinate calculations, scale factor |
+| **Reporting** | ReportLab | PDF export |
+| **Reporting** | python-docx | Word export |
 
 ## 🏗️ Project Architecture
 
-### System Flow
 ```mermaid
 graph TD
     A[User Setup] --> B{Choose Input}
@@ -69,69 +103,54 @@ graph TD
     
     H --> I[Scaling & Calibration]
     I --> J[Measurement Engine]
-    J --> K[JSON/PDF Report]
+    J --> K[JSON / PDF Report]
     J --> L[3D Mesh Visualization]
 ```
 
----
-
-## 📂 Folder Structure
-
+### Folder Structure
 ```text
-FitLens-dev2/
-├── backend/                # Flask API & CV Logic
-│   ├── app.py              # Main Entry Point (YOLO Pipeline)
-│   ├── measurement_engine.py# Geometric measurement algorithms
-│   ├── landmark_detector.py # MediaPipe & Shoulder refinement
-│   └── smpl/               # SMPL model & 3D estimators
-├── frontend-vite/          # Modern React + Vite Dashboard
-│   ├── src/                # UI Components & 3D mesh views
-│   └── package.json        # Frontend Dependencies
-├── processing/             # SMPLify-X heavy processing
-├── models/                 # Model weights (.pt, .onnx)
-├── data/                   # Temporary cache & image inputs
-├── main.py                 # Standalone R-CNN Implementation
-├── config.py               # Shared application configuration
-└── requirements.txt        # Backend dependencies
+FitLens/
+├── backend/                  # Flask API & CV logic
+│   ├── app.py                 # Main entry point (YOLO pipeline)
+│   ├── measurement_engine.py  # Geometric measurement algorithms
+│   ├── landmark_detector.py   # MediaPipe & shoulder refinement
+│   └── smpl/                  # SMPL model & 3D estimators
+├── frontend-vite/             # React + Vite dashboard
+│   ├── src/                   # UI components & 3D mesh views
+│   └── package.json
+├── processing/                # SMPLify-X heavy processing
+├── models/                    # Model weights (.pt, .onnx)
+├── data/                      # Temporary cache & image inputs
+├── main.py                    # Standalone real-time tracking implementation
+├── config.py                  # Shared application configuration
+└── requirements.txt           # Backend dependencies
 ```
 
----
-
 ## 📋 Prerequisites
-
-- **OS:** Windows 10/11, Ubuntu 20.04+, or macOS (Intel/M1).
-- **Python:** 3.8 to 3.11 (Detectron2 has compatibility issues with 3.12).
-- **Node.js:** v18 or later (for frontend).
-- **Hardware:** 
-  - Minimum: 8GB RAM, 4-core CPU.
-  - Recommended: 16GB RAM, NVIDIA GPU (8GB+ VRAM) for SMPLify-X.
-
----
+*   **OS:** Windows 10/11, Ubuntu 20.04+, or macOS (Intel/M1)
+*   **Python:** 3.8–3.11 (Detectron2 has compatibility issues with 3.12)
+*   **Node.js:** v18 or later (for frontend)
+*   **Hardware:**
+    *   Minimum: 8GB RAM, 4-core CPU
+    *   Recommended: 16GB RAM, NVIDIA GPU (8GB+ VRAM) for SMPLify-X
 
 ## 🚀 Installation Guide
 
 ### Windows
-1.  **Clone the Repository:**
-    ```bash
-    git clone https://github.com/your-repo/fitlens.git
-    cd fitlens
-    ```
-2.  **Environment Setup:**
-    ```bash
-    python -m venv venv
-    .\venv\Scripts\activate
-    ```
-3.  **Install Backend Core:**
-    ```bash
-    pip install -r requirements.txt
-    cd backend
-    pip install -r requirements.txt
-    ```
-4.  **Frontend Setup:**
-    ```bash
-    cd ../frontend-vite
-    npm install
-    ```
+```bash
+git clone https://github.com/sinchanas4u-a11y/Fit-Lens.git
+cd Fit-Lens
+
+python -m venv venv
+.\venv\Scripts\activate
+
+pip install -r requirements.txt
+cd backend
+pip install -r requirements.txt
+
+cd ../frontend-vite
+npm install
+```
 
 ### Linux / macOS
 ```bash
@@ -141,9 +160,7 @@ pip install -r requirements.txt
 cd frontend-vite && npm install
 ```
 
----
-
-## ⚙️ Environment Variables (.env)
+## ⚙️ Environment Variables
 
 ### Backend (`/backend/.env`)
 ```env
@@ -160,36 +177,37 @@ VITE_API_BASE_URL=http://localhost:5000
 VITE_SOCKET_URL=http://localhost:5000
 ```
 
----
-
 ## 🏃 Running the Application
 
 ### Option 1: Full-Stack Web App (Recommended)
-You can use the provided batch files on Windows:
+**Windows (batch script):**
 ```bash
-# Start everything
 RUN_FULLSTACK.bat
 ```
-Or manually:
-1.  **Backend:** `cd backend && python app.py`
-2.  **Frontend:** `cd frontend-vite && npm run dev`
 
-### Option 2: Standalone R-CNN App
+**Manually:**
+```bash
+# Terminal 1
+cd backend && python app.py
+
+# Terminal 2
+cd frontend-vite && npm run dev
+```
+
+### Option 2: Standalone Real-Time App
 ```bash
 python main.py
 ```
 
----
-
 ## 🔌 API Endpoints
 
-### 🩺 Health Check
+### Health Check
 `GET /api/health`
-- **Response:** `{ "status": "healthy", "models_loaded": { ... } }`
+*   **Response:** `{ "status": "healthy", "models_loaded": { ... } }`
 
-### 📤 Process Images
+### Process Images
 `POST /api/upload/process`
-- **Body (JSON):**
+*   **Body (JSON):**
     ```json
     {
       "front_image": "base64...",
@@ -199,65 +217,47 @@ python main.py
       "gender": "male"
     }
     ```
-- **Response:** Detailed measurements, 3D mesh data, and calibration info.
-
----
+*   **Response:** Detailed measurements, 3D mesh data, and calibration info.
 
 ## 🛡️ Authentication and Authorization
-*Note:* The current version uses local execution and does not implement a login system for speed of use during evaluation. Production deployment would require an OAuth2 or JWT-based implementation (planned enhancement).
-
----
+The current version runs locally and does not implement a login system, prioritizing speed of use during evaluation. Production deployment would require an OAuth2 or JWT-based auth layer — noted as a planned enhancement, not an oversight.
 
 ## 📘 Usage Guide
-
-1.  **Calibration:** Stand about 2-3 meters from the camera. If using a reference object (like A4 paper), ensure it is visible in the dedicated calibration photo.
-2.  **Posture:** Stand facing the camera with arms slightly away from the body (A-pose).
-3.  **Lighting:** Ensure even lighting; avoid strong backlighting or shadows that obscure body edges.
-4.  **Capture:** The system will auto-capture when your posture is green-aligned.
-
----
+*   **Calibration:** Stand 2–3 meters from the camera. If using a reference object (e.g. A4 paper), ensure it's visible in the dedicated calibration photo.
+*   **Posture:** Face the camera with arms slightly away from the body (A-pose).
+*   **Lighting:** Use even lighting; avoid strong backlighting or shadows that obscure body edges.
+*   **Capture:** In live mode, the system auto-captures once posture is aligned.
 
 ## 🛠️ Troubleshooting
-
-- **"Detectron2 not found":** This is common on Windows. Use `INSTALL_WINDOWS.md` for specific building instructions or fall back to the YOLOv8/MediaPipe pipeline which has no such constraints.
-- **CUDA/GPU Errors:** Ensure NVIDIA drivers are up to date. If no GPU is found, the system defaults to CPU, though SMPLify-X will be significantly slower.
-- **Socket Connection Failed:** Check if the backend is running and the CORS bridge is set correctly in `.env`.
-
----
+*   **"Detectron2 not found":** Common on Windows. See `INSTALL_WINDOWS.md` for build instructions, or use the YOLOv8/MediaPipe pipeline, which has no such dependency.
+*   **CUDA/GPU errors:** Ensure NVIDIA drivers are current. Without a GPU, the system falls back to CPU — SMPLify-X will be noticeably slower.
+*   **Socket connection failed:** Confirm the backend is running and CORS is configured correctly in `.env`.
 
 ## 🔮 Future Enhancements
-- [ ] Integration with mobile AR (iOS/Android).
-- [ ] Automated clothing recommendation engine.
-- [ ] Multi-user profiles and measurement history tracking.
-- [ ] Cloud-sync with fitness apps (Apple Health, Google Fit).
-
----
+*   Mobile AR integration (iOS/Android)
+*   Automated clothing/size recommendation engine
+*   Multi-user profiles and measurement history
+*   Cloud sync with fitness apps (Apple Health, Google Fit)
+*   Broader dataset validation for regression correction and circumference accuracy
 
 ## 🤝 Contributing
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
+Contributions are welcome:
+1.  Fork the project
+2.  Create a feature branch (`git checkout -b feature/AmazingFeature`)
+3.  Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4.  Push to the branch (`git push origin feature/AmazingFeature`)
+5.  Open a Pull Request
 
 ## 📜 License
-Distributed under the MIT License. See `LICENSE` for more information.
-
----
+Distributed under the MIT License. See `LICENSE` for details.
 
 ## 👥 Authors
-- **Project Lead:** [Your Name/Org]
-- **Developers:** [Member Names]
-
----
+*   **Sinchana S** — B.Tech Information Science & Engineering, REVA University
+*   **Team Members:** Rishith M, Spandana M, Spoothi D
+*   **Faculty Guide:** Dr. Argha Sarkar
 
 ## 🙏 Acknowledgments
-- [Ultralytics YOLOv8](https://github.com/ultralytics/ultralytics)
-- [MediaPipe by Google](https://google.github.io/mediapipe/)
-- [SMPLify-X](https://github.com/vchoutas/smplify-x)
-- [Detectron2](https://github.com/facebookresearch/detectron2)
-
+*   Ultralytics YOLOv8
+*   MediaPipe by Google
+*   SMPLify-X
+*   Detectron2
