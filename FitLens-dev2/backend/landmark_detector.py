@@ -36,7 +36,7 @@ class LandmarkDetector:
         self.face_mesh = None
         
         if not MEDIAPIPE_AVAILABLE:
-            print("⚠ MediaPipe not available - landmark detection disabled")
+            print("WARNING: MediaPipe not available - landmark detection disabled")
             return
         
         try:
@@ -47,7 +47,7 @@ class LandmarkDetector:
             self.mp_face_mesh = mp.solutions.face_mesh
             
             self.pose = self.mp_pose.Pose(
-                static_image_mode=False,
+                static_image_mode=True,
                 model_complexity=2,
                 smooth_landmarks=True,
                 min_detection_confidence=0.5,
@@ -60,9 +60,9 @@ class LandmarkDetector:
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5
             )
-            print("✓ Landmark detectors initialized successfully")
+            print("Landmark detectors initialized successfully")
         except Exception as e:
-            print(f"⚠ Failed to initialize MediaPipe: {e}")
+            print(f"Failed to initialize MediaPipe: {e}")
             import traceback
             traceback.print_exc()
         
@@ -288,12 +288,32 @@ class LandmarkDetector:
             sampled.append(tuple(hull_points[i]))
         
         return sampled
-        
-        # Shoulder edge detection parameters
-        self.shoulder_region_radius = 60  # pixels
-        self.edge_detection_threshold = 50
-        self.min_edge_confidence = 0.75
-        self.frame_counter = 0
+
+    def _preprocess_image_for_mediapipe(self, image: np.ndarray) -> np.ndarray:
+        """
+        Improve image quality for MediaPipe Pose detection:
+        1. Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) on LAB color space to enhance contrast.
+        2. Apply a mild bilateral filter to reduce high-frequency noise while keeping edges sharp.
+        """
+        try:
+            # 1. Convert to LAB color space
+            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            
+            # 2. Apply CLAHE to L channel (lightness)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            cl = clahe.apply(l)
+            
+            # 3. Merge channels and convert back to BGR
+            enhanced_bgr = cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2BGR)
+            
+            # 4. Apply a mild bilateral filter to reduce high-frequency noise while preserving body contours
+            filtered = cv2.bilateralFilter(enhanced_bgr, d=5, sigmaColor=75, sigmaSpace=75)
+            
+            return filtered
+        except Exception as e:
+            print(f"Warning: Image preprocessing failed: {e}. Using raw image.")
+            return image
     
     def detect(self, image: np.ndarray) -> Optional[np.ndarray]:
         """
@@ -306,8 +326,11 @@ class LandmarkDetector:
             Landmarks array of shape (33, 3) with (x, y, confidence)
             or None if no person detected
         """
+        # Preprocess image to enhance details and reduce noise for MediaPipe
+        preprocessed = self._preprocess_image_for_mediapipe(image)
+        
         # Convert to RGB
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image_rgb = cv2.cvtColor(preprocessed, cv2.COLOR_BGR2RGB)
         
         # Process
         results = self.pose.process(image_rgb)

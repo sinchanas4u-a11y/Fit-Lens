@@ -1774,25 +1774,19 @@ def validate_person_count():
             return jsonify({'success': False, 'error': 'No person detected in the image. Please upload a valid image containing one person.'}), 400
             
         # Cropped body check
-        # Check if ankles or nose are cropped (too close to boundaries or visibility < 0.5)
-        critical_indices = [0, 11, 12, 23, 24, 27, 28]
+        # Check if ankles or nose are cropped (too close to boundaries)
         nose = landmarks[0]
         left_ankle = landmarks[27]
         right_ankle = landmarks[28]
         
         cropped = False
-        if left_ankle[1] > h_orig * 0.98 or right_ankle[1] > h_orig * 0.98:
+        # Flag as cropped only if BOTH ankles are beyond relaxed threshold (0.995)
+        if left_ankle[1] > h_orig * 0.995 and right_ankle[1] > h_orig * 0.995:
             cropped = True
-        elif nose[1] < h_orig * 0.02:
+        # Relax nose boundary check (0.005)
+        elif nose[1] < h_orig * 0.005:
             cropped = True
             
-        # Also check visibility of critical landmarks
-        for idx in critical_indices:
-            lm = landmarks[idx]
-            if len(lm) >= 3 and lm[2] < 0.5:
-                cropped = True
-                break
-                
         if cropped:
             return jsonify({'success': False, 'error': 'Cropped body detected. Please ensure your entire body (from head to toe) is visible in the photo.'}), 400
             

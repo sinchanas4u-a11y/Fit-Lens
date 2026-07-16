@@ -133,6 +133,8 @@ class RegressionCorrector:
 class MeasurementEngine:
     """Calculate body measurements from landmarks and segmentation edge points"""
     
+    MIN_LANDMARK_CONFIDENCE = 0.5
+    
     def __init__(self):
         """Initialize measurement engine"""
         # Measurement definitions - only requested measurements
@@ -275,11 +277,15 @@ class MeasurementEngine:
                 pixel_dist = self._calculate_edge_distance(name, edge_reference_points)
             else:
                 # Fall back to MediaPipe measurements
+                min_conf = self.MIN_LANDMARK_CONFIDENCE
                 if len(points) == 2:
                     p1_name, p2_name = points
                     p1 = get_landmark_val(p1_name)
                     p2 = get_landmark_val(p2_name)
                     if p1 is not None and p2 is not None:
+                        if len(p1) > 2 and len(p2) > 2:
+                            if p1[2] < min_conf or p2[2] < min_conf:
+                                continue
                         if name == 'shoulder_width':
                             pixel_dist = abs(p2[0] - p1[0])
                         else:
@@ -292,6 +298,9 @@ class MeasurementEngine:
                     p2 = get_landmark_val(p2_name)
                     p3 = get_landmark_val(p3_name)
                     if p1 is not None and p2 is not None and p3 is not None:
+                        if len(p1) > 2 and len(p2) > 2 and len(p3) > 2:
+                            if p1[2] < min_conf or p2[2] < min_conf or p3[2] < min_conf:
+                                continue
                         pixel_dist = np.linalg.norm(p1[:2] - p2[:2]) + np.linalg.norm(p2[:2] - p3[:2])
                     else:
                         continue
@@ -394,11 +403,15 @@ class MeasurementEngine:
             
             # Fall back to MediaPipe for skeletal measurements (all 33 landmarks)
             if measurement_value is None:
+                min_conf = self.MIN_LANDMARK_CONFIDENCE
                 if len(points) == 2:
                     p1_name, p2_name = points
                     p1 = get_landmark_val(p1_name)
                     p2 = get_landmark_val(p2_name)
                     if p1 is not None and p2 is not None:
+                        if len(p1) > 2 and len(p2) > 2:
+                            if p1[2] < min_conf or p2[2] < min_conf:
+                                continue
                         # OpenCV distance calculation
                         if name == 'shoulder_width':
                             pixel_dist = abs(p2[0] - p1[0])
@@ -414,6 +427,9 @@ class MeasurementEngine:
                     p2 = get_landmark_val(p2_name)
                     p3 = get_landmark_val(p3_name)
                     if p1 is not None and p2 is not None and p3 is not None:
+                        if len(p1) > 2 and len(p2) > 2 and len(p3) > 2:
+                            if p1[2] < min_conf or p2[2] < min_conf or p3[2] < min_conf:
+                                continue
                         # OpenCV distance calculation (sum of segments)
                         pixel_dist = np.linalg.norm(p1[:2] - p2[:2]) + np.linalg.norm(p2[:2] - p3[:2])
                         
@@ -619,10 +635,15 @@ class MeasurementEngine:
             'arm_span': ('left_wrist', 'right_wrist'),
         }
         
+        min_conf = self.MIN_LANDMARK_CONFIDENCE
         for name, (p1_name, p2_name) in shoulder_measurement_pairs.items():
             if p1_name in landmark_dict and p2_name in landmark_dict:
                 p1 = landmark_dict[p1_name]
                 p2 = landmark_dict[p2_name]
+                
+                if len(p1) > 2 and len(p2) > 2:
+                    if p1[2] < min_conf or p2[2] < min_conf:
+                        continue
                 
                 if name == 'shoulder_width':
                     pixel_dist = abs(p2[0] - p1[0])

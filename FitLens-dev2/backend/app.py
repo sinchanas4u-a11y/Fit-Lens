@@ -508,25 +508,19 @@ def validate_person_count():
             return jsonify({'success': False, 'error': 'No person detected in the image. Please upload a valid image containing one person.'}), 400
             
         # Cropped body check
-        # Check if ankles or nose are cropped (too close to boundaries or visibility < 0.5)
-        critical_indices = [0, 11, 12, 23, 24, 27, 28]
+        # Check if ankles or nose are cropped (too close to boundaries)
         nose = landmarks[0]
         left_ankle = landmarks[27]
         right_ankle = landmarks[28]
         
         cropped = False
-        if left_ankle[1] > h_orig * 0.98 or right_ankle[1] > h_orig * 0.98:
+        # Flag as cropped only if BOTH ankles are beyond relaxed threshold (0.995)
+        if left_ankle[1] > h_orig * 0.995 and right_ankle[1] > h_orig * 0.995:
             cropped = True
-        elif nose[1] < h_orig * 0.02:
+        # Relax nose boundary check (0.005)
+        elif nose[1] < h_orig * 0.005:
             cropped = True
             
-        # Also check visibility of critical landmarks
-        for idx in critical_indices:
-            lm = landmarks[idx]
-            if len(lm) >= 3 and lm[2] < 0.5:
-                cropped = True
-                break
-                
         if cropped:
             return jsonify({'success': False, 'error': 'Cropped body detected. Please ensure your entire body (from head to toe) is visible in the photo.'}), 400
             
@@ -970,8 +964,18 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
             )
             smpl_success = bool(smpl_result.get('success'))
             if smpl_success:
-                smpl_m = smpl_result.get('measurements', {}) or {}
-                smpl_fit_info = smpl_result.get('fit', {}) or {}
+                # Check mean 2D reprojection error for pose quality validation
+                reproj_err = smpl_result.get('reprojection_error', {}) or {}
+                mean_px = reproj_err.get('mean_px', 0.0)
+                if mean_px > 300.0:
+                    print(f"⚠ SMPL pose validation failed: mean 2D reprojection error ({mean_px:.1f} px) is above 300px threshold. Disabling unreliable SMPL measurements.")
+                    smpl_success = False
+                    smpl_error = f"Pose is unreliable: mean reprojection error ({mean_px:.1f}px) exceeds 300px"
+                    smpl_m = {}
+                    smpl_fit_info = {}
+                else:
+                    smpl_m = smpl_result.get('measurements', {}) or {}
+                    smpl_fit_info = smpl_result.get('fit', {}) or {}
             else:
                 smpl_error = smpl_result.get('error')
 

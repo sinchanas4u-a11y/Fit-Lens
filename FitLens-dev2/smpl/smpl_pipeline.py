@@ -216,9 +216,10 @@ def run_smpl_pipeline(
                 print(f"  {k:30s}: {v} cm")
 
         # Validation: project 3D joints back to 2D and log alignment error
+        reprojection_error = {}
         try:
             from smpl.multiview_reconstructor import validate_pose_projection
-            validate_pose_projection(
+            reprojection_error = validate_pose_projection(
                 estimator, fitted_betas, fitted_pose,
                 landmarks_2d, image_width, image_height, user_height_cm,
             )
@@ -232,6 +233,7 @@ def run_smpl_pipeline(
             'theta':        fitted_pose.tolist() if fitted_pose is not None else np.zeros(72).tolist(),
             'mesh_data':    mesh_data,
             'fit':          fit_result,
+            'reprojection_error': reprojection_error,
             'error':        None,
         }
 
@@ -356,9 +358,10 @@ def run_multiview_smpl_pipeline(
                 print(f"  {mk:30s}: {mv} cm")
 
         # Validation: project 3D joints back to 2D and log alignment error
+        reprojection_error = {}
         try:
             from smpl.multiview_reconstructor import validate_pose_projection
-            validate_pose_projection(
+            reprojection_error = validate_pose_projection(
                 estimator, fitted_betas, fitted_pose,
                 front_landmarks_2d, front_image_width, front_image_height,
                 user_height_cm,
@@ -374,6 +377,7 @@ def run_multiview_smpl_pipeline(
             'mesh_data':          mesh_data,
             'fit':                fit_result,
             'silhouette_targets': silhouette_targets,
+            'reprojection_error': reprojection_error,
             'error':              None,
         }
 
