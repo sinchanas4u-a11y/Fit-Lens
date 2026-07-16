@@ -222,6 +222,7 @@ const UploadMode = () => {
       setVerificationError(null);
       setVerificationIssues({ front: [], side: [] }); // Clear issues on new upload
       setError(null); // Clear validation/person count errors on new upload
+      setResults(null); // Clear previous results on new photo upload
       const reader = new FileReader();
       reader.onloadend = () => {
         setPreview(reader.result);

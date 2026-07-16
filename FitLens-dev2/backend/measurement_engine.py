@@ -231,12 +231,6 @@ class MeasurementEngine:
         
         measurements = {}
         
-        # Auto-calculate scale factor if user height provided
-        if user_height_cm and edge_reference_points and 'height_px' in edge_reference_points:
-            scale_factor = self.calculate_scale_factor_from_height(
-                edge_reference_points['height_px'], user_height_cm
-            )
-        
         # Get landmark dictionary for joint-based measurements
         landmark_dict = self._landmarks_to_dict(landmarks) if landmarks is not None else {}
         
@@ -346,12 +340,6 @@ class MeasurementEngine:
         
         measurements = {}
         
-        # Auto-calculate scale factor if user height provided
-        if user_height_cm and edge_reference_points and 'height_px' in edge_reference_points:
-            scale_factor = self.calculate_scale_factor_from_height(
-                edge_reference_points['height_px'], user_height_cm
-            )
-        
         landmark_dict = self._landmarks_to_dict(landmarks) if landmarks is not None else {}
         
         # Resolve side-agnostic names like 'shoulder', 'hip', 'knee', 'ankle' dynamically to left/right versions
@@ -442,11 +430,12 @@ class MeasurementEngine:
                         source = "MediaPipe Landmarks (33 points)"
             
             if measurement_value is not None:
-                measurements[name] = (measurement_value, confidence, source)
+                measurements[name] = (measurement_value, confidence, source, pixel_dist)
         
         # Override full_height with user_height_cm if provided to avoid 2-3cm bias
         if user_height_cm and float(user_height_cm) > 0:
-            measurements['full_height'] = (float(user_height_cm), 1.0, 'User Input')
+            old_px = measurements.get('full_height')[3] if 'full_height' in measurements and len(measurements['full_height']) >= 4 else 0.0
+            measurements['full_height'] = (float(user_height_cm), 1.0, 'User Input', old_px)
                 
         return measurements
     
@@ -659,7 +648,7 @@ class MeasurementEngine:
                     confidence = (p1[2] + p2[2]) / 2
                     source = 'MediaPipe'
                 
-                measurements[name] = (cm_dist, min(confidence, 1.0), source)
+                measurements[name] = (cm_dist, min(confidence, 1.0), source, pixel_dist)
         
         return measurements
     

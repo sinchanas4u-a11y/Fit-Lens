@@ -636,9 +636,12 @@ def handle_process_selection(data):
                     )
                     formatted = {}
                     for name, data in raw.items():
-                        if isinstance(data, tuple) and len(data) == 3:
-                            cm_value, confidence, source = data
-                            px_value = cm_value / scale_factor if scale_factor and scale_factor > 0 else 0
+                        if isinstance(data, tuple) and len(data) >= 3:
+                            if len(data) >= 4:
+                                cm_value, confidence, source, px_value = data
+                            else:
+                                cm_value, confidence, source = data
+                                px_value = cm_value / scale_factor if scale_factor and scale_factor > 0 else 0
                             formatted[name] = {
                                 'value_cm': round(float(cm_value or 0), 2),
                                 'value_px': round(float(px_value or 0), 2),
@@ -799,6 +802,14 @@ def run_gender_detection(image):
 
 def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success, effective_height_cm=0.0):
     """Merge MediaPipe and SMPL measurements with graceful fallback behavior."""
+    print(f"[DEBUG] _build_smpl_merged_measurements: smpl_success={smpl_success}, effective_height_cm={effective_height_cm}")
+    if isinstance(mp_measurements, dict):
+        print(f"[DEBUG]   mp_measurements keys={list(mp_measurements.keys())}")
+        for k in ['arm_length', 'leg_length', 'shoulder_width']:
+            if k in mp_measurements:
+                print(f"[DEBUG]     {k}: {mp_measurements[k]}")
+    if isinstance(smpl_m, dict):
+        print(f"[DEBUG]   smpl_m keys={list(smpl_m.keys())}")
 
     def _mp_entry(name):
         return mp_measurements.get(name, {}) if isinstance(mp_measurements, dict) else {}
@@ -1233,9 +1244,12 @@ def compute_measurements(image, landmarks, scale_factor, view_name):
 
     formatted = {}
     for name, data in raw.items():
-        if isinstance(data, tuple) and len(data) == 3:
-            cm_value, confidence, source = data
-            px_value = cm_value / scale_factor if scale_factor and scale_factor > 0 else 0
+        if isinstance(data, tuple) and len(data) >= 3:
+            if len(data) >= 4:
+                cm_value, confidence, source, px_value = data
+            else:
+                cm_value, confidence, source = data
+                px_value = cm_value / scale_factor if scale_factor and scale_factor > 0 else 0
             formatted[name] = {
                 'value_cm': round(float(cm_value or 0), 2),
                 'value_px': round(float(px_value or 0), 2),
@@ -2425,7 +2439,7 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
 
         if measurements:
             for name, m_data in measurements.items():
-                if isinstance(m_data, tuple) and len(m_data) == 3:
+                if isinstance(m_data, tuple) and len(m_data) >= 3:
                      val = m_data[0] # cm value
 
                      # VALIDATE measurements before passing to SMPL

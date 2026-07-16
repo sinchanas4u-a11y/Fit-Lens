@@ -148,6 +148,15 @@ def run_gender_detection(image):
 
 
 def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success):
+    print(f"[DEBUG] _build_smpl_merged_measurements: smpl_success={smpl_success}")
+    if isinstance(mp_measurements, dict):
+        print(f"[DEBUG]   mp_measurements keys={list(mp_measurements.keys())}")
+        for k in ['arm_length', 'leg_length', 'shoulder_width']:
+            if k in mp_measurements:
+                print(f"[DEBUG]     {k}: {mp_measurements[k]}")
+    if isinstance(smpl_m, dict):
+        print(f"[DEBUG]   smpl_m keys={list(smpl_m.keys())}")
+
     def _mp_entry(name):
         return mp_measurements.get(name, {}) if isinstance(mp_measurements, dict) else {}
 
@@ -1013,16 +1022,25 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
         measurements = measurement_engine.calculate_measurements_with_confidence(
             landmarks, scale_factor, view, edge_reference_points=edge_reference_points, user_height_cm=effective_height_cm
         )
+        print(f"DEBUG hip px: {landmarks[23][:2]}")
+        print(f"DEBUG knee px: {landmarks[25][:2]}")
+        print(f"DEBUG ankle px: {landmarks[27][:2]}")
+        hip_knee = np.linalg.norm(landmarks[23][:2] - landmarks[25][:2])
+        knee_ankle = np.linalg.norm(landmarks[25][:2] - landmarks[27][:2])
+        print(f"DEBUG hip-knee dist: {hip_knee:.1f} px")
+        print(f"DEBUG knee-ankle dist: {knee_ankle:.1f} px")
+        
         
         print(f"Measurements calculated: {len(measurements)} measurements")
         
         # Build MediaPipe measurement payload first, then merge with SMPL.
         mp_measurements = {}
         for name, val in measurements.items():
-            cm_value, confidence, source = val
-            
-            # Calculate pixel distance
-            pixel_distance = cm_value / scale_factor if scale_factor > 0 else 0
+            if len(val) >= 4:
+                cm_value, confidence, source, pixel_distance = val
+            else:
+                cm_value, confidence, source = val
+                pixel_distance = cm_value / scale_factor if scale_factor > 0 else 0
             
             try:
                 cm = float(cm_value) if cm_value is not None else 0.0
