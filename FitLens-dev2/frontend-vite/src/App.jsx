@@ -6,7 +6,8 @@ function App() {
   return (
     <div className="App">
       <header className="App-header">
-        <h1>Body Measurement System</h1>
+        <h1>FitLens AI 📏</h1>
+        <h2>Body Measurement System</h2>
         <p>YOLOv8 Segmentation + MediaPipe Landmarks</p>
       </header>
 
@@ -15,7 +16,7 @@ function App() {
       </main>
 
       <footer className="App-footer">
-        <p>Powered by YOLOv8 and MediaPipe</p>
+        <p></p>
       </footer>
     </div>
   )
