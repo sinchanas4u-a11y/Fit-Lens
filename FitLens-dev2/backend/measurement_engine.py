@@ -269,6 +269,7 @@ class MeasurementEngine:
         # Calculate each measurement using appropriate source
         for name, points in self.measurements.get(view, {}).items():
             # Fix 1 — Torso: vertical Y distance only (eliminates diagonal overcounting)
+            # Subtract pelvis height (scaled to individual hip width) to measure shoulder-to-waist instead of shoulder-to-hip-joint
             if name == 'torso_length' and view == 'front':
                 ls = get_landmark_val('left_shoulder')
                 rs = get_landmark_val('right_shoulder')
@@ -278,8 +279,14 @@ class MeasurementEngine:
                     shoulder_y = (ls[1] + rs[1]) / 2
                     hip_y = (lh[1] + rh[1]) / 2
                     pixel_dist = abs(hip_y - shoulder_y)
+                    
+                    # Pelvic rise offset (30% of hip width)
+                    hip_width_px = abs(lh[0] - rh[0])
+                    pelvis_height_px = hip_width_px * 0.30
+                    pixel_dist = max(1.0, pixel_dist - pelvis_height_px)
+                    
                     measurement_value = pixel_dist * scale_factor
-                    print(f"[TORSO DEBUG] shoulder_y={shoulder_y:.1f} hip_y={hip_y:.1f} pixel_dist={pixel_dist:.1f} cm={measurement_value:.1f}")
+                    print(f"[TORSO DEBUG] shoulder_y={shoulder_y:.1f} hip_y={hip_y:.1f} hip_width={hip_width_px:.1f} pelvis_h={pelvis_height_px:.1f} pixel_dist={pixel_dist:.1f} cm={measurement_value:.1f}")
                     measurements[name] = measurement_value
                     continue
                 # If landmarks missing, fall through to standard calculation
@@ -466,6 +473,7 @@ class MeasurementEngine:
 
         for name, points in self.measurements.get(view, {}).items():
             # Fix 1 — Torso: vertical Y distance only (eliminates diagonal overcounting)
+            # Subtract pelvis height (scaled to individual hip width) to measure shoulder-to-waist instead of shoulder-to-hip-joint
             if name == 'torso_length' and view == 'front':
                 ls = get_landmark_val('left_shoulder')
                 rs = get_landmark_val('right_shoulder')
@@ -475,10 +483,16 @@ class MeasurementEngine:
                     shoulder_y = (ls[1] + rs[1]) / 2
                     hip_y = (lh[1] + rh[1]) / 2
                     pixel_dist = abs(hip_y - shoulder_y)
+                    
+                    # Pelvic rise offset (30% of hip width)
+                    hip_width_px = abs(lh[0] - rh[0])
+                    pelvis_height_px = hip_width_px * 0.30
+                    pixel_dist = max(1.0, pixel_dist - pelvis_height_px)
+                    
                     measurement_value = pixel_dist * scale_factor
                     confidence = (ls[2] + rs[2] + lh[2] + rh[2]) / 4
                     source = 'MediaPipe Vertical'
-                    print(f"[TORSO DEBUG] shoulder_y={shoulder_y:.1f} hip_y={hip_y:.1f} pixel_dist={pixel_dist:.1f} cm={measurement_value:.1f}")
+                    print(f"[TORSO DEBUG] shoulder_y={shoulder_y:.1f} hip_y={hip_y:.1f} hip_width={hip_width_px:.1f} pelvis_h={pelvis_height_px:.1f} pixel_dist={pixel_dist:.1f} cm={measurement_value:.1f}")
                     measurements[name] = (measurement_value, confidence, source, pixel_dist)
                     continue
                 # If landmarks missing, fall through to standard calculation
