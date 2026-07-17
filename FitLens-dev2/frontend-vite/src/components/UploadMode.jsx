@@ -5,10 +5,165 @@ import ModeSelection from './ModeSelection';
 import ManualLandmarkMarker from './ManualLandmarkMarker';
 import SMPLViewer from './SMPLViewer';
 
+const PoseSilhouette = () => (
+  <div style={{ display: 'flex', gap: '2rem', justifyContent: 'center', margin: '1.5rem 0' }}>
+
+    {/* Front View Silhouette */}
+    <div style={{ textAlign: 'center' }}>
+      <p style={{ fontWeight: 'bold', color: '#4caf50', marginBottom: '0.5rem' }}>✅ Front View</p>
+      <svg width="160" height="320" viewBox="0 0 160 320" xmlns="http://www.w3.org/2000/svg">
+        {/* Background */}
+        <rect width="160" height="320" fill="#f0f8f0" rx="8"/>
+
+        {/* Head */}
+        <ellipse cx="80" cy="40" rx="22" ry="26" fill="#d4a574" stroke="#8B6914" strokeWidth="2"/>
+
+        {/* Neck */}
+        <rect x="72" y="63" width="16" height="15" fill="#d4a574"/>
+
+        {/* Torso */}
+        <path d="M52 78 L108 78 L112 175 L48 175 Z" fill="#4a90d9" stroke="#2c5f8a" strokeWidth="1.5"/>
+
+        {/* Left Arm (slightly away from body) */}
+        <path d="M52 85 L28 130 L22 175" stroke="#d4a574" strokeWidth="14" strokeLinecap="round" fill="none"/>
+
+        {/* Right Arm (slightly away from body) */}
+        <path d="M108 85 L132 130 L138 175" stroke="#d4a574" strokeWidth="14" strokeLinecap="round" fill="none"/>
+
+        {/* Left Hand */}
+        <ellipse cx="21" cy="180" rx="8" ry="10" fill="#d4a574"/>
+
+        {/* Right Hand */}
+        <ellipse cx="139" cy="180" rx="8" ry="10" fill="#d4a574"/>
+
+        {/* Waist/Hip area */}
+        <path d="M48 175 L50 210 L110 210 L112 175 Z" fill="#3a7bd5" stroke="#2c5f8a" strokeWidth="1.5"/>
+
+        {/* Left Leg */}
+        <path d="M60 210 L55 280 L68 280 L72 210 Z" fill="#2c3e6b" stroke="#1a2540" strokeWidth="1.5"/>
+
+        {/* Right Leg */}
+        <path d="M88 210 L92 280 L105 280 L100 210 Z" fill="#2c3e6b" stroke="#1a2540" strokeWidth="1.5"/>
+
+        {/* Left Foot */}
+        <ellipse cx="61" cy="284" rx="12" ry="6" fill="#8B6914"/>
+
+        {/* Right Foot */}
+        <ellipse cx="99" cy="284" rx="12" ry="6" fill="#8B6914"/>
+
+        {/* Shoulder width measurement line */}
+        <line x1="52" y1="78" x2="108" y2="78" stroke="#ff5722" strokeWidth="2" strokeDasharray="4,2"/>
+        <line x1="52" y1="72" x2="52" y2="84" stroke="#ff5722" strokeWidth="2"/>
+        <line x1="108" y1="72" x2="108" y2="84" stroke="#ff5722" strokeWidth="2"/>
+        <text x="80" y="70" textAnchor="middle" fontSize="8" fill="#ff5722">shoulder</text>
+
+        {/* Arm length measurement line */}
+        <line x1="18" y1="85" x2="18" y2="175" stroke="#9c27b0" strokeWidth="2" strokeDasharray="4,2"/>
+        <text x="10" y="135" fontSize="7" fill="#9c27b0" transform="rotate(-90,10,135)">arm</text>
+
+        {/* Leg length measurement line */}
+        <line x1="145" y1="210" x2="145" y2="280" stroke="#ff9800" strokeWidth="2" strokeDasharray="4,2"/>
+        <line x1="140" y1="210" x2="150" y2="210" stroke="#ff9800" strokeWidth="2"/>
+        <line x1="140" y1="280" x2="150" y2="280" stroke="#ff9800" strokeWidth="2"/>
+        <text x="152" y="250" fontSize="7" fill="#ff9800" transform="rotate(90,152,250)">leg</text>
+
+        {/* Torso measurement line */}
+        <line x1="142" y1="78" x2="142" y2="175" stroke="#4caf50" strokeWidth="2" strokeDasharray="4,2"/>
+        <line x1="137" y1="78" x2="147" y2="78" stroke="#4caf50" strokeWidth="2"/>
+        <line x1="137" y1="175" x2="147" y2="175" stroke="#4caf50" strokeWidth="2"/>
+        <text x="150" y="130" fontSize="7" fill="#4caf50" transform="rotate(90,150,130)">torso</text>
+
+        {/* Green checkmark overlay */}
+        <circle cx="140" cy="20" r="12" fill="#4caf50"/>
+        <text x="140" y="25" textAnchor="middle" fontSize="14" fill="white">✓</text>
+      </svg>
+      <p style={{ fontSize: '12px', color: '#666', marginTop: '0.5rem' }}>Face camera directly</p>
+    </div>
+
+    {/* Side View Silhouette */}
+    <div style={{ textAlign: 'center' }}>
+      <p style={{ fontWeight: 'bold', color: '#4caf50', marginBottom: '0.5rem' }}>✅ Side View</p>
+      <svg width="160" height="320" viewBox="0 0 160 320" xmlns="http://www.w3.org/2000/svg">
+        {/* Background */}
+        <rect width="160" height="320" fill="#f0f8f0" rx="8"/>
+
+        {/* Head (side profile) */}
+        <ellipse cx="85" cy="40" rx="20" ry="25" fill="#d4a574" stroke="#8B6914" strokeWidth="2"/>
+
+        {/* Neck */}
+        <rect x="78" y="63" width="12" height="14" fill="#d4a574"/>
+
+        {/* Torso (side view - slightly curved) */}
+        <path d="M65 77 L95 77 L98 175 L62 175 Z" fill="#4a90d9" stroke="#2c5f8a" strokeWidth="1.5"/>
+
+        {/* Arm (side view - visible one arm) */}
+        <path d="M65 85 L50 140 L46 178" stroke="#d4a574" strokeWidth="12" strokeLinecap="round" fill="none"/>
+        <ellipse cx="45" cy="183" rx="7" ry="9" fill="#d4a574"/>
+
+        {/* Hip/Waist */}
+        <path d="M62 175 L63 212 L97 212 L98 175 Z" fill="#3a7bd5" stroke="#2c5f8a" strokeWidth="1.5"/>
+
+        {/* Leg (side view) */}
+        <path d="M72 212 L70 282 L82 282 L84 212 Z" fill="#2c3e6b" stroke="#1a2540" strokeWidth="1.5"/>
+
+        {/* Foot */}
+        <path d="M70 282 L95 282 L95 288 L70 288 Z" fill="#8B6914" rx="3"/>
+
+        {/* Depth measurement line - chest */}
+        <line x1="65" y1="110" x2="95" y2="110" stroke="#e91e63" strokeWidth="2" strokeDasharray="4,2"/>
+        <text x="80" y="107" textAnchor="middle" fontSize="7" fill="#e91e63">chest depth</text>
+
+        {/* Green checkmark */}
+        <circle cx="140" cy="20" r="12" fill="#4caf50"/>
+        <text x="140" y="25" textAnchor="middle" fontSize="14" fill="white">✓</text>
+      </svg>
+      <p style={{ fontSize: '12px', color: '#666', marginTop: '0.5rem' }}>Turn 90° to your right</p>
+    </div>
+
+    {/* Bad pose example */}
+    <div style={{ textAlign: 'center' }}>
+      <p style={{ fontWeight: 'bold', color: '#f44336', marginBottom: '0.5rem' }}>❌ Avoid This</p>
+      <svg width="160" height="320" viewBox="0 0 160 320" xmlns="http://www.w3.org/2000/svg">
+        {/* Background */}
+        <rect width="160" height="320" fill="#fff0f0" rx="8"/>
+
+        {/* Head */}
+        <ellipse cx="80" cy="40" rx="22" ry="26" fill="#d4a574" stroke="#8B6914" strokeWidth="2"/>
+
+        {/* Neck */}
+        <rect x="72" y="63" width="16" height="15" fill="#d4a574"/>
+
+        {/* Baggy torso */}
+        <path d="M40 78 L120 78 L125 185 L35 185 Z" fill="#888" stroke="#555" strokeWidth="1.5"/>
+
+        {/* Arms touching body */}
+        <path d="M40 85 L35 160 L32 185" stroke="#d4a574" strokeWidth="14" strokeLinecap="round" fill="none"/>
+        <path d="M120 85 L125 160 L128 185" stroke="#d4a574" strokeWidth="14" strokeLinecap="round" fill="none"/>
+
+        {/* Baggy pants */}
+        <path d="M35 185 L32 285 L55 285 L80 220 L105 285 L128 285 L125 185 Z" fill="#666" stroke="#444" strokeWidth="1.5"/>
+
+        {/* X marks showing problems */}
+        <text x="80" y="120" textAnchor="middle" fontSize="28" fill="#f44336" opacity="0.7">✗</text>
+
+        {/* Labels */}
+        <text x="80" y="300" textAnchor="middle" fontSize="8" fill="#f44336">Baggy clothes</text>
+        <text x="80" y="310" textAnchor="middle" fontSize="8" fill="#f44336">Arms touching body</text>
+
+        {/* Red X overlay */}
+        <circle cx="140" cy="20" r="12" fill="#f44336"/>
+        <text x="140" y="25" textAnchor="middle" fontSize="14" fill="white">✗</text>
+      </svg>
+      <p style={{ fontSize: '12px', color: '#f44336', marginTop: '0.5rem' }}>Baggy clothes + arms touching</p>
+    </div>
+  </div>
+);
+
 const PhotoGuidelines = ({ onProceed }) => (
   <div className="photo-guidelines">
-    <h2>📸 Photo Guidelines</h2>
-    <p>Please follow these instructions for accurate measurements:</p>
+    <h2>📸 Photo Guidelines for Accurate Measurements</h2>
+    <p>Follow these instructions carefully before uploading your photos:</p>
+    <PoseSilhouette />
 
     <div className="guidelines-grid">
       <div className="guideline-item good">
