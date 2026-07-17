@@ -358,6 +358,8 @@ class MeasurementEngine:
                     else:
                         # Arm is bent — use segmented
                         pixel_dist = segmented_dist
+                    # Scale by 0.90 to convert skeletal joints to tailors' surface landmarks (acromion to wrist bone)
+                    pixel_dist = pixel_dist * 0.90
                     measurement_value = pixel_dist * scale_factor
                     print(f"[ARM DEBUG] segmented={segmented_dist:.1f} direct={direct_dist:.1f} deviation={deviation:.3f} final_px={pixel_dist:.1f} cm={measurement_value:.1f}")
                     measurements[name] = measurement_value
@@ -568,6 +570,8 @@ class MeasurementEngine:
                     else:
                         # Arm is bent — use segmented
                         pixel_dist = segmented_dist
+                    # Scale by 0.90 to convert skeletal joints to tailors' surface landmarks (acromion to wrist bone)
+                    pixel_dist = pixel_dist * 0.90
                     measurement_value = pixel_dist * scale_factor
                     confidence = (p1[2] + p2[2] + p3[2]) / 3
                     source = 'MediaPipe Geometry'
