@@ -5,6 +5,71 @@ import ModeSelection from './ModeSelection';
 import ManualLandmarkMarker from './ManualLandmarkMarker';
 import SMPLViewer from './SMPLViewer';
 
+const PhotoGuidelines = ({ onProceed }) => (
+  <div className="photo-guidelines">
+    <h2>📸 Photo Guidelines</h2>
+    <p>Please follow these instructions for accurate measurements:</p>
+
+    <div className="guidelines-grid">
+      <div className="guideline-item good">
+        <span className="icon">👕</span>
+        <strong>Wear fitted clothing</strong>
+        <p>Tight-fitting clothes (e.g. leggings, fitted t-shirt). Avoid loose, baggy, or layered clothing.</p>
+      </div>
+      <div className="guideline-item good">
+        <span className="icon">📏</span>
+        <strong>Stand 1.5–2 metres away</strong>
+        <p>Your full body must be visible from head to toe with space around the edges.</p>
+      </div>
+      <div className="guideline-item good">
+        <span className="icon">🧍</span>
+        <strong>Stand straight, arms slightly out</strong>
+        <p>Stand upright facing the camera. Keep arms slightly away from your body (A-pose).</p>
+      </div>
+      <div className="guideline-item good">
+        <span className="icon">💡</span>
+        <strong>Good lighting</strong>
+        <p>Ensure the room is well-lit. Avoid strong backlighting or shadows on your body.</p>
+      </div>
+      <div className="guideline-item good">
+        <span className="icon">📷</span>
+        <strong>Camera at chest height</strong>
+        <p>Place the camera at chest level, not from above or below.</p>
+      </div>
+      <div className="guideline-item good">
+        <span className="icon">🧱</span>
+        <strong>Plain background</strong>
+        <p>Stand against a plain, single-colour wall for best segmentation accuracy.</p>
+      </div>
+      <div className="guideline-item bad">
+        <span className="icon">❌</span>
+        <strong>Avoid loose clothing</strong>
+        <p>Baggy clothes hide your body shape and reduce measurement accuracy significantly.</p>
+      </div>
+      <div className="guideline-item bad">
+        <span className="icon">❌</span>
+        <strong>Avoid dark/busy backgrounds</strong>
+        <p>Cluttered or dark backgrounds make it harder to detect your body outline.</p>
+      </div>
+    </div>
+
+    <div className="guidelines-example">
+      <div className="example good-example">
+        <span>✅ Good pose</span>
+        <p>Full body visible, arms slightly away, plain background, fitted clothes</p>
+      </div>
+      <div className="example bad-example">
+        <span>❌ Bad pose</span>
+        <p>Baggy clothes, arms touching body, cluttered background, partial body</p>
+      </div>
+    </div>
+
+    <button className="proceed-btn" onClick={onProceed}>
+      ✓ I Understand — Proceed to Upload
+    </button>
+  </div>
+);
+
 const UploadMode = () => {
   const [frontImage, setFrontImage] = useState(null);
   const [sideImage, setSideImage] = useState(null);
@@ -41,6 +106,7 @@ const UploadMode = () => {
   const [isValidatingSide, setIsValidatingSide] = useState(false);
   const [isFrontValidated, setIsFrontValidated] = useState(false);
   const [isSideValidated, setIsSideValidated] = useState(false);
+  const [guidelinesAccepted, setGuidelinesAccepted] = useState(false);
 
   const validateImage = async (file, view, fileInput) => {
     if (view === 'front') {
@@ -532,6 +598,7 @@ const UploadMode = () => {
     setIsValidatingSide(false);
     setIsFrontValidated(false);
     setIsSideValidated(false);
+    setGuidelinesAccepted(false);
   };
 
   const downloadReport = async (format) => {
@@ -597,7 +664,12 @@ const UploadMode = () => {
       )}
 
       {!results ? (
-        <div className="upload-section">
+        <>
+          {!guidelinesAccepted && (
+            <PhotoGuidelines onProceed={() => setGuidelinesAccepted(true)} />
+          )}
+          {guidelinesAccepted && (
+            <div className="upload-section">
           {/* Image Upload Section */}
           <div className="upload-grid">
             {/* Front Image */}
@@ -784,7 +856,9 @@ const UploadMode = () => {
               {processing ? 'Processing...' : 'Process Images'}
             </button>
           )}
-        </div>
+            </div>
+          )}
+        </>
       ) : (
         <div className="results-section">
           <h2>
