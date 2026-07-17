@@ -1063,6 +1063,21 @@ class LandmarkDetector:
                 xs = np.where(row > 0)[0]
                 if xs.size == 0:
                     return (0.0, 0.0), (0.0, 0.0), 0
+                
+                # Constrain search range to torso region to exclude arms if landmarks are available
+                if mediapipe_landmarks is not None and len(mediapipe_landmarks) > 24:
+                    rs_x = mediapipe_landmarks[12][0]
+                    ls_x = mediapipe_landmarks[11][0]
+                    rh_x = mediapipe_landmarks[24][0]
+                    lh_x = mediapipe_landmarks[23][0]
+                    
+                    left_limit = min(rs_x, rh_x) - 40
+                    right_limit = max(ls_x, lh_x) + 40
+                    
+                    xs = xs[(xs >= left_limit) & (xs <= right_limit)]
+                    if xs.size == 0:
+                        return (0.0, 0.0), (0.0, 0.0), 0
+
                 left_x = int(xs.min())
                 right_x = int(xs.max())
                 span = right_x - left_x

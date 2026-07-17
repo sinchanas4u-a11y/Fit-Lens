@@ -205,7 +205,8 @@ class MeasurementEngine:
         view: str = 'front',
         refined_shoulders: Optional[Dict] = None,
         edge_reference_points: Optional[Dict] = None,
-        user_height_cm: Optional[float] = None
+        user_height_cm: Optional[float] = None,
+        mask: Optional[np.ndarray] = None
     ) -> Dict[str, float]:
         """
         Calculate measurements from landmarks and/or edge reference points.
@@ -222,6 +223,7 @@ class MeasurementEngine:
             refined_shoulders: Optional refined shoulder landmarks
             edge_reference_points: Edge points from Canny + findContours on mask
             user_height_cm: User's actual height for automatic scale calibration
+            mask: Optional image mask for refined edge detection
             
         Returns:
             Dictionary of measurements in cm
@@ -266,6 +268,94 @@ class MeasurementEngine:
 
         # Calculate each measurement using appropriate source
         for name, points in self.measurements.get(view, {}).items():
+            # Fix 1 — Torso: vertical Y distance only (eliminates diagonal overcounting)
+            if name == 'torso_length' and view == 'front':
+                ls = get_landmark_val('left_shoulder')
+                rs = get_landmark_val('right_shoulder')
+                lh = get_landmark_val('left_hip')
+                rh = get_landmark_val('right_hip')
+                if ls is not None and rs is not None and lh is not None and rh is not None:
+                    shoulder_y = (ls[1] + rs[1]) / 2
+                    hip_y = (lh[1] + rh[1]) / 2
+                    pixel_dist = abs(hip_y - shoulder_y)
+                    measurement_value = pixel_dist * scale_factor
+                    print(f"[TORSO DEBUG] shoulder_y={shoulder_y:.1f} hip_y={hip_y:.1f} pixel_dist={pixel_dist:.1f} cm={measurement_value:.1f}")
+                    measurements[name] = measurement_value
+                    continue
+                # If landmarks missing, fall through to standard calculation
+
+            # Fix 2 — Shoulder: shoulder width measurement to correctly measure outer shoulder width (acromion to acromion)
+            if name == 'shoulder_width' and view == 'front':
+                ls = get_landmark_val('left_shoulder')   # landmark 11
+                rs = get_landmark_val('right_shoulder')  # landmark 12
+                le = get_landmark_val('left_elbow')      # landmark 13
+                re = get_landmark_val('right_elbow')     # landmark 14
+
+                if mask is not None and ls is not None and rs is not None and le is not None and re is not None:
+                    shoulder_y = int((ls[1] + rs[1]) / 2)
+                    h, w = mask.shape[:2]
+                    shoulder_y = max(0, min(shoulder_y, h-1))
+
+                    # Handle both float (0.0-1.0) and uint8 (0-255) masks:
+                    mask_threshold = 0.5 if mask.max() <= 1.0 else 127
+                    row_pixels = np.where(mask[shoulder_y] > mask_threshold)[0]
+
+                    # Filter pixels to be within a proportion-scaled margin of the shoulder landmarks
+                    # to capture the acromion outer width (deltoid) but exclude the hanging arms.
+                    margin = int(0.08 * abs(ls[0] - rs[0]))
+                    shoulder_pixels = row_pixels[(row_pixels > rs[0] - margin) & (row_pixels < ls[0] + margin)]
+
+                    print(f"[SHOULDER DEBUG] mask dtype={mask.dtype} max={mask.max():.3f} rs_x={rs[0]:.1f} ls_x={ls[0]:.1f} margin={margin} y={shoulder_y} total_row_white={len(row_pixels)} filtered_white={len(shoulder_pixels)}")
+
+                    if len(shoulder_pixels) >= 2:
+                        shoulder_px = shoulder_pixels[-1] - shoulder_pixels[0]
+                        measurement_value = shoulder_px * scale_factor
+                        measurements[name] = measurement_value
+                        continue
+
+                # Fallback to MediaPipe horizontal distance if mask not available
+                if ls is not None and rs is not None:
+                    shoulder_px = abs(ls[0] - rs[0])
+                    measurement_value = shoulder_px * scale_factor
+                    measurements[name] = measurement_value
+                    continue
+
+            # Fix 3 — Leg: add hip-width-scaled offset (scales to THIS person's body, not population average)
+            if name == 'leg_length' and view == 'front':
+                p1 = get_landmark_val('left_hip')       # landmark 23
+                p2 = get_landmark_val('left_knee')      # landmark 25
+                p3 = get_landmark_val('left_ankle')     # landmark 27
+                rh = get_landmark_val('right_hip')      # landmark 24
+                if p1 is not None and p2 is not None and p3 is not None and rh is not None:
+                    segmented_dist = np.linalg.norm(p1[:2]-p2[:2]) + np.linalg.norm(p2[:2]-p3[:2])
+                    hip_width_px = abs(p1[0] - rh[0])
+                    hip_offset_px = hip_width_px * 0.30  # hip joint sits ~30% of hip_width below waist
+                    pixel_dist = segmented_dist + hip_offset_px
+                    measurement_value = pixel_dist * scale_factor
+                    print(f"[LEG DEBUG] segmented={segmented_dist:.1f} hip_width={hip_width_px:.1f} hip_offset={hip_offset_px:.1f} final_px={pixel_dist:.1f} cm={measurement_value:.1f}")
+                    measurements[name] = measurement_value
+                    continue
+
+            # Fix 4 — Arm: compare direct vs segmented distance, use direct if arm is straight
+            if name == 'arm_length' and view == 'front':
+                p1 = get_landmark_val('left_shoulder')  # landmark 11
+                p2 = get_landmark_val('left_elbow')     # landmark 13
+                p3 = get_landmark_val('left_wrist')     # landmark 15
+                if p1 is not None and p2 is not None and p3 is not None:
+                    segmented_dist = np.linalg.norm(p1[:2]-p2[:2]) + np.linalg.norm(p2[:2]-p3[:2])
+                    direct_dist = np.linalg.norm(p1[:2] - p3[:2])
+                    deviation = abs(segmented_dist - direct_dist) / direct_dist
+                    if deviation < 0.08:
+                        # Arm is straight — use direct
+                        pixel_dist = direct_dist
+                    else:
+                        # Arm is bent — use segmented
+                        pixel_dist = segmented_dist
+                    measurement_value = pixel_dist * scale_factor
+                    print(f"[ARM DEBUG] segmented={segmented_dist:.1f} direct={direct_dist:.1f} deviation={deviation:.3f} final_px={pixel_dist:.1f} cm={measurement_value:.1f}")
+                    measurements[name] = measurement_value
+                    continue
+
             # Use segmentation edges if available for edge-based measurements
             if name in self.edge_based_measurements and edge_reference_points and edge_reference_points.get('is_valid'):
                 pixel_dist = self._calculate_edge_distance(name, edge_reference_points)
@@ -314,7 +404,8 @@ class MeasurementEngine:
         view: str = 'front',
         refined_shoulders: Optional[Dict] = None,
         edge_reference_points: Optional[Dict] = None,
-        user_height_cm: Optional[float] = None
+        user_height_cm: Optional[float] = None,
+        mask: Optional[np.ndarray] = None
     ) -> Dict[str, Tuple[float, float, str]]:
         """
         Calculate measurements with confidence scores using hybrid approach.
@@ -331,6 +422,7 @@ class MeasurementEngine:
             refined_shoulders: Optional refined shoulders
             edge_reference_points: Edge points from Canny + findContours
             user_height_cm: User's actual height for auto-scaling
+            mask: Optional image mask for refined edge detection
         
         Returns:
             Dictionary with (value_cm, confidence, source)
@@ -373,6 +465,102 @@ class MeasurementEngine:
             return None
 
         for name, points in self.measurements.get(view, {}).items():
+            # Fix 1 — Torso: vertical Y distance only (eliminates diagonal overcounting)
+            if name == 'torso_length' and view == 'front':
+                ls = get_landmark_val('left_shoulder')
+                rs = get_landmark_val('right_shoulder')
+                lh = get_landmark_val('left_hip')
+                rh = get_landmark_val('right_hip')
+                if ls is not None and rs is not None and lh is not None and rh is not None:
+                    shoulder_y = (ls[1] + rs[1]) / 2
+                    hip_y = (lh[1] + rh[1]) / 2
+                    pixel_dist = abs(hip_y - shoulder_y)
+                    measurement_value = pixel_dist * scale_factor
+                    confidence = (ls[2] + rs[2] + lh[2] + rh[2]) / 4
+                    source = 'MediaPipe Vertical'
+                    print(f"[TORSO DEBUG] shoulder_y={shoulder_y:.1f} hip_y={hip_y:.1f} pixel_dist={pixel_dist:.1f} cm={measurement_value:.1f}")
+                    measurements[name] = (measurement_value, confidence, source, pixel_dist)
+                    continue
+                # If landmarks missing, fall through to standard calculation
+
+            # Fix 2 — Shoulder: shoulder width measurement to correctly measure outer shoulder width (acromion to acromion)
+            if name == 'shoulder_width' and view == 'front':
+                ls = get_landmark_val('left_shoulder')   # landmark 11
+                rs = get_landmark_val('right_shoulder')  # landmark 12
+                le = get_landmark_val('left_elbow')      # landmark 13
+                re = get_landmark_val('right_elbow')     # landmark 14
+
+                if mask is not None and ls is not None and rs is not None and le is not None and re is not None:
+                    shoulder_y = int((ls[1] + rs[1]) / 2)
+                    h, w = mask.shape[:2]
+                    shoulder_y = max(0, min(shoulder_y, h-1))
+
+                    # Handle both float (0.0-1.0) and uint8 (0-255) masks:
+                    mask_threshold = 0.5 if mask.max() <= 1.0 else 127
+                    row_pixels = np.where(mask[shoulder_y] > mask_threshold)[0]
+
+                    # Filter pixels to be within a proportion-scaled margin of the shoulder landmarks
+                    # to capture the acromion outer width (deltoid) but exclude the hanging arms.
+                    margin = int(0.08 * abs(ls[0] - rs[0]))
+                    shoulder_pixels = row_pixels[(row_pixels > rs[0] - margin) & (row_pixels < ls[0] + margin)]
+
+                    print(f"[SHOULDER DEBUG] mask dtype={mask.dtype} max={mask.max():.3f} rs_x={rs[0]:.1f} ls_x={ls[0]:.1f} margin={margin} y={shoulder_y} total_row_white={len(row_pixels)} filtered_white={len(shoulder_pixels)}")
+
+                    if len(shoulder_pixels) >= 2:
+                        shoulder_px = shoulder_pixels[-1] - shoulder_pixels[0]
+                        measurement_value = shoulder_px * scale_factor
+                        confidence = (ls[2] + rs[2] + le[2] + re[2]) / 4
+                        source = 'Mask Edge (elbow-constrained)'
+                        measurements[name] = (measurement_value, confidence, source, float(shoulder_px))
+                        continue
+
+                # Fallback to MediaPipe horizontal distance if mask not available
+                if ls is not None and rs is not None:
+                    shoulder_px = abs(ls[0] - rs[0])
+                    measurement_value = shoulder_px * scale_factor
+                    measurements[name] = (measurement_value, 0.7, 'MediaPipe Fallback', shoulder_px)
+                    continue
+
+            # Fix 3 — Leg: add hip-width-scaled offset (scales to THIS person's body, not population average)
+            if name == 'leg_length' and view == 'front':
+                p1 = get_landmark_val('left_hip')       # landmark 23
+                p2 = get_landmark_val('left_knee')      # landmark 25
+                p3 = get_landmark_val('left_ankle')     # landmark 27
+                rh = get_landmark_val('right_hip')      # landmark 24
+                if p1 is not None and p2 is not None and p3 is not None and rh is not None:
+                    segmented_dist = np.linalg.norm(p1[:2]-p2[:2]) + np.linalg.norm(p2[:2]-p3[:2])
+                    hip_width_px = abs(p1[0] - rh[0])
+                    hip_offset_px = hip_width_px * 0.30  # hip joint sits ~30% of hip_width below waist
+                    pixel_dist = segmented_dist + hip_offset_px
+                    measurement_value = pixel_dist * scale_factor
+                    confidence = (p1[2] + p2[2] + p3[2]) / 3
+                    source = "MediaPipe Geometry"
+                    print(f"[LEG DEBUG] segmented={segmented_dist:.1f} hip_width={hip_width_px:.1f} hip_offset={hip_offset_px:.1f} final_px={pixel_dist:.1f} cm={measurement_value:.1f}")
+                    measurements[name] = (measurement_value, confidence, source, pixel_dist)
+                    continue
+
+            # Fix 4 — Arm: compare direct vs segmented distance, use direct if arm is straight
+            if name == 'arm_length' and view == 'front':
+                p1 = get_landmark_val('left_shoulder')  # landmark 11
+                p2 = get_landmark_val('left_elbow')     # landmark 13
+                p3 = get_landmark_val('left_wrist')     # landmark 15
+                if p1 is not None and p2 is not None and p3 is not None:
+                    segmented_dist = np.linalg.norm(p1[:2]-p2[:2]) + np.linalg.norm(p2[:2]-p3[:2])
+                    direct_dist = np.linalg.norm(p1[:2] - p3[:2])
+                    deviation = abs(segmented_dist - direct_dist) / direct_dist
+                    if deviation < 0.08:
+                        # Arm is straight — use direct
+                        pixel_dist = direct_dist
+                    else:
+                        # Arm is bent — use segmented
+                        pixel_dist = segmented_dist
+                    measurement_value = pixel_dist * scale_factor
+                    confidence = (p1[2] + p2[2] + p3[2]) / 3
+                    source = 'MediaPipe Geometry'
+                    print(f"[ARM DEBUG] segmented={segmented_dist:.1f} direct={direct_dist:.1f} deviation={deviation:.3f} final_px={pixel_dist:.1f} cm={measurement_value:.1f}")
+                    measurements[name] = (measurement_value, confidence, source, pixel_dist)
+                    continue
+
             measurement_value = None
             confidence = 0.9
             source = "Unknown"
@@ -424,10 +612,23 @@ class MeasurementEngine:
                         # Debug print to confirm 3-point calculation is reached
                         print(f"[DEBUG] 3-point calculation reached for {name}: points={points}, pixel_dist={pixel_dist:.2f}")
                         
-                        # Apply height-based scaling with regression correction
-                        measurement_value = RegressionCorrector.apply(name, pixel_dist, scale_factor)
-                        confidence = (p1[2] + p2[2] + p3[2]) / 3
-                        source = "MediaPipe Landmarks (33 points)"
+                        if name == 'leg_length' and view == 'front':
+                            lh = get_landmark_val('left_hip')
+                            rh = get_landmark_val('right_hip')
+                            if lh is not None and rh is not None:
+                                hip_width_px = abs(lh[0] - rh[0])
+                                hip_offset_px = hip_width_px * 0.30  # hip joint sits ~30% of hip_width below waist
+                                pixel_dist = pixel_dist + hip_offset_px
+                            measurement_value = pixel_dist * scale_factor
+                            confidence = (p1[2] + p2[2] + p3[2]) / 3
+                            source = "MediaPipe Geometry"
+                            measurements[name] = (measurement_value, confidence, source, pixel_dist)
+                            continue
+                        else:
+                            # Apply height-based scaling with regression correction
+                            measurement_value = RegressionCorrector.apply(name, pixel_dist, scale_factor)
+                            confidence = (p1[2] + p2[2] + p3[2]) / 3
+                            source = "MediaPipe Landmarks (33 points)"
             
             if measurement_value is not None:
                 measurements[name] = (measurement_value, confidence, source, pixel_dist)
@@ -438,7 +639,7 @@ class MeasurementEngine:
             measurements['full_height'] = (float(user_height_cm), 1.0, 'User Input', old_px)
                 
         return measurements
-    
+
     def _calculate_edge_distance(self, measurement_name: str, edge_reference_points: Dict) -> float:
         """
         Calculate distance between edge points for a specific measurement.

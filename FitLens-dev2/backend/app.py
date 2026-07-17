@@ -168,19 +168,30 @@ def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success):
         val = _mp_entry(name).get('value_px')
         return val if val is not None else fallback
 
-    chest_width_cm = _mp_cm('chest_width', _mp_cm('chest_circumference'))
-    waist_width_cm = _mp_cm('waist_width', _mp_cm('waist_circumference'))
+    chest_width_cm = _mp_cm('chest_width')
+    waist_width_cm = _mp_cm('waist_width')
     hip_width_cm = _mp_cm('hip_width')
 
+    mp_chest_circ = _mp_cm('chest_circumference')
+    mp_waist_circ = _mp_cm('waist_circumference')
+    mp_hip_circ = _mp_cm('hip_circumference')
+
+    if chest_width_cm is None and mp_chest_circ is not None:
+        chest_width_cm = round(mp_chest_circ / 3.0, 2)
+    if waist_width_cm is None and mp_waist_circ is not None:
+        waist_width_cm = round(mp_waist_circ / 2.8, 2)
+    if hip_width_cm is None and mp_hip_circ is not None:
+        hip_width_cm = round(mp_hip_circ / 3.0, 2)
+
     if smpl_success:
-        chest_circ = smpl_m.get('chest_circumference', chest_width_cm)
-        waist_circ = smpl_m.get('waist_circumference', waist_width_cm)
-        hip_circ = smpl_m.get('hip_circumference', hip_width_cm)
+        chest_circ = smpl_m.get('chest_circumference', mp_chest_circ or (chest_width_cm * 3.0 if chest_width_cm else None))
+        waist_circ = smpl_m.get('waist_circumference', mp_waist_circ or (waist_width_cm * 2.8 if waist_width_cm else None))
+        hip_circ = smpl_m.get('hip_circumference', mp_hip_circ or (hip_width_cm * 3.0 if hip_width_cm else None))
         circ_source = 'SMPL 3D Model'
     else:
-        chest_circ = round(chest_width_cm * 3.0, 2) if chest_width_cm is not None else None
-        waist_circ = round(waist_width_cm * 3.0, 2) if waist_width_cm is not None else None
-        hip_circ = round(hip_width_cm * 3.0, 2) if hip_width_cm is not None else None
+        chest_circ = mp_chest_circ or (round(chest_width_cm * 3.0, 2) if chest_width_cm else None)
+        waist_circ = mp_waist_circ or (round(waist_width_cm * 2.8, 2) if waist_width_cm else None)
+        hip_circ = mp_hip_circ or (round(hip_width_cm * 3.0, 2) if hip_width_cm else None)
         circ_source = 'Estimated'
 
     merged = {
@@ -309,26 +320,10 @@ def consolidate_measurements(front_results, side_results, user_height_cm=None):
     if shoulder:
         merged_meas['shoulder_width'] = shoulder
         
-    # torso_length -> average
-    torso_f = get_meas('torso_length', front_meas)
-    torso_s = get_meas('torso_length', side_meas)
-    if torso_f and torso_s:
-        try:
-            val_f = float(torso_f.get('value_cm', 0))
-            val_s = float(torso_s.get('value_cm', 0))
-            avg_val = round((val_f + val_s) / 2.0, 2)
-            merged_meas['torso_length'] = {
-                'value_cm': avg_val,
-                'value_px': torso_f.get('value_px'),  # fallback to front px
-                'source': 'Average (Front/Side)',
-                'label': 'Torso Length'
-            }
-        except (ValueError, TypeError):
-            merged_meas['torso_length'] = torso_f
-    elif torso_f:
-        merged_meas['torso_length'] = torso_f
-    elif torso_s:
-        merged_meas['torso_length'] = torso_s
+    # torso_length -> front view only (vertical fix applied in measurement engine)
+    torso = get_meas('torso_length', front_meas) or get_meas('torso_length', side_meas)
+    if torso:
+        merged_meas['torso_length'] = torso
         
     # chest_circumference, waist_circumference, hip_circumference -> from SMPL/SMPLify-X (front preferred if both)
     for key in ['chest_circumference', 'waist_circumference', 'hip_circumference']:
@@ -780,8 +775,7 @@ def process_upload():
                         for key in [
                             'chest_circumference',
                             'waist_circumference',
-                            'hip_circumference',
-                            'shoulder_width'
+                            'hip_circumference'
                         ]:
                             val = smplx_meas.get(key)
                             if val is not None:
@@ -801,8 +795,7 @@ def process_upload():
                         for key in [
                             'chest_circumference',
                             'waist_circumference',
-                            'hip_circumference',
-                            'shoulder_width'
+                            'hip_circumference'
                         ]:
                             val = smplx_meas.get(key)
                             if val is not None:
@@ -821,8 +814,7 @@ def process_upload():
                         for key in [
                             'chest_circumference',
                             'waist_circumference',
-                            'hip_circumference',
-                            'shoulder_width'
+                            'hip_circumference'
                         ]:
                             val = smplx_meas.get(key)
                             if val is not None:
@@ -910,6 +902,11 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
         
         # Segment person with YOLOv8
         mask = segmentation_model.segment_person(image, conf_threshold=0.5)
+        # Fix 1 & 4: Ensure mask is not boolean and is a numpy array (None on failure)
+        if mask is not None:
+            if isinstance(mask, bool) or not isinstance(mask, np.ndarray):
+                print(f"[DEBUG] segment_person returned invalid mask: {mask}. Setting mask = None")
+                mask = None
         print(f"Segmentation complete: {mask is not None}")
         
         # Apply mask to get clean image (optional - for visualization)
@@ -969,7 +966,10 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
                 image_width=w,
                 image_height=h,
                 user_height_cm=effective_height_cm,
-                gender=smpl_gender or 'neutral'
+                gender=smpl_gender or 'neutral',
+                view_type=view,
+                front_mask=mask if view == 'front' else None,
+                side_mask=mask if view == 'side' else None
             )
             smpl_success = bool(smpl_result.get('success'))
             if smpl_success:
@@ -1019,8 +1019,18 @@ def process_single_image(image, scale_factor, view, user_height_cm=None, gender=
         arm_test = np.linalg.norm(landmarks[11][:2] - landmarks[13][:2]) + np.linalg.norm(landmarks[13][:2] - landmarks[15][:2])
         print(f"DEBUG arm px (11->13->15) = {arm_test}")
         print(f"DEBUG arm cm = {arm_test * scale_factor}")
+        # Fix 3: Verify mask is a valid numpy array before passing
+        actual_mask = None
+        if mask is not None and not isinstance(mask, bool) and isinstance(mask, np.ndarray):
+            actual_mask = mask
+        else:
+            print(f"[DEBUG] mask before calculate_measurements_with_confidence is invalid: {mask} (type: {type(mask)}). Setting actual_mask = None")
+
         measurements = measurement_engine.calculate_measurements_with_confidence(
-            landmarks, scale_factor, view, edge_reference_points=edge_reference_points, user_height_cm=effective_height_cm
+            landmarks, scale_factor, view,
+            edge_reference_points=edge_reference_points,
+            user_height_cm=effective_height_cm,
+            mask=actual_mask
         )
         print(f"DEBUG hip px: {landmarks[23][:2]}")
         print(f"DEBUG knee px: {landmarks[25][:2]}")
