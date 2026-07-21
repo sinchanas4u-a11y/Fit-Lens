@@ -822,31 +822,30 @@ def _build_smpl_merged_measurements(mp_measurements, smpl_m, smpl_success, effec
         val = _mp_entry(name).get('value_px')
         return val if val is not None else fallback
 
-    chest_width_cm = _mp_cm('chest_width', _mp_cm('chest_circumference'))
-    waist_width_cm = _mp_cm('waist_width', _mp_cm('waist_circumference'))
+    chest_width_cm = _mp_cm('chest_width')
+    waist_width_cm = _mp_cm('waist_width')
     hip_width_cm = _mp_cm('hip_width')
 
+    mp_chest_circ = _mp_cm('chest_circumference')
+    mp_waist_circ = _mp_cm('waist_circumference')
+    mp_hip_circ = _mp_cm('hip_circumference')
+
+    if chest_width_cm is None and mp_chest_circ is not None:
+        chest_width_cm = round(mp_chest_circ / 3.0, 2)
+    if waist_width_cm is None and mp_waist_circ is not None:
+        waist_width_cm = round(mp_waist_circ / 2.8, 2)
+    if hip_width_cm is None and mp_hip_circ is not None:
+        hip_width_cm = round(mp_hip_circ / 3.0, 2)
+
     if smpl_success:
-        chest_circ = smpl_m.get(
-            'chest_circumference', chest_width_cm
-        )
-        waist_circ = smpl_m.get(
-            'waist_circumference', waist_width_cm
-        )
-        hip_circ = smpl_m.get(
-            'hip_circumference', hip_width_cm
-        )
+        chest_circ = smpl_m.get('chest_circumference', mp_chest_circ or (chest_width_cm * 3.0 if chest_width_cm else None))
+        waist_circ = smpl_m.get('waist_circumference', mp_waist_circ or (waist_width_cm * 2.8 if waist_width_cm else None))
+        hip_circ = smpl_m.get('hip_circumference', mp_hip_circ or (hip_width_cm * 3.0 if hip_width_cm else None))
         circ_source = 'SMPL 3D Model'
     else:
-        chest_circ = round(
-            chest_width_cm * 3.0, 2
-        ) if chest_width_cm is not None else None
-        waist_circ = round(
-            waist_width_cm * 3.0, 2
-        ) if waist_width_cm is not None else None
-        hip_circ = round(
-            hip_width_cm * 3.0, 2
-        ) if hip_width_cm is not None else None
+        chest_circ = mp_chest_circ or (round(chest_width_cm * 3.0, 2) if chest_width_cm else None)
+        waist_circ = mp_waist_circ or (round(waist_width_cm * 2.8, 2) if waist_width_cm else None)
+        hip_circ = mp_hip_circ or (round(hip_width_cm * 3.0, 2) if hip_width_cm else None)
         circ_source = 'Estimated'
 
     # ── OVERRIDE with mesh circumference ──────
@@ -2421,10 +2420,14 @@ def process_single_view(image, scale_factor, view_name, user_height_cm=None):
                 scale_factor = 1.0
 
         try:
+            actual_mask = None
+            if mask is not None and not isinstance(mask, bool) and isinstance(mask, np.ndarray):
+                actual_mask = mask
             measurements = measurement_engine.calculate_measurements_with_confidence(
                 landmarks, scale_factor, view_name, 
                 edge_reference_points=edge_reference_points,
-                user_height_cm=effective_height_cm
+                user_height_cm=effective_height_cm,
+                mask=actual_mask
             )
         except Exception as e:
             print(f"⚠ Measurement error: {e}")
