@@ -3754,7 +3754,7 @@ if __name__ == '__main__':
     if SOCKET_IO_ENABLED:
         # Use socketio.run instead of app.run
         print(f"Starting server with SocketIO on http://localhost:5001")
-        socketio.run(app, host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+        socketio.run(app, host='0.0.0.0', port=5001, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
     else:
         # Fallback to standard Flask if SocketIO is missing
         print(f"Starting standard Flask server on http://localhost:5001 (REST only)")
