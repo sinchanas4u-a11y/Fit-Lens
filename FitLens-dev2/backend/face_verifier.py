@@ -228,6 +228,61 @@ class FaceVerifier:
             
         return issues
 
+    def verify_body_clothing(self, img1, img2):
+        """
+        Compares upper-body clothing, lower-body clothing, and body color profiles
+        between front and side view images.
+        """
+        if img1 is None or img2 is None:
+            return {'matched': False, 'similarity': 0.0, 'reason': 'Invalid image data'}
+
+        try:
+            h1, w1 = img1.shape[:2]
+            h2, w2 = img2.shape[:2]
+
+            hsv1 = cv2.cvtColor(img1, cv2.COLOR_BGR2HSV)
+            hsv2 = cv2.cvtColor(img2, cv2.COLOR_BGR2HSV)
+
+            # Torso ROI (upper body: 15% to 55% height, 20% to 80% width)
+            torso1 = hsv1[int(h1*0.15):int(h1*0.55), int(w1*0.20):int(w1*0.80)]
+            torso2 = hsv2[int(h2*0.15):int(h2*0.55), int(w2*0.20):int(w2*0.80)]
+
+            # Legs ROI (lower body: 55% to 88% height, 20% to 80% width)
+            legs1 = hsv1[int(h1*0.55):int(h1*0.88), int(w1*0.20):int(w1*0.80)]
+            legs2 = hsv2[int(h2*0.55):int(h2*0.88), int(w2*0.20):int(w2*0.80)]
+
+            t_hist1 = cv2.calcHist([torso1], [0, 1], None, [24, 32], [0, 180, 0, 256])
+            t_hist2 = cv2.calcHist([torso2], [0, 1], None, [24, 32], [0, 180, 0, 256])
+            cv2.normalize(t_hist1, t_hist1, 0, 1, cv2.NORM_MINMAX)
+            cv2.normalize(t_hist2, t_hist2, 0, 1, cv2.NORM_MINMAX)
+
+            torso_sim = float(cv2.compareHist(t_hist1, t_hist2, cv2.HISTCMP_CORREL))
+
+            l_hist1 = cv2.calcHist([legs1], [0, 1], None, [24, 32], [0, 180, 0, 256])
+            l_hist2 = cv2.calcHist([legs2], [0, 1], None, [24, 32], [0, 180, 0, 256])
+            cv2.normalize(l_hist1, l_hist1, 0, 1, cv2.NORM_MINMAX)
+            cv2.normalize(l_hist2, l_hist2, 0, 1, cv2.NORM_MINMAX)
+
+            legs_sim = float(cv2.compareHist(l_hist1, l_hist2, cv2.HISTCMP_CORREL))
+
+            body_sim = 0.6 * max(0.0, torso_sim) + 0.4 * max(0.0, legs_sim)
+
+            if torso_sim < 0.25 or body_sim < 0.35:
+                return {
+                    'matched': False,
+                    'similarity': max(0.0, body_sim),
+                    'reason': 'Clothing and appearance do not match between front and side photos (Different people detected)'
+                }
+
+            return {
+                'matched': True,
+                'similarity': max(0.0, body_sim),
+                'reason': 'Body & clothing match'
+            }
+        except Exception as e:
+            print(f"Error checking body/clothing match: {e}")
+            return {'matched': True, 'similarity': 0.5, 'reason': str(e)}
+
     def verify_person(self, img1_array, img2_array, threshold=None):
         """
         Verify if two images belong to the same person with quality checks.
@@ -308,7 +363,7 @@ class FaceVerifier:
             if len(faces2) == 0:
                 print("✗ No face detected in Side image")
                 result['issues']['side'].append("Face not detected")
-                if not result['no_face']: # Don't overwrite if front already failed
+                if not result['no_face']:
                     result['no_face'] = True
                     result['face_fail_reason'] = "No face detected in side image"
             elif len(faces2) > 1:
@@ -322,28 +377,45 @@ class FaceVerifier:
                 result['det_scores']['side'] = float(face2.det_score)
                 result['issues']['side'].extend(self.analyze_face_quality(img2_array, face2))
                 
-            # If any face missing, check if we should return "Unable to confidently verify"
+            # Perform Body & Clothing Consistency Matching
+            body_clothing_res = self.verify_body_clothing(img1_array, img2_array)
+            print(f"   👕 Body & Clothing Match: {body_clothing_res['matched']} (Similarity: {body_clothing_res['similarity']:.4f})")
+
+            # Handle Missing Face scenarios with body/clothing verification
             if face1 is None or face2 is None:
                 if face1 is not None and face2 is None:
-                     # Side image failed - might be a profile
-                     result['message'] = "Unable to confidently verify face from side image."
-                     print(f"⚠ {result['message']} (Front face detected, Side face missing)")
-                     
-                     # Allow to pass as fallback for partial faces or strict profiles
-                     result['verified'] = True 
-                     result['warning'] = True
-                     result['fallback_used'] = True
+                    # Side face not detected by face detector. Check clothing & body match!
+                    if not body_clothing_res['matched']:
+                        result['verified'] = False
+                        result['face_fail_reason'] = body_clothing_res['reason']
+                        result['message'] = f"Identity verification failed ({body_clothing_res['reason']})"
+                        print(f"✗ REJECTED: Side face missing and clothing/body mismatch detected")
+                    else:
+                        result['message'] = "Unable to confidently verify face from side image."
+                        result['verified'] = True 
+                        result['warning'] = True
+                        result['fallback_used'] = True
+                        print(f"⚠ {result['message']} (Front face detected, Side face missing, Clothing matched)")
                 else:
-                     result['verified'] = False
-                     result['no_face'] = True
-                     if face1 is None and face2 is None:
-                         result['face_fail_reason'] = "No face detected in either image"
-                     else:
-                         result['face_fail_reason'] = "No face detected in front image"
+                    result['verified'] = False
+                    result['no_face'] = True
+                    if face1 is None and face2 is None:
+                        result['face_fail_reason'] = "No face detected in either image"
+                    else:
+                        result['face_fail_reason'] = "No face detected in front image"
                 
                 return result
-                
-            # Calculate Similarity
+
+            # If clothing/body is a total mismatch (e.g. man in plaid vs woman in red), reject immediately!
+            if not body_clothing_res['matched']:
+                result['verified'] = False
+                result['similarity'] = float(body_clothing_res['similarity'])
+                result['face_fail_reason'] = body_clothing_res['reason']
+                result['message'] = f"Identity verification failed ({body_clothing_res['reason']})"
+                print(f"✗ REJECTED: Severe clothing/appearance mismatch between front and side photos")
+                return result
+
+            # Calculate ArcFace Face Cosine Similarity
             emb1 = face1.embedding
             emb1 = emb1 / (np.linalg.norm(emb1) + 1e-6)
             
@@ -352,7 +424,6 @@ class FaceVerifier:
             
             similarity = self._calculate_cosine_similarity(emb1, emb2)
             
-            # Use custom threshold or default
             thresh = threshold if threshold is not None else self.SAME_PERSON_THRESHOLD
             
             print(f"   Front Confidence: {result['det_scores']['front']:.4f}")

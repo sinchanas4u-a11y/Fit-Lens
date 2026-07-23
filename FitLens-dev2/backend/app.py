@@ -537,9 +537,149 @@ def validate_person_count():
         return jsonify({'success': False, 'error': f'Validation failed: {str(e)}'}), 500
 
 
+def fallback_verify_person(img1, img2):
+    """
+    Fallback identity verification comparing face/upper body features, skin tone,
+    and HSV color histograms when InsightFace is not ready/installed.
+    """
+    try:
+        if img1 is None or img2 is None:
+            return {'verified': False, 'similarity': 0.0, 'face_fail_reason': 'Invalid image data'}
+
+        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+
+        faces1 = face_cascade.detectMultiScale(gray1, 1.1, 4)
+        faces2 = face_cascade.detectMultiScale(gray2, 1.1, 4)
+
+        hsv1 = cv2.cvtColor(img1, cv2.COLOR_BGR2HSV)
+        hsv2 = cv2.cvtColor(img2, cv2.COLOR_BGR2HSV)
+
+        h1, w1 = img1.shape[:2]
+        h2, w2 = img2.shape[:2]
+
+        # Torso ROI (15% to 55% height)
+        torso1 = hsv1[int(h1*0.15):int(h1*0.55), int(w1*0.2):int(w1*0.8)]
+        torso2 = hsv2[int(h2*0.15):int(h2*0.55), int(w2*0.2):int(w2*0.8)]
+
+        # Legs ROI (55% to 88% height)
+        legs1 = hsv1[int(h1*0.55):int(h1*0.88), int(w1*0.2):int(w1*0.8)]
+        legs2 = hsv2[int(h2*0.55):int(h2*0.88), int(w2*0.2):int(w2*0.8)]
+
+        t_hist1 = cv2.calcHist([torso1], [0, 1], None, [24, 32], [0, 180, 0, 256])
+        t_hist2 = cv2.calcHist([torso2], [0, 1], None, [24, 32], [0, 180, 0, 256])
+        cv2.normalize(t_hist1, t_hist1, 0, 1, cv2.NORM_MINMAX)
+        cv2.normalize(t_hist2, t_hist2, 0, 1, cv2.NORM_MINMAX)
+        torso_sim = float(cv2.compareHist(t_hist1, t_hist2, cv2.HISTCMP_CORREL))
+
+        l_hist1 = cv2.calcHist([legs1], [0, 1], None, [24, 32], [0, 180, 0, 256])
+        l_hist2 = cv2.calcHist([legs2], [0, 1], None, [24, 32], [0, 180, 0, 256])
+        cv2.normalize(l_hist1, l_hist1, 0, 1, cv2.NORM_MINMAX)
+        cv2.normalize(l_hist2, l_hist2, 0, 1, cv2.NORM_MINMAX)
+        legs_sim = float(cv2.compareHist(l_hist1, l_hist2, cv2.HISTCMP_CORREL))
+
+        body_sim = 0.6 * max(0.0, torso_sim) + 0.4 * max(0.0, legs_sim)
+
+        face_sim = body_sim
+        if len(faces1) > 0 and len(faces2) > 0:
+            x1, y1, w1_f, h1_f = faces1[0]
+            x2, y2, w2_f, h2_f = faces2[0]
+
+            face1_hsv = hsv1[y1:y1+h1_f, x1:x1+w1_f]
+            face2_hsv = hsv2[y2:y2+h2_f, x2:x2+w2_f]
+
+            f_hist1 = cv2.calcHist([face1_hsv], [0, 1], None, [16, 16], [0, 180, 0, 256])
+            f_hist2 = cv2.calcHist([face2_hsv], [0, 1], None, [16, 16], [0, 180, 0, 256])
+            cv2.normalize(f_hist1, f_hist1, 0, 1, cv2.NORM_MINMAX)
+            cv2.normalize(f_hist2, f_hist2, 0, 1, cv2.NORM_MINMAX)
+
+            face_sim = float(cv2.compareHist(f_hist1, f_hist2, cv2.HISTCMP_CORREL))
+
+        similarity = 0.4 * max(0.0, body_sim) + 0.6 * max(0.0, face_sim)
+        verified = (similarity >= 0.35) and (torso_sim >= 0.25)
+
+        fail_reason = None
+        if not verified:
+            fail_reason = "Face and body features do not match between front and side photos."
+
+        return {
+            'verified': verified,
+            'similarity': float(similarity),
+            'threshold': 0.35,
+            'face_fail_reason': fail_reason,
+            'message': 'Identity successfully verified' if verified else f'Identity verification failed ({fail_reason})',
+            'issues': {'front': [], 'side': []}
+        }
+    except Exception as e:
+        print(f"Fallback verify error: {e}")
+        return {'verified': False, 'similarity': 0.0, 'message': f'Verification error: {e}', 'issues': {'front': [], 'side': []}}
+
+
 @app.route('/api/verify-identity', methods=['POST'])
-def verify_identity_stub():
-    return jsonify({'success': True, 'verified': True}), 200
+def verify_identity():
+    """
+    Verify identity between front and side images.
+    Returns verified: False if images are of different people.
+    """
+    try:
+        data = request.json or {}
+        front_b64 = data.get('front_image', '')
+        side_b64 = data.get('side_image', '')
+
+        if not front_b64 or not side_b64:
+            return jsonify({
+                'success': False,
+                'verified': False,
+                'error': 'Both front and side images are required'
+            }), 400
+
+        front_img = decode_image(front_b64)
+        side_img = decode_image(side_b64)
+
+        if front_img is None or side_img is None:
+            return jsonify({
+                'success': False,
+                'verified': False,
+                'error': 'Invalid image data provided'
+            }), 400
+
+        result = None
+        if face_verifier is not None and getattr(face_verifier, 'is_ready', False):
+            try:
+                result = face_verifier.verify_person(front_img, side_img)
+            except Exception as fv_err:
+                print(f"FaceVerifier error: {fv_err}")
+                result = None
+
+        if result is None:
+            result = fallback_verify_person(front_img, side_img)
+
+        verified = result.get('verified', False)
+        similarity = float(result.get('similarity', 0.0))
+        message = result.get('message', '')
+
+        if not message:
+            if verified:
+                message = "Identity successfully verified"
+            else:
+                fail_reason = result.get('face_fail_reason', 'Front and side photos belong to different people')
+                message = f"Identity verification failed: {fail_reason}"
+
+        return jsonify({
+            'success': True,
+            'verified': verified,
+            'similarity': similarity,
+            'threshold': result.get('threshold', 0.25),
+            'message': message,
+            'issues': result.get('issues', {'front': [], 'side': []})
+        }), 200
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'success': False, 'verified': False, 'error': str(e)}), 500
 
 
 @app.route('/api/process-manual', methods=['POST'])

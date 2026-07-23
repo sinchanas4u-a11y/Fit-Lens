@@ -369,8 +369,12 @@ const UploadMode = () => {
   // Effect to trigger verification when both images are present, or skip if only front is present
   useEffect(() => {
     if (frontImage && sideImage) {
-      if (isFrontValidated && isSideValidated && !isVerified && !isVerifying) {
-        handleIdentityVerification();
+      if (isFrontValidated && isSideValidated) {
+        if (!isVerified && !isVerifying && !verificationError) {
+          handleIdentityVerification();
+        }
+      } else {
+        setIsVerified(false);
       }
     } else if (frontImage && !sideImage) {
       if (isFrontValidated) {
@@ -386,7 +390,6 @@ const UploadMode = () => {
   }, [frontImage, sideImage, isFrontValidated, isSideValidated]);
 
   const handleIdentityVerification = async () => {
-    setIsVerifying(true);
     setIsVerifying(true);
     setVerificationError(null);
     setVerificationIssues({ front: [], side: [] }); // Reset issues
@@ -407,12 +410,13 @@ const UploadMode = () => {
       if (response.data.success && response.data.verified) {
         console.log('✓ Identity verified successfully');
         setIsVerified(true);
-        // Do NOT show issues if verified, as per requirements
+        setVerificationError(null);
         setVerificationIssues({ front: [], side: [] });
       } else {
-        const errorMsg = response.data.message || response.data.error || 'Face verification failed.';
+        const errorMsg = response.data.message || response.data.error || 'Face verification failed: Front and side photos belong to different people.';
         const issues = response.data.issues || { front: [], side: [] };
         console.error('✗ Verification failed:', errorMsg);
+        setIsVerified(false);
         setVerificationError(errorMsg);
         setVerificationIssues(issues);
       }
@@ -424,6 +428,7 @@ const UploadMode = () => {
       if (status === 503) {
         message = 'Face verification service unavailable. Please try again later or continue without a side image.';
       }
+      setIsVerified(false);
       setVerificationError(message);
     } finally {
       setIsVerifying(false);
