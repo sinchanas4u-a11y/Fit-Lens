@@ -231,10 +231,10 @@ class FaceVerifier:
     def verify_body_clothing(self, img1, img2):
         """
         Compares upper-body clothing, lower-body clothing, and body color profiles
-        between front and side view images.
+        between front and side view images with background wall filtering.
         """
         if img1 is None or img2 is None:
-            return {'matched': False, 'similarity': 0.0, 'reason': 'Invalid image data'}
+            return {'matched': True, 'similarity': 0.5, 'reason': 'Invalid image data'}
 
         try:
             h1, w1 = img1.shape[:2]
@@ -243,31 +243,50 @@ class FaceVerifier:
             hsv1 = cv2.cvtColor(img1, cv2.COLOR_BGR2HSV)
             hsv2 = cv2.cvtColor(img2, cv2.COLOR_BGR2HSV)
 
-            # Torso ROI (upper body: 15% to 55% height, 20% to 80% width)
-            torso1 = hsv1[int(h1*0.15):int(h1*0.55), int(w1*0.20):int(w1*0.80)]
-            torso2 = hsv2[int(h2*0.15):int(h2*0.55), int(w2*0.20):int(w2*0.80)]
+            # Torso ROI: front view (25% to 75% width), side view tighter crop (38% to 62% width)
+            torso1 = hsv1[int(h1*0.20):int(h1*0.50), int(w1*0.25):int(w1*0.75)]
+            torso2 = hsv2[int(h2*0.20):int(h2*0.50), int(w2*0.38):int(w2*0.62)]
 
-            # Legs ROI (lower body: 55% to 88% height, 20% to 80% width)
-            legs1 = hsv1[int(h1*0.55):int(h1*0.88), int(w1*0.20):int(w1*0.80)]
-            legs2 = hsv2[int(h2*0.55):int(h2*0.88), int(w2*0.20):int(w2*0.80)]
+            # Legs ROI: front view (25% to 75% width), side view tighter crop (38% to 62% width)
+            legs1 = hsv1[int(h1*0.55):int(h1*0.85), int(w1*0.25):int(w1*0.75)]
+            legs2 = hsv2[int(h2*0.55):int(h2*0.85), int(w2*0.38):int(w2*0.62)]
 
-            t_hist1 = cv2.calcHist([torso1], [0, 1], None, [24, 32], [0, 180, 0, 256])
-            t_hist2 = cv2.calcHist([torso2], [0, 1], None, [24, 32], [0, 180, 0, 256])
-            cv2.normalize(t_hist1, t_hist1, 0, 1, cv2.NORM_MINMAX)
-            cv2.normalize(t_hist2, t_hist2, 0, 1, cv2.NORM_MINMAX)
+            def create_clothing_mask(hsv_crop):
+                s = hsv_crop[:, :, 1]
+                v = hsv_crop[:, :, 2]
+                mask = (s > 20) | (v < 210)
+                return mask.astype(np.uint8) * 255
 
-            torso_sim = float(cv2.compareHist(t_hist1, t_hist2, cv2.HISTCMP_CORREL))
+            mask_t1 = create_clothing_mask(torso1)
+            mask_t2 = create_clothing_mask(torso2)
 
-            l_hist1 = cv2.calcHist([legs1], [0, 1], None, [24, 32], [0, 180, 0, 256])
-            l_hist2 = cv2.calcHist([legs2], [0, 1], None, [24, 32], [0, 180, 0, 256])
-            cv2.normalize(l_hist1, l_hist1, 0, 1, cv2.NORM_MINMAX)
-            cv2.normalize(l_hist2, l_hist2, 0, 1, cv2.NORM_MINMAX)
+            t_hist1 = cv2.calcHist([torso1], [0, 1], mask_t1, [24, 32], [0, 180, 0, 256])
+            t_hist2 = cv2.calcHist([torso2], [0, 1], mask_t2, [24, 32], [0, 180, 0, 256])
 
-            legs_sim = float(cv2.compareHist(l_hist1, l_hist2, cv2.HISTCMP_CORREL))
+            if cv2.countNonZero(t_hist1) > 0 and cv2.countNonZero(t_hist2) > 0:
+                cv2.normalize(t_hist1, t_hist1, 0, 1, cv2.NORM_MINMAX)
+                cv2.normalize(t_hist2, t_hist2, 0, 1, cv2.NORM_MINMAX)
+                torso_sim = float(cv2.compareHist(t_hist1, t_hist2, cv2.HISTCMP_CORREL))
+            else:
+                torso_sim = 0.5
+
+            mask_l1 = create_clothing_mask(legs1)
+            mask_l2 = create_clothing_mask(legs2)
+
+            l_hist1 = cv2.calcHist([legs1], [0, 1], mask_l1, [24, 32], [0, 180, 0, 256])
+            l_hist2 = cv2.calcHist([legs2], [0, 1], mask_l2, [24, 32], [0, 180, 0, 256])
+
+            if cv2.countNonZero(l_hist1) > 0 and cv2.countNonZero(l_hist2) > 0:
+                cv2.normalize(l_hist1, l_hist1, 0, 1, cv2.NORM_MINMAX)
+                cv2.normalize(l_hist2, l_hist2, 0, 1, cv2.NORM_MINMAX)
+                legs_sim = float(cv2.compareHist(l_hist1, l_hist2, cv2.HISTCMP_CORREL))
+            else:
+                legs_sim = 0.5
 
             body_sim = 0.6 * max(0.0, torso_sim) + 0.4 * max(0.0, legs_sim)
+            print(f"👕 Clothing similarity calculation: Torso={torso_sim:.4f}, Legs={legs_sim:.4f}, Overall={body_sim:.4f}")
 
-            if torso_sim < 0.25 or body_sim < 0.35:
+            if torso_sim < 0.20 or body_sim < 0.25:
                 return {
                     'matched': False,
                     'similarity': max(0.0, body_sim),
@@ -281,7 +300,7 @@ class FaceVerifier:
             }
         except Exception as e:
             print(f"Error checking body/clothing match: {e}")
-            return {'matched': True, 'similarity': 0.5, 'reason': str(e)}
+            return {'matched': False, 'similarity': 0.0, 'reason': str(e)}
 
     def verify_person(self, img1_array, img2_array, threshold=None):
         """
