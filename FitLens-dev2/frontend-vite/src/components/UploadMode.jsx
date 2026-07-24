@@ -4,6 +4,7 @@ import './UploadMode.css';
 import ModeSelection from './ModeSelection';
 import ManualLandmarkMarker from './ManualLandmarkMarker';
 import SMPLViewer from './SMPLViewer';
+import { authHeaders } from '../services/authService';
 
 const PoseSilhouette = () => (
   <div style={{ display: 'flex', gap: '2rem', justifyContent: 'center', margin: '1.5rem 0' }}>
@@ -712,6 +713,40 @@ const UploadMode = () => {
       console.log('✓ Processing complete, setting results');
       setResults(response.data);
       setProcessing(false);
+
+      // Save measurements to MongoDB if user logged in
+      try {
+        const token = localStorage.getItem('fitlens_token');
+        if (token && response.data) {
+          const meas = response.data.final_measurements || response.data.measurements || response.data.results?.front?.measurements || {};
+          await fetch('http://localhost:5000/api/measurements/save', {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({
+              measurements: meas,
+              user_height: heightInCm,
+              source: 'upload'
+            })
+          });
+          console.log('✅ Measurements saved to MongoDB');
+
+          if (frontBase64) {
+            const userStr = localStorage.getItem('fitlens_user');
+            const userObj = userStr ? JSON.parse(userStr) : null;
+            if (userObj && !userObj.has_face_embedding) {
+              await fetch('http://localhost:5000/api/auth/save-face', {
+                method: 'POST',
+                headers: authHeaders(),
+                body: JSON.stringify({ front_image: frontBase64 })
+              });
+              userObj.has_face_embedding = true;
+              localStorage.setItem('fitlens_user', JSON.stringify(userObj));
+            }
+          }
+        }
+      } catch (saveErr) {
+        console.warn('Could not save measurements to MongoDB:', saveErr);
+      }
 
     } catch (err) {
       console.error('❌ Processing error:', err);

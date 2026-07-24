@@ -1,6 +1,11 @@
 """
 Flask Backend API for Body Measurement System
 """
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
@@ -46,9 +51,295 @@ try:
 except Exception:
     FaceVerifier = None
 
+from dotenv import load_dotenv
+import uuid
+import datetime as dt
+import bcrypt
+from pymongo import MongoClient
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+
+load_dotenv()
+
+# MongoDB connection with fallback
+mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/fitlens')
+try:
+    client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+    client.admin.command('ping')
+    try:
+        db = client.get_default_database()
+    except Exception:
+        db = client['fitlens']
+    print(f"Connected to MongoDB successfully: {mongo_uri}")
+except Exception as e:
+    print(f"Warning: Could not connect to MongoDB ({e}). Using in-memory fallback store.")
+    class MockCollection:
+        def __init__(self): self.data = []
+        def find_one(self, query, proj=None, sort=None):
+            for d in self.data:
+                match = True
+                for k, v in query.items():
+                    if d.get(k) != v: match = False; break
+                if match:
+                    res = dict(d)
+                    if proj:
+                        for pk, pv in proj.items():
+                            if pv == 0: res.pop(pk, None)
+                    return res
+            return None
+        def insert_one(self, doc): self.data.append(doc)
+        def update_one(self, query, update):
+            for d in self.data:
+                match = True
+                for k, v in query.items():
+                    if d.get(k) != v: match = False; break
+                if match:
+                    if '$set' in update: d.update(update['$set'])
+        def find(self, query, proj=None):
+            class MockCursor:
+                def __init__(self, items): self.items = items
+                def sort(self, key, order): return self
+                def limit(self, n): return self.items[:n]
+                def __iter__(self): return iter(self.items)
+            res_list = []
+            for d in self.data:
+                match = True
+                for k, v in query.items():
+                    if d.get(k) != v: match = False; break
+                if match:
+                    res = dict(d)
+                    if proj:
+                        for pk, pv in proj.items():
+                            if pv == 0: res.pop(pk, None)
+                    res_list.append(res)
+            return MockCursor(res_list)
+
+    class MockDB:
+        def __init__(self): self.cols = {}
+        def __getitem__(self, name):
+            if name not in self.cols: self.cols[name] = MockCollection()
+            return self.cols[name]
+    db = MockDB()
+
+users_col = db['users']
+measurements_col = db['measurements']
+
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
+
+# JWT config
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'fitlens-secret-key')
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = dt.timedelta(days=30)
+jwt = JWTManager(app)
+
+# --- AUTHENTICATION ROUTES ---
+@app.route('/api/auth/register', methods=['POST'])
+def register():
+    data = request.get_json() or {}
+    email = data.get('email', '').lower().strip()
+    name = data.get('name', '').strip()
+    password = data.get('password', '')
+
+    if not email or not password:
+        return jsonify({'error': 'Email and password are required'}), 400
+
+    if users_col.find_one({'email': email}):
+        return jsonify({'error': 'Email already registered'}), 409
+
+    password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    user_id = 'U' + str(uuid.uuid4())[:8].upper()
+
+    user = {
+        'user_id': user_id,
+        'name': name or email.split('@')[0],
+        'email': email,
+        'password_hash': password_hash,
+        'face_embedding': None,
+        'created_at': dt.datetime.now(dt.timezone.utc),
+        'last_login': dt.datetime.now(dt.timezone.utc)
+    }
+    users_col.insert_one(user)
+    token = create_access_token(identity=user_id)
+    return jsonify({
+        'success': True,
+        'token': token,
+        'user': {'user_id': user_id, 'name': user['name'], 'email': email}
+    }), 201
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    data = request.get_json() or {}
+    email = data.get('email', '').lower().strip()
+    password = data.get('password', '')
+
+    if not email or not password:
+        return jsonify({'error': 'Email and password are required'}), 400
+
+    user = users_col.find_one({'email': email})
+    if not user or not bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
+        return jsonify({'error': 'Invalid email or password'}), 401
+
+    users_col.update_one(
+        {'user_id': user['user_id']},
+        {'$set': {'last_login': dt.datetime.now(dt.timezone.utc)}}
+    )
+    token = create_access_token(identity=user['user_id'])
+    return jsonify({
+        'success': True,
+        'token': token,
+        'user': {
+            'user_id': user['user_id'],
+            'name': user['name'],
+            'email': email,
+            'has_face_embedding': user.get('face_embedding') is not None
+        }
+    }), 200
+
+@app.route('/api/auth/me', methods=['GET'])
+@jwt_required()
+def get_current_user():
+    user_id = get_jwt_identity()
+    user = users_col.find_one({'user_id': user_id}, {'password_hash': 0, '_id': 0})
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    user['has_face_embedding'] = user.get('face_embedding') is not None
+    user.pop('face_embedding', None)
+    return jsonify({'success': True, 'user': user}), 200
+
+@app.route('/api/auth/save-face', methods=['POST'])
+@jwt_required()
+def save_face_embedding():
+    """Save face embedding for identity verification"""
+    user_id = get_jwt_identity()
+    data = request.get_json() or {}
+    front_image_b64 = data.get('front_image')
+
+    if not front_image_b64:
+        return jsonify({'error': 'No image provided'}), 400
+
+    try:
+        img_data = base64.b64decode(front_image_b64.split(',')[1] if ',' in front_image_b64 else front_image_b64)
+        img_array = np.frombuffer(img_data, np.uint8)
+        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+        if face_verifier is not None and getattr(face_verifier, 'is_ready', False):
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            faces = face_verifier.app.get(rgb)
+            if faces:
+                embedding = faces[0].embedding.tolist()
+                users_col.update_one(
+                    {'user_id': user_id},
+                    {'$set': {'face_embedding': embedding}}
+                )
+                return jsonify({'success': True, 'message': 'Face saved'}), 200
+
+        return jsonify({'success': False, 'error': 'No face detected'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/auth/verify-face', methods=['POST'])
+@jwt_required()
+def verify_face():
+    """Verify if scanned person matches account owner"""
+    user_id = get_jwt_identity()
+    data = request.get_json() or {}
+    front_image_b64 = data.get('front_image')
+
+    user = users_col.find_one({'user_id': user_id})
+    if not user:
+        return jsonify({'verified': False, 'error': 'User not found'}), 404
+
+    stored_embedding = user.get('face_embedding')
+    if not stored_embedding:
+        return jsonify({'verified': True, 'message': 'No reference face — saving as reference'}), 200
+
+    try:
+        img_data = base64.b64decode(front_image_b64.split(',')[1] if ',' in front_image_b64 else front_image_b64)
+        img_array = np.frombuffer(img_data, np.uint8)
+        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+        if face_verifier is not None and getattr(face_verifier, 'is_ready', False):
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            faces = face_verifier.app.get(rgb)
+            if faces:
+                current_embedding = faces[0].embedding
+                stored = np.array(stored_embedding)
+                similarity = float(np.dot(current_embedding, stored) /
+                    (np.linalg.norm(current_embedding) * np.linalg.norm(stored)))
+                verified = similarity > 0.4
+                return jsonify({
+                    'verified': verified,
+                    'similarity': similarity,
+                    'message': 'Identity verified' if verified else 'Face does not match account owner'
+                }), 200
+
+        return jsonify({'verified': True, 'message': 'Face verification unavailable'}), 200
+    except Exception as e:
+        return jsonify({'verified': False, 'error': str(e)}), 500
+
+# --- MEASUREMENT ROUTES ---
+@app.route('/api/measurements/save', methods=['POST'])
+@jwt_required()
+def save_measurements():
+    user_id = get_jwt_identity()
+    data = request.get_json() or {}
+    measurements = data.get('measurements', {})
+
+    def safe_float(val):
+        try:
+            if isinstance(val, dict):
+                val = val.get('value_cm') or val.get('value')
+            return float(val) if val is not None else None
+        except Exception:
+            return None
+
+    record = {
+        'analysis_id': 'A' + str(uuid.uuid4())[:8].upper(),
+        'user_id': user_id,
+        'date': dt.datetime.now(dt.timezone.utc).strftime('%d-%b-%Y'),
+        'height_cm': safe_float(data.get('user_height')),
+        'arm_length': safe_float(measurements.get('arm_length')),
+        'leg_length': safe_float(measurements.get('leg_length')),
+        'torso_length': safe_float(measurements.get('torso_length')),
+        'shoulder_width': safe_float(measurements.get('shoulder_width')),
+        'chest_circumference': safe_float(measurements.get('chest_circumference')),
+        'waist_circumference': safe_float(measurements.get('waist_circumference')),
+        'hip_circumference': safe_float(measurements.get('hip_circumference')),
+        'chest_width': safe_float(measurements.get('chest_width')),
+        'waist_width': safe_float(measurements.get('waist_width')),
+        'hip_width': safe_float(measurements.get('hip_width')),
+        'source': data.get('source', 'upload'),
+        'created_at': dt.datetime.now(dt.timezone.utc)
+    }
+    measurements_col.insert_one(record)
+    record.pop('_id', None)
+    return jsonify({'success': True, 'analysis': record}), 201
+
+@app.route('/api/measurements/history', methods=['GET'])
+@jwt_required()
+def get_history():
+    user_id = get_jwt_identity()
+    cursor = measurements_col.find(
+        {'user_id': user_id},
+        {'_id': 0}
+    )
+    if hasattr(cursor, 'sort'):
+        cursor = cursor.sort('created_at', -1)
+    if hasattr(cursor, 'limit'):
+        cursor = cursor.limit(20)
+    records = list(cursor)
+    return jsonify({'success': True, 'history': records}), 200
+
+@app.route('/api/measurements/latest', methods=['GET'])
+@jwt_required()
+def get_latest():
+    user_id = get_jwt_identity()
+    record = measurements_col.find_one(
+        {'user_id': user_id},
+        {'_id': 0},
+        sort=[('created_at', -1)]
+    )
+    return jsonify({'success': True, 'latest': record}), 200
 
 # Initialize models
 reference_detector = ReferenceDetector()
@@ -2809,6 +3100,11 @@ def download_xml():
         print(f"XML Export Error: {e}")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+if __name__ == '__main__':
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+
 
 
 if __name__ == '__main__':
