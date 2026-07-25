@@ -41,3 +41,65 @@ export const authHeaders = () => ({
   'Content-Type': 'application/json',
   'Authorization': `Bearer ${getToken()}`
 });
+
+export const forgotPassword = async (email) => {
+  const res = await fetch(`${API}/api/auth/forgot-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email })
+  });
+  return res.json();
+};
+
+export const resetPassword = async (token, newPassword, confirmPassword) => {
+  const res = await fetch(`${API}/api/auth/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token,
+      new_password: newPassword,
+      confirm_password: confirmPassword || newPassword
+    })
+  });
+  return res.json();
+};
+
+export const changePassword = async (currentPassword, newPassword, confirmPassword) => {
+  const res = await fetch(`${API}/api/auth/change-password`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+      confirm_password: confirmPassword || newPassword
+    })
+  });
+  return res.json();
+};
+
+export const updateProfile = async (name) => {
+  const res = await fetch(`${API}/api/auth/update-profile`, {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: JSON.stringify({ name })
+  });
+  return res.json();
+};
+
+export const deleteAccount = async (password) => {
+  const res = await fetch(`${API}/api/auth/delete-account`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+    body: JSON.stringify({ password })
+  });
+  return res.json();
+};
+
+export const deleteMeasurement = async (analysisId) => {
+  const res = await fetch(`${API}/api/measurements/delete/${analysisId}`, {
+    method: 'DELETE',
+    headers: authHeaders()
+  });
+  return res.json();
+};
+

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { login, register, saveToken } from '../services/authService';
+import { login, register, saveToken, forgotPassword } from '../services/authService';
 
 export default function LoginScreen({ onLoginSuccess }) {
   const [isRegister, setIsRegister] = useState(false);
@@ -8,6 +8,13 @@ export default function LoginScreen({ onLoginSuccess }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+
+  // Forgot password state
+  const [showForgot, setShowForgot] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotSent, setForgotSent] = useState(false);
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [resetLink, setResetLink] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -42,6 +49,29 @@ export default function LoginScreen({ onLoginSuccess }) {
       setLoading(false);
     }
   };
+
+  const handleForgotPassword = async (e) => {
+    e.preventDefault();
+    if (!forgotEmail.trim()) return;
+    setForgotLoading(true);
+    try {
+      const res = await forgotPassword(forgotEmail.trim());
+      if (res.success) {
+        setForgotSent(true);
+        if (res.reset_link) {
+          setResetLink(res.reset_link);
+        }
+      } else {
+        setError(res.error || 'Failed to send reset link');
+      }
+    } catch (err) {
+      setError('Error connecting to reset service');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  const resetSuccess = new URLSearchParams(window.location.search).get('reset') === 'success';
 
   return (
     <div style={{
@@ -79,6 +109,21 @@ export default function LoginScreen({ onLoginSuccess }) {
             {isRegister ? 'Create your account to save body scans' : 'Sign in to access your measurement profile'}
           </p>
         </div>
+
+        {resetSuccess && (
+          <div style={{
+            backgroundColor: 'rgba(0, 212, 170, 0.15)',
+            border: '1px solid #00D4AA',
+            color: '#00D4AA',
+            borderRadius: '10px',
+            padding: '12px 16px',
+            fontSize: '14px',
+            marginBottom: '20px',
+            textAlign: 'center'
+          }}>
+            ✅ Password reset successfully! Please log in with your new password.
+          </div>
+        )}
 
         {error && (
           <div style={{
@@ -147,9 +192,20 @@ export default function LoginScreen({ onLoginSuccess }) {
           </div>
 
           <div>
-            <label style={{ display: 'block', fontSize: '13px', color: '#a0aec0', marginBottom: '6px' }}>
-              Password
-            </label>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+              <label style={{ fontSize: '13px', color: '#a0aec0' }}>
+                Password
+              </label>
+              {!isRegister && (
+                <button
+                  type="button"
+                  onClick={() => { setForgotEmail(email); setShowForgot(true); setForgotSent(false); }}
+                  style={{ color: '#00D4AA', background: 'none', border: 'none', cursor: 'pointer', fontSize: '12px' }}
+                >
+                  Forgot Password?
+                </button>
+              )}
+            </div>
             <input
               type="password"
               value={password}
@@ -210,6 +266,122 @@ export default function LoginScreen({ onLoginSuccess }) {
           </button>
         </div>
       </div>
+
+      {/* Forgot Password Modal */}
+      {showForgot && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(10, 14, 39, 0.85)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+          backdropFilter: 'blur(6px)'
+        }}>
+          <div style={{
+            width: '100%',
+            maxWidth: '380px',
+            backgroundColor: '#1E2340',
+            border: '1px solid #2D3561',
+            borderRadius: '20px',
+            padding: '28px',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.5)'
+          }}>
+            {!forgotSent ? (
+              <>
+                <h3 style={{ margin: '0 0 10px 0', fontSize: '20px', color: '#ffffff' }}>Reset Password</h3>
+                <p style={{ color: '#a0aec0', fontSize: '13px', marginBottom: '20px', lineHeight: '1.4' }}>
+                  Enter your email address and we'll send a password reset link valid for 15 minutes.
+                </p>
+                <form onSubmit={handleForgotPassword} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  <input
+                    type="email"
+                    placeholder="Your email address"
+                    value={forgotEmail}
+                    onChange={(e) => setForgotEmail(e.target.value)}
+                    required
+                    style={{
+                      width: '100%',
+                      padding: '12px 14px',
+                      backgroundColor: '#0a0e27',
+                      border: '1px solid #2D3561',
+                      borderRadius: '10px',
+                      color: '#ffffff',
+                      fontSize: '14px',
+                      outline: 'none',
+                      boxSizing: 'border-box'
+                    }}
+                  />
+                  <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
+                    <button
+                      type="button"
+                      onClick={() => setShowForgot(false)}
+                      style={{
+                        flex: 1,
+                        padding: '10px',
+                        backgroundColor: '#0a0e27',
+                        border: '1px solid #2D3561',
+                        borderRadius: '8px',
+                        color: '#a0aec0',
+                        fontWeight: '600',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={forgotLoading}
+                      style={{
+                        flex: 1,
+                        padding: '10px',
+                        backgroundColor: '#00D4AA',
+                        border: 'none',
+                        borderRadius: '8px',
+                        color: '#0a0e27',
+                        fontWeight: '700',
+                        cursor: forgotLoading ? 'wait' : 'pointer'
+                      }}
+                    >
+                      {forgotLoading ? 'Sending...' : 'Send Link'}
+                    </button>
+                  </div>
+                </form>
+              </>
+            ) : (
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '40px', marginBottom: '12px' }}>✉️</div>
+                <h3 style={{ color: '#ffffff', margin: '0 0 8px 0' }}>Request Processed</h3>
+                <p style={{ color: '#a0aec0', fontSize: '14px', marginBottom: '20px', lineHeight: '1.5' }}>
+                  If an account exists for this email address, we've sent a password reset link. Please check your inbox.
+                </p>
+
+                <button
+                  onClick={() => { setShowForgot(false); setForgotSent(false); setResetLink(''); }}
+                  style={{
+                    width: '100%',
+                    padding: '12px',
+                    backgroundColor: '#00D4AA',
+                    border: 'none',
+                    borderRadius: '10px',
+                    color: '#0a0e27',
+                    fontWeight: '700',
+                    fontSize: '14px',
+                    cursor: 'pointer'
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

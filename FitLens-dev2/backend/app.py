@@ -19,6 +19,12 @@ import queue
 import time
 import json
 import traceback
+from dotenv import load_dotenv
+_base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_env_path = os.path.join(_base_dir, '.env')
+if not os.path.exists(_env_path):
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+load_dotenv(dotenv_path=_env_path, override=True)
 
 from reference_detector import ReferenceDetector
 from temporal_stabilizer import TemporalStabilizer
@@ -131,6 +137,25 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'fitlens-secret-key')
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = dt.timedelta(days=30)
 jwt = JWTManager(app)
+
+# Flask-Mail config
+import secrets
+import re
+from flask_mail import Mail, Message
+
+mail_user = (os.getenv('MAIL_EMAIL') or '').strip()
+mail_pass = (os.getenv('MAIL_PASSWORD') or '').replace(' ', '').strip()
+
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USE_SSL'] = False
+app.config['MAIL_USERNAME'] = mail_user
+app.config['MAIL_PASSWORD'] = mail_pass
+app.config['MAIL_DEFAULT_SENDER'] = mail_user
+mail = Mail(app)
+
+reset_tokens = {}
 
 # --- AUTHENTICATION ROUTES ---
 @app.route('/api/auth/register', methods=['POST'])
@@ -277,6 +302,252 @@ def verify_face():
     except Exception as e:
         return jsonify({'verified': False, 'error': str(e)}), 500
 
+def get_network_frontend_url():
+    url = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+    if 'localhost' in url or '127.0.0.1' in url:
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            url = url.replace('localhost', local_ip).replace('127.0.0.1', local_ip)
+        except Exception:
+            pass
+    return url
+
+@app.route('/api/auth/forgot-password', methods=['POST'])
+def forgot_password():
+    try:
+        data = request.get_json() or {}
+        email = data.get('email', '').lower().strip()
+        user = users_col.find_one({'email': email})
+
+        STANDARD_MSG = "If an account exists for this email address, we've sent a password reset link. Please check your inbox."
+
+        generic_response = jsonify({
+            'success': True,
+            'message': STANDARD_MSG
+        }), 200
+
+        if not user:
+            return generic_response
+
+        # Generate secure token
+        token = secrets.token_urlsafe(48)
+        expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=15)
+
+        # Delete any existing unused tokens for this user
+        reset_tokens_col = db['reset_tokens']
+        reset_tokens_col.delete_many({'user_id': user['user_id'], 'used': False})
+
+        # Store token in MongoDB
+        reset_tokens_col.insert_one({
+            'token': token,
+            'user_id': user['user_id'],
+            'email': email,
+            'expires': expires,
+            'used': False,
+            'created_at': dt.datetime.now(dt.timezone.utc)
+        })
+        reset_tokens[token] = {
+            'user_id': user['user_id'],
+            'expires': expires,
+            'used': False
+        }
+
+        frontend_url = get_network_frontend_url()
+        reset_link = f"{frontend_url}/reset-password?token={token}"
+
+        mail_email = (os.getenv('MAIL_EMAIL') or app.config.get('MAIL_USERNAME') or '').strip()
+        mail_pass = (os.getenv('MAIL_PASSWORD') or app.config.get('MAIL_PASSWORD') or '').replace(' ', '').strip()
+        if mail_email:
+            app.config['MAIL_USERNAME'] = mail_email
+            app.config['MAIL_DEFAULT_SENDER'] = mail_email
+        if mail_pass:
+            app.config['MAIL_PASSWORD'] = mail_pass
+
+        # Send email
+        msg = Message(
+            subject='FitLens AI — Reset Your Password',
+            sender=mail_email,
+            recipients=[email]
+        )
+        msg.html = f"""
+        <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;
+                    background:#0a0e27;color:#ffffff;padding:40px;border-radius:16px;
+                    border:1px solid #2d3561;">
+          <div style="text-align:center;margin-bottom:24px;">
+            <h1 style="color:#00d4aa;font-size:28px;margin:0;">FitLens AI</h1>
+            <p style="color:#a0aec0;margin:4px 0 0;">AI-Powered Body Measurements</p>
+          </div>
+          <h2 style="color:#ffffff;font-size:20px;">Password Reset Request</h2>
+          <p style="color:#a0aec0;">Hi <strong style="color:#fff;">{user.get('name', 'User')}</strong>,</p>
+          <p style="color:#a0aec0;">
+            We received a request to reset the password for your FitLens account.<br>
+            Click the button below to set a new password.
+          </p>
+          <p style="color:#fc8181;font-size:13px;">
+            ⏱ This link expires in <strong>15 minutes</strong>.
+          </p>
+          <div style="text-align:center;margin:32px 0;">
+            <a href="{reset_link}"
+               style="background:linear-gradient(135deg,#00d4aa,#0080ff);
+                      color:#ffffff;text-decoration:none;padding:16px 40px;
+                      border-radius:10px;font-size:16px;font-weight:bold;
+                      display:inline-block;">
+              Reset My Password
+            </a>
+          </div>
+          <p style="color:#4a5568;font-size:12px;text-align:center;">
+            If you did not request a password reset, ignore this email.<br>
+            Your password will remain unchanged.
+          </p>
+          <hr style="border:1px solid #2d3561;margin:24px 0;">
+          <p style="color:#4a5568;font-size:11px;text-align:center;">
+            Or copy this link: <br>
+            <span style="color:#00d4aa;word-break:break-all;">{reset_link}</span>
+          </p>
+        </div>
+        """
+        try:
+            if app.config.get('MAIL_USERNAME') and app.config.get('MAIL_PASSWORD') and app.config.get('MAIL_USERNAME') != 'your-gmail@gmail.com':
+                mail.send(msg)
+                print(f"[EMAIL] Reset link successfully sent to {email}")
+            else:
+                print(f"[MAIL MOCK] Mail credentials unconfigured in .env. Reset link: {reset_link}")
+        except Exception as mail_err:
+            print(f"[EMAIL ERROR] Failed to send email via SMTP ({mail_err}). Reset link: {reset_link}")
+
+        return generic_response
+
+    except Exception as e:
+        print(f"[EMAIL ERROR] {str(e)}")
+        return jsonify({'error': f'Email sending failed: {str(e)}'}), 500
+
+@app.route('/api/auth/reset-password', methods=['POST'])
+def reset_password():
+    data = request.get_json() or {}
+    token = data.get('token', '').strip()
+    new_password = data.get('new_password', '')
+    confirm_password = data.get('confirm_password', '')
+
+    if not token:
+        return jsonify({'error': 'Reset token is missing'}), 400
+    if len(new_password) < 8:
+        return jsonify({'error': 'Password must be at least 8 characters'}), 400
+    if new_password != confirm_password:
+        return jsonify({'error': 'Passwords do not match'}), 400
+
+    reset_tokens_col = db['reset_tokens']
+    token_doc = reset_tokens_col.find_one({'token': token, 'used': False})
+    if not token_doc:
+        if token in reset_tokens and not reset_tokens[token].get('used'):
+            token_doc = {
+                'token': token,
+                'user_id': reset_tokens[token]['user_id'],
+                'expires': reset_tokens[token]['expires'],
+                'used': False
+            }
+        else:
+            return jsonify({'error': 'Invalid or already used reset link. Please request a new one.'}), 400
+
+    expires = token_doc['expires']
+    if isinstance(expires, str):
+        try:
+            expires = dt.datetime.fromisoformat(expires)
+        except Exception:
+            pass
+    if isinstance(expires, dt.datetime) and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=dt.timezone.utc)
+
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    if isinstance(expires, dt.datetime) and now_utc > expires:
+        reset_tokens_col.delete_one({'token': token})
+        reset_tokens.pop(token, None)
+        return jsonify({'error': 'Reset link has expired. Please request a new one.'}), 400
+
+    # Hash and update password
+    password_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+    users_col.update_one(
+        {'user_id': token_doc['user_id']},
+        {'$set': {'password_hash': password_hash}}
+    )
+
+    # Invalidate token
+    reset_tokens_col.update_one(
+        {'token': token},
+        {'$set': {'used': True, 'used_at': dt.datetime.now(dt.timezone.utc)}}
+    )
+    if token in reset_tokens:
+        reset_tokens[token]['used'] = True
+
+    return jsonify({'success': True, 'message': 'Password reset successfully. Please log in.'}), 200
+
+@app.route('/api/auth/change-password', methods=['POST'])
+@jwt_required()
+def change_password():
+    user_id = get_jwt_identity()
+    data = request.get_json() or {}
+    current_password = data.get('current_password', '')
+    new_password = data.get('new_password', '')
+    confirm_password = data.get('confirm_password', '')
+
+    if len(new_password) < 8:
+        return jsonify({'error': 'New password must be at least 8 characters'}), 400
+    if new_password != confirm_password:
+        return jsonify({'error': 'New passwords do not match'}), 400
+
+    user = users_col.find_one({'user_id': user_id})
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    if not bcrypt.checkpw(current_password.encode(), user['password_hash'].encode()):
+        return jsonify({'error': 'Current password is incorrect'}), 401
+    if current_password == new_password:
+        return jsonify({'error': 'New password must be different from current password'}), 400
+
+    password_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+    users_col.update_one(
+        {'user_id': user_id},
+        {'$set': {'password_hash': password_hash}}
+    )
+    return jsonify({'success': True, 'message': 'Password changed successfully.'}), 200
+
+@app.route('/api/auth/update-profile', methods=['PUT'])
+@jwt_required()
+def update_profile():
+    user_id = get_jwt_identity()
+    data = request.get_json() or {}
+    name = data.get('name', '').strip()
+    
+    if not name or len(name) < 2 or len(name) > 50:
+        return jsonify({'error': 'Name must be between 2 and 50 characters'}), 400
+        
+    users_col.update_one({'user_id': user_id}, {'$set': {'name': name}})
+    return jsonify({'success': True, 'message': 'Profile updated', 'user': {'name': name}}), 200
+
+@app.route('/api/auth/delete-account', methods=['DELETE'])
+@jwt_required()
+def delete_account():
+    user_id = get_jwt_identity()
+    data = request.get_json() or {}
+    password = data.get('password', '')
+    
+    active_scan = globals().get('active_processing_users', set())
+    if user_id in active_scan:
+        return jsonify({'error': 'Cannot delete account while a measurement scan is processing'}), 400
+        
+    user = users_col.find_one({'user_id': user_id})
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+        
+    if not bcrypt.checkpw(password.encode(), user['password_hash'].encode()):
+        return jsonify({'error': 'Incorrect password'}), 401
+        
+    users_col.delete_one({'user_id': user_id})
+    measurements_col.delete_many({'user_id': user_id})
+    return jsonify({'success': True, 'message': 'Account deleted'}), 200
+
 # --- MEASUREMENT ROUTES ---
 @app.route('/api/measurements/save', methods=['POST'])
 @jwt_required()
@@ -339,7 +610,16 @@ def get_latest():
         {'_id': 0},
         sort=[('created_at', -1)]
     )
-    return jsonify({'success': True, 'latest': record}), 200
+    if not record:
+        return jsonify({'error': 'No measurements found'}), 404
+    return jsonify({'success': True, 'analysis': record}), 200
+
+@app.route('/api/measurements/delete/<analysis_id>', methods=['DELETE'])
+@jwt_required()
+def delete_measurement(analysis_id):
+    user_id = get_jwt_identity()
+    result = measurements_col.delete_one({'analysis_id': analysis_id, 'user_id': user_id})
+    return jsonify({'success': True, 'message': 'Measurement deleted'}), 200
 
 # Initialize models
 reference_detector = ReferenceDetector()

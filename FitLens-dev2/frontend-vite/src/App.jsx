@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import Dashboard from './components/Dashboard'
 import LoginScreen from './components/LoginScreen'
+import ResetPasswordScreen from './components/ResetPasswordScreen'
+import SettingsScreen from './components/SettingsScreen'
 import { isLoggedIn, removeToken, getCurrentUser } from './services/authService'
 import logo from './assets/logo.png'
 import './App.css'
@@ -8,6 +10,9 @@ import './App.css'
 function App() {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [showSettings, setShowSettings] = useState(false)
+
+  const isResetPasswordPath = window.location.pathname === '/reset-password' || new URLSearchParams(window.location.search).has('token')
 
   useEffect(() => {
     const checkAuth = async () => {
@@ -28,6 +33,11 @@ function App() {
     removeToken()
     localStorage.removeItem('fitlens_user')
     setUser(null)
+    setShowSettings(false)
+  }
+
+  if (isResetPasswordPath) {
+    return <ResetPasswordScreen onResetSuccess={() => { window.location.href = '/'; }} />
   }
 
   if (loading) {
@@ -49,6 +59,21 @@ function App() {
           <span style={{ color: '#00D4AA', fontWeight: 'bold', fontSize: '14px' }}>
             👤 Welcome, {user?.name || 'User'}
           </span>
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            style={{
+              padding: '6px 14px',
+              backgroundColor: '#1E2340',
+              border: '1px solid #2D3561',
+              color: '#00D4AA',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              fontWeight: '600',
+              fontSize: '13px'
+            }}
+          >
+            ⚙️ Settings
+          </button>
           <button
             onClick={handleLogout}
             style={{
@@ -74,7 +99,16 @@ function App() {
       </header>
 
       <main>
-        <Dashboard user={user} onLogout={handleLogout} />
+        {showSettings ? (
+          <SettingsScreen
+            user={user}
+            onUserUpdated={(u) => setUser(u)}
+            onLogout={handleLogout}
+            onClose={() => setShowSettings(false)}
+          />
+        ) : (
+          <Dashboard user={user} onLogout={handleLogout} />
+        )}
       </main>
 
       <footer className="App-footer">
@@ -85,4 +119,5 @@ function App() {
 }
 
 export default App
+
 
