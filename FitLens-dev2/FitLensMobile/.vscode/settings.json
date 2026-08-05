@@ -6,6 +6,5 @@
     "**/node_modules/@react-native-community/**"
   ],
   "java.import.gradle.enabled": true,
-  "java.configuration.updateBuildConfiguration": "disabled",
-  "java.compile.nullAnalysis.mode": "automatic"
+  "java.configuration.updateBuildConfiguration": "disabled"
 }

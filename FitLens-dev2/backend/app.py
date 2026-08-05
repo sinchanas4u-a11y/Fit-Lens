@@ -157,6 +157,14 @@ mail = Mail(app)
 
 reset_tokens = {}
 
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({
+        'status': 'ok',
+        'message': 'FitLens backend running',
+        'version': '1.0.0'
+    }), 200
+
 # --- AUTHENTICATION ROUTES ---
 @app.route('/api/auth/register', methods=['POST'])
 def register():

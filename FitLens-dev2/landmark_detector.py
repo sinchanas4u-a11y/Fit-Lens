@@ -47,12 +47,13 @@ class LandmarkDetector:
             min_tracking_confidence=0.5
         )
     
-    def detect(self, image: np.ndarray) -> Optional[np.ndarray]:
+    def detect(self, image: np.ndarray, mask: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
         """
         Detect landmarks in image
         
         Args:
             image: Input image (BGR)
+            mask: Optional binary mask of segmented person
             
         Returns:
             Landmarks array of shape (33, 3) with (x, y, confidence)

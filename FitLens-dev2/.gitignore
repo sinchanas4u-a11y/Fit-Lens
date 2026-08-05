@@ -217,3 +217,10 @@ pifuhd/
 fitlens_env/
 .venv/
 node_modules/
+**/node_modules/
+**/android/.gradle/
+**/android/app/build/
+**/android/deps.txt
+**/android/build/
+.gradle/
+
