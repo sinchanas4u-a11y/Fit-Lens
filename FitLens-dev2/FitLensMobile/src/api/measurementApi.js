@@ -9,6 +9,9 @@ export const measurementApi = {
       user_height: userHeight,
     }),
 
+  processManual: (requestData) =>
+    axiosInstance.post('/api/process-manual', requestData, { timeout: 180000 }),
+
   validateImage: async (imageUri, view) => {
     const formData = new FormData();
     formData.append('image', {

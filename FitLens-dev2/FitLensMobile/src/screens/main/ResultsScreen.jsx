@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, Image, TouchableOpacity,
-  StyleSheet, Dimensions, Alert, ActivityIndicator
+  StyleSheet, Dimensions, Alert, ActivityIndicator, PermissionsAndroid, Platform
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import RNFS from 'react-native-fs';
+import { Config } from '../../constants/config';
+import { useAuthStore } from '../../store/authStore';
 import { Colors } from '../../constants/colors';
 
 const { width } = Dimensions.get('window');
@@ -13,6 +15,7 @@ const ResultsScreen = ({ route, navigation }) => {
   const { data } = route.params;
   const [plotlyJs, setPlotlyJs] = useState('');
   const [meshReady, setMeshReady] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   // Extract all data same as web:
   const frontMeasurements = data?.results?.front?.measurements || {};
@@ -102,10 +105,94 @@ const ResultsScreen = ({ route, navigation }) => {
   };
 
   const downloadReport = async (format) => {
+    if (downloading) return;
+    setDownloading(true);
     try {
-      Alert.alert('Download', `${format.toUpperCase()} download ready`);
-    } catch (e) {
-      Alert.alert('Error', 'Download failed');
+      // 1. Request Android Storage Permission if on Android < 33
+      if (Platform.OS === 'android' && Platform.Version < 33) {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
+          {
+            title: 'Storage Permission',
+            message: 'FitLens needs access to your storage to save report files.',
+            buttonNeutral: 'Ask Later',
+            buttonNegative: 'Cancel',
+            buttonPositive: 'OK',
+          }
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          Alert.alert('Permission Denied', 'Storage permission is required to save reports.');
+          setDownloading(false);
+          return;
+        }
+      }
+
+      // 2. Ensure /storage/emulated/0/Download/FitLens directory exists (reusing it if present)
+      const downloadDir = Platform.OS === 'android' ? RNFS.DownloadDirectoryPath : RNFS.DocumentDirectoryPath;
+      const fitlensDir = `${downloadDir}/FitLens`;
+
+      const dirExists = await RNFS.exists(fitlensDir);
+      if (!dirExists) {
+        await RNFS.mkdir(fitlensDir);
+      }
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `FitLens_Report_${timestamp}.${format}`;
+      const filePath = `${fitlensDir}/${filename}`;
+
+      // 3. Obtain auth token
+      const token = useAuthStore.getState().token;
+      const headers = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const exportPayload = {
+        user_id: data?.user_id || 'Guest_User',
+        calibration: data?.calibration || {},
+        results: data?.results || {},
+      };
+
+      console.log(`[Export Start] Requesting ${format.toUpperCase()} report from: ${Config.BASE_URL}/api/export/${format}`);
+
+      // 4. Download binary file natively using RNFS.downloadFile directly to disk
+      const downloadTask = RNFS.downloadFile({
+        fromUrl: `${Config.BASE_URL}/api/export/${format}`,
+        toFile: filePath,
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(exportPayload),
+      });
+
+      const res = await downloadTask.promise;
+
+      if (res.statusCode !== 200) {
+        let errDetail = `Server responded with status code ${res.statusCode}`;
+        try {
+          const errText = await RNFS.readFile(filePath, 'utf8');
+          const parsed = JSON.parse(errText);
+          if (parsed.error) errDetail = parsed.error;
+        } catch (_) {}
+        // Remove error file
+        await RNFS.unlink(filePath).catch(() => {});
+        throw new Error(errDetail);
+      }
+
+      const fileStat = await RNFS.stat(filePath);
+      console.log(`[Export Success] Saved ${format.toUpperCase()} (${fileStat.size} bytes) to: ${filePath}`);
+
+      // 5. Show success dialog ONLY AFTER file write Promise resolves
+      Alert.alert(
+        'Download Successful',
+        `${format.toUpperCase()} report (${(fileStat.size / 1024).toFixed(1)} KB) saved to:\n\n${filePath}`
+      );
+    } catch (err) {
+      console.error(`[Export Error] ${format.toUpperCase()} export failed:`, err);
+      Alert.alert('Download Failed', `Could not save ${format.toUpperCase()} report: ${err.message}`);
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -263,7 +350,9 @@ const ResultsScreen = ({ route, navigation }) => {
 
         {/* Export Report */}
         <View style={styles.card}>
-          <Text style={styles.sectionTitle}>📤 Export Report</Text>
+          <Text style={styles.sectionTitle}>
+            📤 Export Report {downloading && '(Downloading...)'}
+          </Text>
           <View style={styles.exportRow}>
             {[
               { fmt: 'pdf', label: '📄 PDF', color: '#E53E3E' },
@@ -271,10 +360,12 @@ const ResultsScreen = ({ route, navigation }) => {
               { fmt: 'xml', label: '🗂️ XML', color: '#38A169' },
             ].map(({ fmt, label, color }) => (
               <TouchableOpacity key={fmt}
+                disabled={downloading}
                 onPress={() => downloadReport(fmt)}
                 style={[styles.exportBtn, {
                   backgroundColor: color + '20',
-                  borderColor: color
+                  borderColor: color,
+                  opacity: downloading ? 0.5 : 1,
                 }]}>
                 <Text style={[styles.exportLabel, { color }]}>{label}</Text>
               </TouchableOpacity>

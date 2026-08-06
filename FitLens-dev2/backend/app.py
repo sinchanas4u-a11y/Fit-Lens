@@ -1370,9 +1370,306 @@ def verify_identity():
         return jsonify({'success': False, 'verified': False, 'error': str(e)}), 500
 
 
+def merge_manual_measurements(front_results, side_results):
+    """
+    Merge front view (width) and side view (depth) manual measurements into 
+    a single consolidated measurements dictionary.
+    """
+    merged = {
+        'success': True,
+        'measurements': {},
+        'front_visualization': None,
+        'front_mask': None,
+        'side_visualization': None,
+        'side_mask': None,
+        'visualization': None,
+        'mask': None,
+        'scale_factor': 0,
+        'height_px': 0,
+        'total_landmarks': 0
+    }
+    
+    if front_results and front_results.get('success'):
+        front_measurements = front_results.get('measurements', {})
+        for name, data in front_measurements.items():
+            merged['measurements'][name] = data
+        
+        merged['front_visualization'] = front_results.get('visualization')
+        merged['front_mask'] = front_results.get('mask')
+        merged['visualization'] = front_results.get('visualization')
+        merged['mask'] = front_results.get('mask')
+        merged['scale_factor'] = front_results.get('scale_factor', 0)
+        merged['height_px'] = front_results.get('height_px', 0)
+        merged['total_landmarks'] = front_results.get('total_landmarks', 0)
+    
+    if side_results and side_results.get('success'):
+        side_measurements = side_results.get('measurements', {})
+        for name, data in side_measurements.items():
+            if name == 'arm_length' or name == 'leg_length':
+                continue
+            elif name not in merged['measurements']:
+                merged['measurements'][name] = data
+            else:
+                merged['measurements'][f'front_{name}'] = merged['measurements'][name]
+                merged['measurements'][f'side_{name}'] = data
+                del merged['measurements'][name]
+        
+        merged['side_visualization'] = side_results.get('visualization')
+        merged['side_mask'] = side_results.get('mask')
+        merged['total_landmarks'] += side_results.get('total_landmarks', 0)
+    
+    return merged
+
+
 @app.route('/api/process-manual', methods=['POST'])
-def process_manual_stub():
-    return jsonify({'success': True, 'results': {}}), 200
+def process_manual_landmarks():
+    """
+    Process manually marked landmarks and compute measurements.
+    Uses the same pixel-to-scale conversion logic as automatic detection.
+    """
+    try:
+        data = request.json or {}
+        
+        try:
+            user_height_cm = float(data.get('user_height') or 0)
+        except (TypeError, ValueError):
+            user_height_cm = 0
+            
+        if user_height_cm <= 0:
+            return jsonify({'error': 'User height is required'}), 400
+        
+        front_img = decode_image(data.get('front_image'))
+        side_img = decode_image(data.get('side_image'))
+        
+        front_landmarks = data.get('front_landmarks', {})
+        front_results = None
+        side_results = None
+        
+        if front_landmarks:
+            front_results = process_manual_view(
+                front_landmarks,
+                user_height_cm,
+                'front',
+                front_img
+            )
+        
+        side_landmarks = data.get('side_landmarks', {})
+        if side_landmarks:
+            side_results = process_manual_view(
+                side_landmarks,
+                user_height_cm,
+                'side',
+                side_img
+            )
+        
+        merged_result = merge_manual_measurements(front_results, side_results)
+        
+        calibration_data = {
+            'user_height_cm': user_height_cm,
+            'method': 'manual_landmark_marking',
+            'height_in_image_px': merged_result.get('height_px', 0),
+            'scale_factor': merged_result.get('scale_factor', 0),
+            'formula': f'{user_height_cm} cm / {merged_result.get("height_px", 1):.2f} px = {merged_result.get("scale_factor", 0):.4f} cm/px' if merged_result.get('height_px', 0) > 0 else 'N/A',
+            'description': f'1 pixel = {merged_result.get("scale_factor", 0):.4f} cm' if merged_result.get('scale_factor', 0) > 0 else 'Manual mode'
+        }
+
+        response = {
+            'success': True,
+            'mode': 'manual',
+            'calibration': calibration_data,
+            'results': {
+                'merged': merged_result
+            }
+        }
+        
+        return jsonify(to_native_types(response))
+        
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        print(f"Manual processing error: {e}")
+        traceback.print_exc()
+        return jsonify({'error': f'Manual processing failed: {str(e)}'}), 500
+
+
+def snap_point_to_edge(point, image, mask=None, search_radius=20, sample_count=8):
+    x, y = int(point[0]), int(point[1])
+    h, w = image.shape[:2]
+    if x < 0 or x >= w or y < 0 or y >= h:
+        return point
+    try:
+        if mask is not None and mask.size > 0:
+            edges = cv2.Canny(mask, 50, 150)
+        else:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+            edges = cv2.Canny(gray, 50, 150)
+        
+        y_min = max(0, y - search_radius)
+        y_max = min(h, y + search_radius)
+        x_min = max(0, x - search_radius)
+        x_max = min(w, x + search_radius)
+        
+        roi = edges[y_min:y_max, x_min:x_max]
+        if roi.size == 0:
+            return point
+        
+        edge_points = np.where(roi > 0)
+        if len(edge_points[0]) == 0:
+            return point
+        
+        edge_y = edge_points[0] + y_min
+        edge_x = edge_points[1] + x_min
+        distances = np.sqrt((edge_x - x)**2 + (edge_y - y)**2)
+        min_idx = np.argmin(distances)
+        
+        snapped_x = edge_x[min_idx]
+        snapped_y = edge_y[min_idx]
+        return (float(snapped_x), float(snapped_y))
+    except Exception:
+        return point
+
+
+def refine_measurement_with_contours(p1, p2, image, mask=None, num_samples=5):
+    try:
+        t_values = np.linspace(0, 1, num_samples)
+        start_samples = []
+        for t in t_values[:2]:
+            sample_x = p1[0] + t * 0.1 * (p2[0] - p1[0])
+            sample_y = p1[1] + t * 0.1 * (p2[1] - p1[1])
+            snapped = snap_point_to_edge((sample_x, sample_y), image, mask, search_radius=15)
+            start_samples.append(snapped)
+        
+        refined_p1 = (
+            np.mean([s[0] for s in start_samples]),
+            np.mean([s[1] for s in start_samples])
+        ) if start_samples else snap_point_to_edge(p1, image, mask)
+        
+        end_samples = []
+        for t in t_values[-2:]:
+            sample_x = p1[0] + (0.9 + t * 0.1) * (p2[0] - p1[0])
+            sample_y = p1[1] + (0.9 + t * 0.1) * (p2[1] - p1[1])
+            snapped = snap_point_to_edge((sample_x, sample_y), image, mask, search_radius=15)
+            end_samples.append(snapped)
+        
+        refined_p2 = (
+            np.mean([s[0] for s in end_samples]),
+            np.mean([s[1] for s in end_samples])
+        ) if end_samples else snap_point_to_edge(p2, image, mask)
+        
+        return refined_p1, refined_p2
+    except Exception:
+        return p1, p2
+
+
+def estimate_height_from_landmarks(landmarks, image_height):
+    height_estimates = []
+    for landmark in landmarks:
+        points = landmark.get('points', [])
+        if len(points) == 2:
+            p1, p2 = points[0], points[1]
+            dy = abs(p2['y'] - p1['y'])
+            dx = abs(p2['x'] - p1['x'])
+            if dy > dx * 2:
+                height_estimates.append(dy)
+    return max(height_estimates) if height_estimates else 0
+
+
+def process_manual_view(landmarks_data, user_height_cm, view_name, image=None):
+    try:
+        landmarks = landmarks_data.get('landmarks', [])
+        image_width = landmarks_data.get('imageWidth', 1)
+        image_height = landmarks_data.get('imageHeight', 1)
+        
+        if not landmarks and not image:
+            return {'success': False, 'error': 'No landmarks provided', 'measurements': {}}
+        
+        scale_factor = 0
+        height_px = 0
+        
+        if image is not None:
+            ld = get_landmark_detector()
+            auto_landmarks = ld.detect(image) if ld is not None else None
+            if auto_landmarks is not None:
+                nose = auto_landmarks[0]
+                left_ankle = auto_landmarks[27]
+                right_ankle = auto_landmarks[28]
+                ankle_y = max(left_ankle[1], right_ankle[1])
+                height_px = ankle_y - nose[1]
+                if height_px > 0:
+                    scale_factor = user_height_cm / height_px
+        
+        if scale_factor <= 0:
+            height_px = estimate_height_from_landmarks(landmarks, image_height)
+            if height_px <= 0:
+                height_px = image_height * 0.85
+            scale_factor = user_height_cm / height_px
+
+        measurements = {}
+        mask = None
+        if image is not None:
+            try:
+                mask = segmentation_model.segment_person(image, conf_threshold=0.3)
+            except Exception:
+                mask = None
+        
+        vis_image = image.copy() if image is not None else np.zeros((image_height, image_width, 3), dtype=np.uint8)
+        
+        for landmark in landmarks:
+            landmark_type = landmark.get('type', 'custom')
+            landmark_label = landmark.get('label', 'Unknown')
+            points = landmark.get('points', [])
+            
+            if len(points) == 2:
+                p1, p2 = points[0], points[1]
+                x1_orig, y1_orig = p1['x'], p1['y']
+                x2_orig, y2_orig = p2['x'], p2['y']
+                
+                if image is not None:
+                    (x1, y1), (x2, y2) = refine_measurement_with_contours(
+                        (x1_orig, y1_orig), (x2_orig, y2_orig), image, mask, num_samples=5
+                    )
+                else:
+                    x1, y1, x2, y2 = x1_orig, y1_orig, x2_orig, y2_orig
+                
+                pixel_dist = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                cm_dist = pixel_dist * scale_factor
+                
+                measurements[landmark_type] = {
+                    'value_cm': round(float(cm_dist or 0), 2),
+                    'value_px': round(float(pixel_dist or 0), 2),
+                    'confidence': 0.95,
+                    'source': 'Manual (Edge-Refined)',
+                    'label': landmark_label,
+                    'formula': f"{pixel_dist:.2f} px × {scale_factor:.4f} cm/px = {cm_dist:.2f} cm"
+                }
+
+                pt1 = (int(x1), int(y1))
+                pt2 = (int(x2), int(y2))
+                cv2.line(vis_image, pt1, pt2, (0, 255, 255), 3)
+                cv2.circle(vis_image, pt1, 6, (0, 255, 0), -1)
+                cv2.circle(vis_image, pt2, 6, (0, 255, 0), -1)
+                
+                mid_x = int((x1 + x2) / 2)
+                mid_y = int((y1 + y2) / 2)
+                cv2.putText(vis_image, f"{cm_dist:.1f}cm", (mid_x, mid_y - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        vis_base64 = encode_image(vis_image)
+        mask_base64 = None
+        if image is not None and mask is not None:
+            mask_base64 = encode_image(cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR))
+
+        return {
+            'success': True,
+            'measurements': measurements,
+            'scale_factor': float(scale_factor or 0),
+            'height_px': float(height_px or 0),
+            'visualization': vis_base64,
+            'mask': mask_base64,
+            'total_landmarks': len(landmarks)
+        }
+    except Exception as e:
+        return {'success': False, 'error': str(e), 'measurements': {}}
 
 
 @app.route('/api/process', methods=['POST'])
@@ -3124,11 +3421,21 @@ def export_pdf(measurements_data, user_id, output_path):
     table_data = [["Measurement", "Value (cm)", "Value (px)", "Source"]]
     
     # Add measurements from all views
-    results = measurements_data.get('results', {})
-    calibration = measurements_data.get('calibration', {})
-    scale_factor = float(calibration.get('scale_factor', 0) or 0)
+    results = measurements_data.get('results')
+    if not isinstance(results, dict):
+        results = {}
+    calibration = measurements_data.get('calibration')
+    if not isinstance(calibration, dict):
+        calibration = {}
+    raw_scale = calibration.get('scale_factor')
+    try:
+        scale_factor = float(raw_scale) if raw_scale is not None else 0.0
+    except (ValueError, TypeError):
+        scale_factor = 0.0
     
     def process_measurements(m_dict):
+        if not isinstance(m_dict, dict):
+            return
         for name, data in m_dict.items():
             val_cm, val_px, source = parse_measurement(data, scale_factor)
             if val_cm > 0:
@@ -3143,7 +3450,7 @@ def export_pdf(measurements_data, user_id, output_path):
         if isinstance(view_data, dict) and 'measurements' in view_data:
             process_measurements(view_data['measurements'])
             
-    if 'merged' in results and 'measurements' in results['merged']:
+    if 'merged' in results and isinstance(results['merged'], dict) and 'measurements' in results['merged']:
         process_measurements(results['merged']['measurements'])
 
     # Create Table
@@ -3204,11 +3511,21 @@ def export_docx(measurements_data, user_id, output_path):
         run = hdr_cells[i].paragraphs[0].runs[0]
         run.bold = True
         
-    results = measurements_data.get('results', {})
-    calibration = measurements_data.get('calibration', {})
-    scale_factor = float(calibration.get('scale_factor', 0) or 0)
+    results = measurements_data.get('results')
+    if not isinstance(results, dict):
+        results = {}
+    calibration = measurements_data.get('calibration')
+    if not isinstance(calibration, dict):
+        calibration = {}
+    raw_scale = calibration.get('scale_factor')
+    try:
+        scale_factor = float(raw_scale) if raw_scale is not None else 0.0
+    except (ValueError, TypeError):
+        scale_factor = 0.0
     
     def add_rows(m_dict):
+        if not isinstance(m_dict, dict):
+            return
         for name, data in m_dict.items():
             val_cm, val_px, source = parse_measurement(data, scale_factor)
             if val_cm > 0:
@@ -3222,7 +3539,7 @@ def export_docx(measurements_data, user_id, output_path):
         if isinstance(view_data, dict) and 'measurements' in view_data:
             add_rows(view_data['measurements'])
             
-    if 'merged' in results and 'measurements' in results['merged']:
+    if 'merged' in results and isinstance(results['merged'], dict) and 'measurements' in results['merged']:
         add_rows(results['merged']['measurements'])
 
     doc.save(output_path)
@@ -3237,15 +3554,22 @@ def normalize_export_payload(data):
     if not isinstance(data, dict):
         data = {}
     
-    results = data.get('results', {})
-    measurements = data.get('measurements', {})
+    results = data.get('results')
+    if not isinstance(results, dict):
+        results = {}
+        
+    calibration = data.get('calibration')
+    if not isinstance(calibration, dict):
+        data['calibration'] = {}
+
+    measurements = data.get('measurements')
     
     if not results:
         if isinstance(measurements, dict) and measurements:
             results = {'front': {'measurements': measurements}}
         else:
             clean_m = {k: v for k, v in data.items() if k not in ['user_id', 'results', 'calibration']}
-            if clean_m:
+            if isinstance(clean_m, dict) and clean_m:
                 results = {'front': {'measurements': clean_m}}
             else:
                 results = {
@@ -3265,15 +3589,36 @@ def normalize_export_payload(data):
     return data
 
 
-@app.route('/api/download/pdf', methods=['POST'])
-@app.route('/download/pdf', methods=['POST'])
-@app.route('/export/pdf', methods=['POST'])
-@app.route('/api/export/pdf', methods=['POST'])
-@app.route('/export-report/pdf', methods=['POST'])
+def get_request_data():
+    """Extract request JSON payload robustly."""
+    if request.is_json and request.json:
+        return request.json
+    try:
+        data = request.get_json(silent=True, force=True)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    try:
+        raw_text = request.get_data(as_text=True)
+        if raw_text and raw_text.strip().startswith('{'):
+            return json.loads(raw_text)
+    except Exception:
+        pass
+    return request.args.to_dict() or {}
+
+
+@app.route('/api/download/pdf', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/download/pdf', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/export/pdf', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/api/export/pdf', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/export-report/pdf', methods=['GET', 'POST', 'OPTIONS'])
 def download_pdf():
     """Generate and download a PDF report of measurements."""
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
-        data = request.json or {}
+        data = get_request_data()
         data = normalize_export_payload(data)
         user_id = data.get('user_id', 'Guest_User')
         
@@ -3297,18 +3642,20 @@ def download_pdf():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/download/docx', methods=['POST'])
-@app.route('/download/docx', methods=['POST'])
-@app.route('/export/docx', methods=['POST'])
-@app.route('/api/export/docx', methods=['POST'])
-@app.route('/export-report/docx', methods=['POST'])
+@app.route('/api/download/docx', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/download/docx', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/export/docx', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/api/export/docx', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/export-report/docx', methods=['GET', 'POST', 'OPTIONS'])
 def download_docx():
     """Generate and download a Word report of measurements."""
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
-        data = request.json or {}
+        data = get_request_data()
         data = normalize_export_payload(data)
         user_id = data.get('user_id', 'Guest_User')
-        
+
         temp_docx = tempfile.NamedTemporaryFile(delete=False, suffix='.docx')
         temp_docx_path = temp_docx.name
         temp_docx.close()
@@ -3329,15 +3676,17 @@ def download_docx():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/download/xml', methods=['POST'])
-@app.route('/download/xml', methods=['POST'])
-@app.route('/export/xml', methods=['POST'])
-@app.route('/api/export/xml', methods=['POST'])
-@app.route('/export-report/xml', methods=['POST'])
+@app.route('/api/download/xml', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/download/xml', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/export/xml', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/api/export/xml', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/export-report/xml', methods=['GET', 'POST', 'OPTIONS'])
 def download_xml():
     """Generate and download an XML report of measurements."""
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
-        data = request.json or {}
+        data = get_request_data()
         data = normalize_export_payload(data)
         results = data.get('results', {})
         calibration = data.get('calibration', {})
