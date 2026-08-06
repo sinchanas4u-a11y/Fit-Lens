@@ -1,10 +1,65 @@
 import React from 'react';
 import { View, Text, ScrollView, StyleSheet } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
+import Svg, { Circle, Line } from 'react-native-svg';
 import Header from '../../components/common/Header';
 import Button from '../../components/common/Button';
-import SilhouetteOverlay from '../../components/camera/SilhouetteOverlay';
 import { Colors } from '../../constants/colors';
+
+const FrontSilhouette = () => (
+  <Svg width="120" height="240" viewBox="0 0 120 240">
+    {/* Head */}
+    <Circle cx="60" cy="25" r="18" stroke="#00D4AA"
+      strokeWidth="2" fill="none" strokeDasharray="4,2"/>
+    {/* Neck */}
+    <Line x1="60" y1="43" x2="60" y2="58"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    {/* Shoulders */}
+    <Line x1="20" y1="65" x2="100" y2="65"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    {/* Left arm — angled away A-pose */}
+    <Line x1="20" y1="65" x2="5" y2="130"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    {/* Right arm — angled away A-pose */}
+    <Line x1="100" y1="65" x2="115" y2="130"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    {/* Torso */}
+    <Line x1="60" y1="58" x2="60" y2="140"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    {/* Hips */}
+    <Line x1="35" y1="140" x2="85" y2="140"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    {/* Left leg */}
+    <Line x1="42" y1="140" x2="35" y2="225"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    {/* Right leg */}
+    <Line x1="78" y1="140" x2="85" y2="225"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+  </Svg>
+);
+
+const SideSilhouette = () => (
+  <Svg width="120" height="240" viewBox="0 0 120 240">
+    {/* Head side profile */}
+    <Circle cx="65" cy="25" r="18" stroke="#00D4AA"
+      strokeWidth="2" fill="none" strokeDasharray="4,2"/>
+    {/* Neck */}
+    <Line x1="65" y1="43" x2="65" y2="58"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    {/* Torso */}
+    <Line x1="65" y1="58" x2="65" y2="140"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    {/* Arm (one visible from side) */}
+    <Line x1="65" y1="70" x2="45" y2="125"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    {/* Hip */}
+    <Line x1="55" y1="140" x2="75" y2="140"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    {/* Leg (side view — single line) */}
+    <Line x1="65" y1="140" x2="65" y2="225"
+      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+  </Svg>
+);
 
 const GuidelinesScreen = ({ navigation }) => {
   const guidelines = [
@@ -19,11 +74,29 @@ const GuidelinesScreen = ({ navigation }) => {
       <Header title="Photo Guidelines" onBack={() => navigation.goBack()} />
 
       <ScrollView contentContainerStyle={styles.content}>
-        {/* Silhouette Preview */}
+        {/* Silhouette Preview — Side by Side */}
         <View style={styles.previewCard}>
           <Text style={styles.previewTitle}>Optimal Positioning</Text>
-          <View style={styles.silhouetteWrap}>
-            <SilhouetteOverlay viewMode="front" />
+
+          <View style={{ flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', padding: 16, width: '100%' }}>
+            <View style={{ alignItems: 'center' }}>
+              <FrontSilhouette />
+              <Text style={{ color: '#00D4AA', marginTop: 8, fontWeight: '700' }}>
+                ✅ Front View
+              </Text>
+              <Text style={{ color: '#A0AEC0', fontSize: 11, textAlign: 'center' }}>
+                Face camera directly{'\n'}Arms in A-pose
+              </Text>
+            </View>
+            <View style={{ alignItems: 'center' }}>
+              <SideSilhouette />
+              <Text style={{ color: '#00D4AA', marginTop: 8, fontWeight: '700' }}>
+                ✅ Side View
+              </Text>
+              <Text style={{ color: '#A0AEC0', fontSize: 11, textAlign: 'center' }}>
+                Turn 90° right{'\n'}Arms relaxed
+              </Text>
+            </View>
           </View>
         </View>
 
@@ -69,13 +142,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   previewTitle: { color: Colors.accent, fontSize: 14, fontWeight: '700', marginBottom: 8 },
-  silhouetteWrap: {
-    width: '100%',
-    height: 180,
-    backgroundColor: Colors.primary,
-    borderRadius: 12,
-    overflow: 'hidden',
-  },
   list: { marginBottom: 24 },
   item: {
     flexDirection: 'row',
