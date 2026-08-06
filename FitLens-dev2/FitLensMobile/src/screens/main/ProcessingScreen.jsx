@@ -5,7 +5,7 @@ import * as Progress from 'react-native-progress';
 import RNFS from 'react-native-fs';
 import axiosInstance from '../../api/axiosInstance';
 import { useMeasurementStore } from '../../store/measurementStore';
-import useAuthStore from '../../store/authStore';
+import { useAuthStore } from '../../store/authStore';
 import { Colors } from '../../constants/colors';
 
 const ProcessingScreen = ({ route, navigation }) => {

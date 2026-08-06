@@ -11,7 +11,7 @@ import { cameraService } from '../../services/cameraService';
 import axiosInstance from '../../api/axiosInstance';
 import { Config } from '../../constants/config';
 import { Colors } from '../../constants/colors';
-import useAuthStore from '../../store/authStore';
+import { useAuthStore } from '../../store/authStore';
 
 const UploadScreen = ({ navigation }) => {
   const [frontPhoto, setFrontPhoto] = useState(null);
