@@ -1,136 +1,210 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
 import { Colors } from '../../constants/colors';
-import { feetInchesToCm, cmToFeetInches } from '../../utils/formatUtils';
 
 const HeightSelector = ({ heightCm, onChangeHeightCm }) => {
-  const [unit, setUnit] = useState('cm'); // 'cm' or 'ft'
-  const [feet, setFeet] = useState('5');
-  const [inches, setInches] = useState('7');
+  const [heightUnit, setHeightUnit] = useState('cm'); // 'cm', 'ft', or 'in'
+  const [valCm, setValCm] = useState(heightCm || '165');
+  const [valFt, setValFt] = useState('5');
+  const [valIn, setValIn] = useState('5');
+  const [valInches, setValInches] = useState('65');
 
-  const handleCmChange = (val) => {
-    onChangeHeightCm(val);
-    const { feet: f, inches: i } = cmToFeetInches(parseFloat(val));
-    setFeet(String(f));
-    setInches(String(i));
+  // Calculate current height in cm based on active unit
+  const getHeightInCm = () => {
+    if (heightUnit === 'cm') {
+      const val = parseFloat(valCm);
+      if (isNaN(val) || val <= 0) return null;
+      return val;
+    }
+    if (heightUnit === 'ft') {
+      const ft = parseFloat(valFt) || 0;
+      const inches = parseFloat(valIn) || 0;
+      if (ft <= 0 && inches <= 0) return null;
+      return (ft * 30.48) + (inches * 2.54);
+    }
+    if (heightUnit === 'in') {
+      const val = parseFloat(valInches);
+      if (isNaN(val) || val <= 0) return null;
+      return val * 2.54;
+    }
+    return null;
   };
 
-  const handleFeetInchesChange = (f, i) => {
-    setFeet(f);
-    setInches(i);
-    const cm = feetInchesToCm(f, i);
-    onChangeHeightCm(String(cm));
-  };
+  useEffect(() => {
+    const cm = getHeightInCm();
+    if (cm && onChangeHeightCm) {
+      onChangeHeightCm(cm.toFixed(1));
+    }
+  }, [heightUnit, valCm, valFt, valIn, valInches]);
 
   return (
-    <View style={styles.card}>
-      <View style={styles.headerRow}>
-        <Text style={styles.title}>Your Height (Required for Scale)</Text>
-        <View style={styles.unitToggle}>
+    <View style={styles.heightCard}>
+      <Text style={styles.heightTitle}>📏 Your Height (Required for Scale)</Text>
+
+      {/* 3 unit toggle buttons */}
+      <View style={styles.unitRow}>
+        {['cm', 'ft', 'in'].map((unit) => (
           <TouchableOpacity
-            style={[styles.unitBtn, unit === 'cm' && styles.unitActive]}
-            onPress={() => setUnit('cm')}>
-            <Text style={[styles.unitText, unit === 'cm' && styles.unitTextActive]}>CM</Text>
+            key={unit}
+            onPress={() => setHeightUnit(unit)}
+            style={[
+              styles.unitBtn,
+              heightUnit === unit && styles.unitBtnActive,
+            ]}>
+            <Text
+              style={[
+                styles.unitBtnText,
+                heightUnit === unit && styles.unitBtnTextActive,
+              ]}>
+              {unit === 'ft' ? 'FT' : unit === 'in' ? 'IN' : 'CM'}
+            </Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.unitBtn, unit === 'ft' && styles.unitActive]}
-            onPress={() => setUnit('ft')}>
-            <Text style={[styles.unitText, unit === 'ft' && styles.unitTextActive]}>FT / IN</Text>
-          </TouchableOpacity>
-        </View>
+        ))}
       </View>
 
-      {unit === 'cm' ? (
-        <View style={styles.inputWrap}>
+      {/* CM input */}
+      {heightUnit === 'cm' && (
+        <View style={styles.inputRow}>
           <TextInput
-            style={styles.input}
-            value={heightCm}
-            onChangeText={handleCmChange}
+            style={styles.heightInput}
+            placeholder="e.g. 165"
+            placeholderTextColor="#4A5568"
+            value={valCm}
+            onChangeText={setValCm}
             keyboardType="numeric"
-            placeholder="165"
-            placeholderTextColor={Colors.textSecondary}
           />
           <Text style={styles.unitLabel}>cm</Text>
         </View>
-      ) : (
-        <View style={styles.feetRow}>
-          <View style={[styles.inputWrap, { flex: 1, marginRight: 8 }]}>
+      )}
+
+      {/* FT + IN input */}
+      {heightUnit === 'ft' && (
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <View style={[styles.inputRow, { flex: 1 }]}>
             <TextInput
-              style={styles.input}
-              value={feet}
-              onChangeText={(f) => handleFeetInchesChange(f, inches)}
-              keyboardType="numeric"
+              style={[styles.heightInput, { flex: 1 }]}
               placeholder="5"
-              placeholderTextColor={Colors.textSecondary}
+              placeholderTextColor="#4A5568"
+              value={valFt}
+              onChangeText={setValFt}
+              keyboardType="numeric"
             />
             <Text style={styles.unitLabel}>ft</Text>
           </View>
-          <View style={[styles.inputWrap, { flex: 1 }]}>
+          <View style={[styles.inputRow, { flex: 1 }]}>
             <TextInput
-              style={styles.input}
-              value={inches}
-              onChangeText={(i) => handleFeetInchesChange(feet, i)}
+              style={[styles.heightInput, { flex: 1 }]}
+              placeholder="5"
+              placeholderTextColor="#4A5568"
+              value={valIn}
+              onChangeText={setValIn}
               keyboardType="numeric"
-              placeholder="7"
-              placeholderTextColor={Colors.textSecondary}
             />
             <Text style={styles.unitLabel}>in</Text>
           </View>
         </View>
       )}
 
-      <Text style={styles.hint}>Height is used to calibrate pixel-to-cm ratios for precise AI scaling.</Text>
+      {/* INCHES only input */}
+      {heightUnit === 'in' && (
+        <View style={styles.inputRow}>
+          <TextInput
+            style={styles.heightInput}
+            placeholder="e.g. 65"
+            placeholderTextColor="#4A5568"
+            value={valInches}
+            onChangeText={setValInches}
+            keyboardType="numeric"
+          />
+          <Text style={styles.unitLabel}>inches</Text>
+        </View>
+      )}
+
+      {/* Show converted cm value */}
+      {getHeightInCm() && (
+        <Text style={styles.convertedText}>
+          = {getHeightInCm()?.toFixed(1)} cm
+        </Text>
+      )}
+
+      <Text style={styles.heightNote}>
+        Height calibrates pixel-to-cm ratio for precise AI scaling
+      </Text>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  card: {
+  heightCard: {
     backgroundColor: Colors.cardBg,
     borderRadius: 16,
     padding: 16,
+    marginBottom: 16,
     borderWidth: 1,
     borderColor: Colors.border,
-    marginBottom: 16,
   },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+  heightTitle: {
+    color: Colors.textPrimary,
+    fontWeight: '700',
+    fontSize: 15,
     marginBottom: 12,
   },
-  title: { color: Colors.textPrimary, fontSize: 14, fontWeight: '700' },
-  unitToggle: {
+  unitRow: {
     flexDirection: 'row',
-    backgroundColor: Colors.primary,
+    gap: 8,
+    marginBottom: 12,
+  },
+  unitBtn: {
+    flex: 1,
+    padding: 10,
     borderRadius: 8,
-    padding: 2,
     borderWidth: 1,
     borderColor: Colors.border,
+    alignItems: 'center',
+    backgroundColor: Colors.primary,
   },
-  unitBtn: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6 },
-  unitActive: { backgroundColor: Colors.accent },
-  unitText: { color: Colors.textSecondary, fontSize: 11, fontWeight: '700' },
-  unitTextActive: { color: Colors.primary },
-  inputWrap: {
+  unitBtnActive: {
+    borderColor: Colors.accent,
+    backgroundColor: Colors.accent + '20',
+  },
+  unitBtnText: {
+    color: Colors.textSecondary,
+    fontWeight: '600',
+    fontSize: 14,
+  },
+  unitBtnTextActive: { color: Colors.accent },
+  inputRow: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: Colors.primary,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: Colors.border,
+    borderColor: Colors.accent,
     paddingHorizontal: 16,
+    marginBottom: 8,
   },
-  input: {
+  heightInput: {
     flex: 1,
     color: Colors.textPrimary,
-    fontSize: 18,
+    fontSize: 22,
     fontWeight: '700',
-    paddingVertical: 10,
+    paddingVertical: 12,
   },
-  unitLabel: { color: Colors.textSecondary, fontSize: 14, fontWeight: '600' },
-  feetRow: { flexDirection: 'row' },
-  hint: { color: Colors.textSecondary, fontSize: 11, marginTop: 8 },
+  unitLabel: {
+    color: Colors.accent,
+    fontWeight: '700',
+    fontSize: 16,
+  },
+  convertedText: {
+    color: Colors.accent,
+    fontSize: 13,
+    marginBottom: 8,
+    fontStyle: 'italic',
+  },
+  heightNote: {
+    color: Colors.textSecondary,
+    fontSize: 12,
+  },
 });
 
 export default HeightSelector;

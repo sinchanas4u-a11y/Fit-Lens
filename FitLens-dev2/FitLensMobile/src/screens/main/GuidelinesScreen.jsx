@@ -8,65 +8,61 @@ import { Colors } from '../../constants/colors';
 
 const FrontSilhouette = () => (
   <Svg width="120" height="240" viewBox="0 0 120 240">
-    {/* Head */}
-    <Circle cx="60" cy="25" r="18" stroke="#00D4AA"
-      strokeWidth="2" fill="none" strokeDasharray="4,2"/>
-    {/* Neck */}
-    <Line x1="60" y1="43" x2="60" y2="58"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
-    {/* Shoulders */}
-    <Line x1="20" y1="65" x2="100" y2="65"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
-    {/* Left arm — angled away A-pose */}
-    <Line x1="20" y1="65" x2="5" y2="130"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
-    {/* Right arm — angled away A-pose */}
-    <Line x1="100" y1="65" x2="115" y2="130"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
-    {/* Torso */}
-    <Line x1="60" y1="58" x2="60" y2="140"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
-    {/* Hips */}
-    <Line x1="35" y1="140" x2="85" y2="140"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
-    {/* Left leg */}
-    <Line x1="42" y1="140" x2="35" y2="225"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
-    {/* Right leg */}
-    <Line x1="78" y1="140" x2="85" y2="225"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Circle cx="60" cy="25" r="18" stroke="#00D4AA" strokeWidth="2" fill="none" strokeDasharray="4,2"/>
+    <Line x1="60" y1="43" x2="60" y2="58" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Line x1="20" y1="65" x2="100" y2="65" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Line x1="20" y1="65" x2="5" y2="130" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Line x1="100" y1="65" x2="115" y2="130" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Line x1="60" y1="58" x2="60" y2="140" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Line x1="35" y1="140" x2="85" y2="140" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Line x1="42" y1="140" x2="35" y2="225" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Line x1="78" y1="140" x2="85" y2="225" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
   </Svg>
 );
 
 const SideSilhouette = () => (
   <Svg width="120" height="240" viewBox="0 0 120 240">
-    {/* Head side profile */}
-    <Circle cx="65" cy="25" r="18" stroke="#00D4AA"
-      strokeWidth="2" fill="none" strokeDasharray="4,2"/>
-    {/* Neck */}
-    <Line x1="65" y1="43" x2="65" y2="58"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
-    {/* Torso */}
-    <Line x1="65" y1="58" x2="65" y2="140"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
-    {/* Arm (one visible from side) */}
-    <Line x1="65" y1="70" x2="45" y2="125"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
-    {/* Hip */}
-    <Line x1="55" y1="140" x2="75" y2="140"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
-    {/* Leg (side view — single line) */}
-    <Line x1="65" y1="140" x2="65" y2="225"
-      stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Circle cx="65" cy="25" r="18" stroke="#00D4AA" strokeWidth="2" fill="none" strokeDasharray="4,2"/>
+    <Line x1="65" y1="43" x2="65" y2="58" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Line x1="65" y1="58" x2="65" y2="140" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Line x1="65" y1="70" x2="45" y2="125" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Line x1="55" y1="140" x2="75" y2="140" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
+    <Line x1="65" y1="140" x2="65" y2="225" stroke="#00D4AA" strokeWidth="2" strokeDasharray="4,2"/>
   </Svg>
 );
 
 const GuidelinesScreen = ({ navigation }) => {
   const guidelines = [
-    { icon: '🧍', title: 'Stand Straight in A-Pose', desc: 'Arms slightly open away from sides, legs shoulder-width apart.' },
-    { icon: '👚', title: 'Fitted Clothing', desc: 'Wear tight-fitting athletic wear or swimsuit for accurate AI silhouette detection.' },
-    { icon: '💡', title: 'Good Lighting', desc: 'Ensure plain background and well-lit environment without harsh shadows.' },
-    { icon: '📱', title: 'Full Body in Frame', desc: 'Position camera at waist height so head-to-toe is visible.' },
+    {
+      emoji: '🧍',
+      title: 'Stand Straight in A-Pose',
+      description: 'Arms slightly open away from sides, legs shoulder-width apart.',
+    },
+    {
+      emoji: '👕',
+      title: 'Fitted Clothing',
+      description: 'Wear tight-fitting athletic wear or swimsuit for accurate AI silhouette detection.',
+    },
+    {
+      emoji: '💡',
+      title: 'Good Lighting',
+      description: 'Ensure plain background and well-lit environment without harsh shadows.',
+    },
+    {
+      emoji: '📱',
+      title: 'Full Body in Frame',
+      description: 'Ensure full body from head-to-toe is visible in frame.',
+    },
+    {
+      emoji: '📷',
+      title: 'Camera at Chest Height',
+      description: 'Hold camera straight without tilting upwards or downwards.',
+    },
+    {
+      emoji: '🧱',
+      title: 'Plain Background',
+      description: 'Stand against a simple wall for maximum AI segmentation accuracy.',
+    },
   ];
 
   return (
@@ -74,7 +70,7 @@ const GuidelinesScreen = ({ navigation }) => {
       <Header title="Photo Guidelines" onBack={() => navigation.goBack()} />
 
       <ScrollView contentContainerStyle={styles.content}>
-        {/* Silhouette Preview — Side by Side */}
+        {/* Silhouette Preview */}
         <View style={styles.previewCard}>
           <Text style={styles.previewTitle}>Optimal Positioning</Text>
 
@@ -104,10 +100,10 @@ const GuidelinesScreen = ({ navigation }) => {
         <View style={styles.list}>
           {guidelines.map((g, idx) => (
             <View key={idx} style={styles.item}>
-              <Text style={styles.itemIcon}>{g.icon}</Text>
+              <Text style={styles.itemIcon}>{g.emoji}</Text>
               <View style={styles.itemText}>
                 <Text style={styles.itemTitle}>{g.title}</Text>
-                <Text style={styles.itemDesc}>{g.desc}</Text>
+                <Text style={styles.itemDesc}>{g.description}</Text>
               </View>
             </View>
           ))}

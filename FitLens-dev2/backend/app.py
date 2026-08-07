@@ -3618,18 +3618,85 @@ def download_pdf():
     if request.method == 'OPTIONS':
         return '', 200
     try:
-        data = get_request_data()
-        data = normalize_export_payload(data)
-        user_id = data.get('user_id', 'Guest_User')
+        data = request.get_json(silent=True, force=True) or {}
+        measurements = data.get('measurements', {})
+
+        if measurements and isinstance(measurements, dict):
+            import io
+            from reportlab.lib.pagesizes import A4
+            from reportlab.pdfgen import canvas
+            
+            buffer = io.BytesIO()
+            c = canvas.Canvas(buffer, pagesize=A4)
+            width, height = A4
+
+            # Header
+            c.setFillColorRGB(0.04, 0.055, 0.153)
+            c.rect(0, height - 80, width, 80, fill=1)
+            c.setFillColorRGB(0, 0.831, 0.667)
+            c.setFont("Helvetica-Bold", 24)
+            c.drawString(50, height - 50, "FitLens AI — Body Measurements Report")
+            c.setFont("Helvetica", 12)
+            c.setFillColorRGB(0.627, 0.678, 0.753)
+            c.drawString(50, height - 70, f"Generated: {datetime.datetime.utcnow().strftime('%d %b %Y %H:%M UTC')}")
+
+            # Table Headers
+            c.setFillColorRGB(0.1, 0.1, 0.1)
+            y = height - 120
+            c.setFont("Helvetica-Bold", 14)
+            c.setFillColorRGB(0.04, 0.055, 0.153)
+            c.drawString(50, y, "Measurement")
+            c.drawString(250, y, "Value (cm)")
+            c.drawString(350, y, "Value (px)")
+            c.drawString(470, y, "Source")
+            y -= 25
+
+            c.setFont("Helvetica", 12)
+            for key, val in measurements.items():
+                if y < 80:
+                    c.showPage()
+                    y = height - 60
+                name = key.replace('_', ' ').title()
+                if isinstance(val, dict):
+                    cm_val = val.get('value_cm')
+                    px_val = val.get('value_px')
+                    source = val.get('source', 'Unknown')
+                else:
+                    cm_val = val
+                    px_val = None
+                    source = 'Unknown'
+                cm_str = f"{float(cm_val):.1f}" if cm_val is not None else "—"
+                px_str = f"{float(px_val):.2f}" if px_val is not None else "—"
+
+                c.setFillColorRGB(0.1, 0.1, 0.1)
+                c.drawString(50, y, str(name)[:25])
+                c.setFillColorRGB(0, 0.831, 0.667)
+                c.drawString(250, y, f"{cm_str} cm")
+                c.setFillColorRGB(0.3, 0.3, 0.3)
+                c.drawString(350, y, px_str)
+                c.drawString(470, y, str(source)[:20])
+                y -= 22
+
+            c.save()
+            buffer.seek(0)
+            return send_file(
+                buffer,
+                mimetype='application/pdf',
+                as_attachment=True,
+                download_name='FitLens_Report.pdf'
+            )
+
+        # Fallback to full payload processing
+        norm_data = normalize_export_payload(data)
+        user_id = norm_data.get('user_id', 'Guest_User')
         
         temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         temp_pdf_path = temp_pdf.name
         temp_pdf.close()
         
-        result_path = export_pdf(data, user_id, temp_pdf_path)
-        
+        result_path = export_pdf(norm_data, user_id, temp_pdf_path)
         if not result_path or not os.path.exists(result_path):
-             return jsonify({'error': 'PDF generation failed or reportlab library is missing.'}), 500
+            return jsonify({'error': 'PDF generation failed or reportlab library is missing.'}), 500
              
         return send_file(
             result_path,
@@ -3642,6 +3709,7 @@ def download_pdf():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/download/docx', methods=['GET', 'POST', 'OPTIONS'])
 @app.route('/download/docx', methods=['GET', 'POST', 'OPTIONS'])
 @app.route('/export/docx', methods=['GET', 'POST', 'OPTIONS'])
@@ -3652,16 +3720,69 @@ def download_docx():
     if request.method == 'OPTIONS':
         return '', 200
     try:
-        data = get_request_data()
-        data = normalize_export_payload(data)
-        user_id = data.get('user_id', 'Guest_User')
+        data = request.get_json(silent=True, force=True) or {}
+        measurements = data.get('measurements', {})
+
+        if measurements and isinstance(measurements, dict):
+            try:
+                import io
+                from docx import Document
+                from docx.enum.text import WD_ALIGN_PARAGRAPH
+                doc = Document()
+                title = doc.add_heading('FitLens AI - Body Measurements Report', 0)
+                title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+                p = doc.add_paragraph()
+                p.add_run('Generated: ').bold = True
+                p.add_run(f'{datetime.datetime.utcnow().strftime("%d %b %Y %H:%M UTC")}')
+
+                table = doc.add_table(rows=1, cols=4)
+                table.style = 'Table Grid'
+                hdr_cells = table.rows[0].cells
+                headers = ['Measurement', 'Value (cm)', 'Value (px)', 'Source']
+                for i, header in enumerate(headers):
+                    hdr_cells[i].text = header
+                    hdr_cells[i].paragraphs[0].runs[0].bold = True
+
+                for key, val in measurements.items():
+                    name = key.replace('_', ' ').title()
+                    if isinstance(val, dict):
+                        cm_val = val.get('value_cm')
+                        px_val = val.get('value_px')
+                        source = val.get('source', 'Unknown')
+                    else:
+                        cm_val = val
+                        px_val = None
+                        source = 'Unknown'
+                    cm_str = f"{float(cm_val):.1f} cm" if cm_val is not None else "—"
+                    px_str = f"{float(px_val):.2f}" if px_val is not None else "—"
+
+                    row_cells = table.add_row().cells
+                    row_cells[0].text = name
+                    row_cells[1].text = cm_str
+                    row_cells[2].text = px_str
+                    row_cells[3].text = str(source)
+
+                buffer = io.BytesIO()
+                doc.save(buffer)
+                buffer.seek(0)
+                return send_file(
+                    buffer,
+                    mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    as_attachment=True,
+                    download_name='FitLens_Report.docx'
+                )
+            except Exception as docx_err:
+                print(f"Inline DOCX error: {docx_err}")
+
+        norm_data = normalize_export_payload(data)
+        user_id = norm_data.get('user_id', 'Guest_User')
 
         temp_docx = tempfile.NamedTemporaryFile(delete=False, suffix='.docx')
         temp_docx_path = temp_docx.name
         temp_docx.close()
         
-        result_path = export_docx(data, user_id, temp_docx_path)
-        
+        result_path = export_docx(norm_data, user_id, temp_docx_path)
         if not result_path or not os.path.exists(result_path):
             return jsonify({'error': 'DOCX generation failed or python-docx library is missing.'}), 500
             
@@ -3676,6 +3797,7 @@ def download_docx():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/download/xml', methods=['GET', 'POST', 'OPTIONS'])
 @app.route('/download/xml', methods=['GET', 'POST', 'OPTIONS'])
 @app.route('/export/xml', methods=['GET', 'POST', 'OPTIONS'])
@@ -3686,17 +3808,50 @@ def download_xml():
     if request.method == 'OPTIONS':
         return '', 200
     try:
-        data = get_request_data()
-        data = normalize_export_payload(data)
-        results = data.get('results', {})
-        calibration = data.get('calibration', {})
+        data = request.get_json(silent=True, force=True) or {}
+        measurements = data.get('measurements', {})
+
+        if measurements and isinstance(measurements, dict):
+            import io
+            root = ET.Element("FitLensMeasurementReport")
+            ET.SubElement(root, "Generated").text = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+            m_node = ET.SubElement(root, "Measurements")
+
+            for key, val in measurements.items():
+                node = ET.SubElement(m_node, "Measurement")
+                ET.SubElement(node, "Name").text = key.replace('_', ' ').title()
+                if isinstance(val, dict):
+                    cm_val = val.get('value_cm')
+                    px_val = val.get('value_px')
+                    source = val.get('source', 'Unknown')
+                else:
+                    cm_val = val
+                    px_val = None
+                    source = 'Unknown'
+                ET.SubElement(node, "ValueCM").text = f"{float(cm_val):.2f}" if cm_val is not None else ""
+                ET.SubElement(node, "ValuePX").text = f"{float(px_val):.2f}" if px_val is not None else ""
+                ET.SubElement(node, "Source").text = str(source)
+
+            buffer = io.BytesIO()
+            tree = ET.ElementTree(root)
+            tree.write(buffer, encoding='utf-8', xml_declaration=True)
+            buffer.seek(0)
+            return send_file(
+                buffer,
+                mimetype='application/xml',
+                as_attachment=True,
+                download_name='FitLens_Report.xml'
+            )
+
+        norm_data = normalize_export_payload(data)
+        results = norm_data.get('results', {})
+        calibration = norm_data.get('calibration', {})
         scale_factor = float(calibration.get('scale_factor', 0) or 0)
-        user_id = data.get('user_id', 'Guest_User')
+        user_id = norm_data.get('user_id', 'Guest_User')
         
         root = ET.Element("FitLensMeasurementReport")
         ET.SubElement(root, "UserID").text = str(user_id)
         ET.SubElement(root, "Date").text = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
         measurements_node = ET.SubElement(root, "Measurements")
         
         def add_measurement_to_xml(m_name, m_val):

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, StyleSheet, Modal, TouchableOpacity,
-  Image, Dimensions, PanResponder, Alert, ScrollView
+  Image, Dimensions, PanResponder, Alert, ScrollView, Animated
 } from 'react-native';
 import Svg, { Circle, Line, Text as SvgText, G } from 'react-native-svg';
 import { Colors } from '../../constants/colors';
@@ -29,7 +29,7 @@ const ManualLandmarkModal = ({
   const [selectedType, setSelectedType] = useState('shoulder');
   const [landmarks, setLandmarks] = useState([]);
   const [currentStartPoint, setCurrentStartPoint] = useState(null);
-  const [draggingPoint, setDraggingPoint] = useState(null); // { lIdx, pIdx }
+  const [activePointKey, setActivePointKey] = useState(null); // 'lIdx-pIdx'
 
   // Image layout dimensions
   const [imgLayout, setImgLayout] = useState({ width: SCREEN_WIDTH - 32, height: 420, x: 0, y: 0 });
@@ -45,52 +45,50 @@ const ManualLandmarkModal = ({
     }
   }, [imageUri]);
 
-  // Touch Handler using PanResponder
-  const panResponder = useRef(
+  // Main Background Viewport Tap Handler for placing new points
+  const viewportPanResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: (evt) => {
         const { locationX, locationY } = evt.nativeEvent;
-        handleTouchStart(locationX, locationY);
-      },
-      onPanResponderMove: (evt) => {
-        const { locationX, locationY } = evt.nativeEvent;
-        handleTouchMove(locationX, locationY);
-      },
-      onPanResponderRelease: () => {
-        setDraggingPoint(null);
+        handleTapViewport(locationX, locationY);
       },
     })
   ).current;
 
-  const findNearbyPoint = (touchX, touchY, radius = 24) => {
-    for (let lIdx = 0; lIdx < landmarks.length; lIdx++) {
-      const lm = landmarks[lIdx];
-      for (let pIdx = 0; pIdx < lm.points.length; pIdx++) {
-        const pt = lm.points[pIdx];
-        const dist = Math.hypot(pt.x - touchX, pt.y - touchY);
-        if (dist <= radius) {
-          return { lIdx, pIdx };
-        }
-      }
-    }
-    return null;
+  // Individual Drag PanResponder generator for each handle point
+  const createPointPanResponder = (lIdx, pIdx, currentPos) => {
+    let startPos = { ...currentPos };
+
+    return PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: () => {
+        setActivePointKey(`${lIdx}-${pIdx}`);
+        startPos = { ...currentPos };
+      },
+      onPanResponderMove: (evt, gestureState) => {
+        const newX = Math.max(0, Math.min(imgLayout.width, startPos.x + gestureState.dx));
+        const newY = Math.max(0, Math.min(imgLayout.height, startPos.y + gestureState.dy));
+
+        setLandmarks((prev) =>
+          prev.map((lm, i) => {
+            if (i !== lIdx) return lm;
+            const updatedPts = lm.points.map((p, j) => (j === pIdx ? { x: newX, y: newY } : p));
+            return { ...lm, points: updatedPts };
+          })
+        );
+      },
+      onPanResponderRelease: () => {
+        setActivePointKey(null);
+      },
+    });
   };
 
-  const handleTouchStart = (x, y) => {
-    // 1. Check if user tapped near an existing point to drag
-    const nearby = findNearbyPoint(x, y);
-    if (nearby) {
-      setDraggingPoint(nearby);
-      return;
-    }
-
-    // 2. Otherwise add new point
+  const handleTapViewport = (x, y) => {
     if (!currentStartPoint) {
       setCurrentStartPoint({ x, y });
     } else {
-      // Finish landmark line
       const activeType = LANDMARK_TYPES.find((t) => t.id === selectedType);
       const newLandmark = {
         type: selectedType,
@@ -101,19 +99,6 @@ const ManualLandmarkModal = ({
 
       setLandmarks((prev) => [...prev.filter((l) => l.type !== selectedType), newLandmark]);
       setCurrentStartPoint(null);
-    }
-  };
-
-  const handleTouchMove = (x, y) => {
-    if (draggingPoint) {
-      const { lIdx, pIdx } = draggingPoint;
-      setLandmarks((prev) =>
-        prev.map((lm, i) => {
-          if (i !== lIdx) return lm;
-          const updatedPts = lm.points.map((p, j) => (j === pIdx ? { x, y } : p));
-          return { ...lm, points: updatedPts };
-        })
-      );
     }
   };
 
@@ -133,9 +118,8 @@ const ManualLandmarkModal = ({
       return;
     }
 
-    // Format landmarks to match Web API structure with normalized coordinates
-    const scaleX = naturalSize.width / imgLayout.width;
-    const scaleY = naturalSize.height / imgLayout.height;
+    const scaleX = naturalSize.width / (imgLayout.width || 1);
+    const scaleY = naturalSize.height / (imgLayout.height || 1);
 
     const formattedLandmarks = landmarks.map((lm) => ({
       type: lm.type,
@@ -146,8 +130,8 @@ const ManualLandmarkModal = ({
         return {
           x: imgX,
           y: imgY,
-          x_norm: imgX / naturalSize.width,
-          y_norm: imgY / naturalSize.height,
+          x_norm: imgX / (naturalSize.width || 1),
+          y_norm: imgY / (naturalSize.height || 1),
         };
       }),
     }));
@@ -182,7 +166,7 @@ const ManualLandmarkModal = ({
         {/* Instructions */}
         <View style={styles.hintBox}>
           <Text style={styles.hintText}>
-            Select a measurement below, then tap 2 points on the image to draw a line. Drag points to adjust.
+            Select a measurement below, tap 2 points to draw a line, then drag handle circles to fine-tune position.
           </Text>
         </View>
 
@@ -225,7 +209,7 @@ const ManualLandmarkModal = ({
         <View
           style={styles.imageViewport}
           onLayout={(e) => setImgLayout(e.nativeEvent.layout)}
-          {...panResponder.panHandlers}>
+          {...viewportPanResponder.panHandlers}>
           
           {imageUri ? (
             <Image source={{ uri: imageUri }} style={styles.image} resizeMode="contain" />
@@ -233,9 +217,8 @@ const ManualLandmarkModal = ({
             <View style={styles.noImgBox}><Text style={{ color: '#fff' }}>No Image</Text></View>
           )}
 
-          {/* SVG Overlay for Lines & Handle Points */}
-          <Svg style={StyleSheet.absoluteFill}>
-            {/* Existing Completed Lines */}
+          {/* SVG Overlay for Lines */}
+          <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
             {landmarks.map((lm, idx) => {
               if (lm.points.length < 2) return null;
               const [p1, p2] = lm.points;
@@ -251,8 +234,6 @@ const ManualLandmarkModal = ({
                     stroke={lm.color}
                     strokeWidth="3"
                   />
-                  <Circle cx={p1.x} cy={p1.y} r="10" fill={lm.color} stroke="#fff" strokeWidth="2" />
-                  <Circle cx={p2.x} cy={p2.y} r="10" fill={lm.color} stroke="#fff" strokeWidth="2" />
                   <SvgText
                     x={midX} y={midY - 8}
                     fill={lm.color}
@@ -277,6 +258,34 @@ const ManualLandmarkModal = ({
               />
             )}
           </Svg>
+
+          {/* Draggable Point Handles on Top */}
+          {landmarks.map((lm, lIdx) =>
+            lm.points.map((pt, pIdx) => {
+              const pointKey = `${lIdx}-${pIdx}`;
+              const isActive = activePointKey === pointKey;
+              const pan = createPointPanResponder(lIdx, pIdx, pt);
+
+              return (
+                <View
+                  key={pointKey}
+                  {...pan.panHandlers}
+                  style={[
+                    styles.landmarkHandle,
+                    {
+                      left: pt.x - 14,
+                      top: pt.y - 14,
+                      backgroundColor: isActive ? '#ED8936' : lm.color,
+                      transform: [{ scale: isActive ? 1.4 : 1.0 }],
+                    },
+                  ]}>
+                  <Text style={styles.handleText}>
+                    {lm.type.slice(0, 2).toUpperCase()}{pIdx + 1}
+                  </Text>
+                </View>
+              );
+            })
+          )}
 
         </View>
 
@@ -327,6 +336,26 @@ const styles = StyleSheet.create({
   },
   image: { width: '100%', height: '100%' },
   noImgBox: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  landmarkHandle: {
+    position: 'absolute',
+    width: 28, height: 28,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.6,
+    shadowRadius: 3,
+    zIndex: 30,
+  },
+  handleText: {
+    color: '#FFFFFF',
+    fontSize: 9,
+    fontWeight: '900',
+  },
   footer: {
     flexDirection: 'row', justifyContent: 'space-between',
     alignItems: 'center', padding: 16, borderTopWidth: 1, borderTopColor: '#1A1F3A',

@@ -149,17 +149,29 @@ const ResultsScreen = ({ route, navigation }) => {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
+      const measurementsForDownload = {};
+      Object.entries(mergedMeasurements).forEach(([key, val]) => {
+        measurementsForDownload[key] = {
+          value_cm: val?.value_cm ?? null,
+          value_px: val?.value_px ?? null,
+          source: val?.source ?? 'Unknown',
+          label: key.replace(/_/g, ' ')
+            .split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+        };
+      });
+
       const exportPayload = {
         user_id: data?.user_id || 'Guest_User',
         calibration: data?.calibration || {},
         results: data?.results || {},
+        measurements: measurementsForDownload,
       };
 
-      console.log(`[Export Start] Requesting ${format.toUpperCase()} report from: ${Config.BASE_URL}/api/export/${format}`);
+      console.log(`[Export Start] Requesting ${format.toUpperCase()} report from: ${Config.BASE_URL}/api/download/${format}`);
 
       // 4. Download binary file natively using RNFS.downloadFile directly to disk
       const downloadTask = RNFS.downloadFile({
-        fromUrl: `${Config.BASE_URL}/api/export/${format}`,
+        fromUrl: `${Config.BASE_URL}/api/download/${format}`,
         toFile: filePath,
         method: 'POST',
         headers: headers,
@@ -185,12 +197,17 @@ const ResultsScreen = ({ route, navigation }) => {
 
       // 5. Show success dialog ONLY AFTER file write Promise resolves
       Alert.alert(
-        'Download Successful',
-        `${format.toUpperCase()} report (${(fileStat.size / 1024).toFixed(1)} KB) saved to:\n\n${filePath}`
+        '✅ Download Complete',
+        `Report saved to Downloads folder as ${filename}`,
+        [{ text: 'OK' }]
       );
     } catch (err) {
       console.error(`[Export Error] ${format.toUpperCase()} export failed:`, err);
-      Alert.alert('Download Failed', `Could not save ${format.toUpperCase()} report: ${err.message}`);
+      Alert.alert(
+        'Download Failed',
+        err.message || `Failed to download ${format.toUpperCase()} report`,
+        [{ text: 'OK' }]
+      );
     } finally {
       setDownloading(false);
     }
