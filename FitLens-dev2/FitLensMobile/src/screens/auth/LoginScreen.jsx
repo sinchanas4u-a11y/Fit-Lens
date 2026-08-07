@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Alert, Image } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { useAuthStore } from '../../store/authStore';
 import { authApi } from '../../api/authApi';
 import Input from '../../components/common/Input';
 import Button from '../../components/common/Button';
 import { Colors } from '../../constants/colors';
+
+const brandLogo = require('../../assets/logo.png');
 
 const LoginScreen = ({ navigation }) => {
   const [email, setEmail] = useState('');
@@ -40,9 +42,7 @@ const LoginScreen = ({ navigation }) => {
   return (
     <LinearGradient colors={['#0A0E27', '#1A1F3A', '#0D1B2A']} style={styles.container}>
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.logo}>📏</Text>
-        <Text style={styles.title}>FitLens AI</Text>
-        <Text style={styles.subtitle}>AI-Powered Body Measurements</Text>
+        <Image source={brandLogo} style={styles.logoHeader} resizeMode="contain" />
 
         <View style={styles.card}>
           <Text style={styles.heading}>Welcome Back</Text>
@@ -94,9 +94,7 @@ const LoginScreen = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   content: { flexGrow: 1, justifyContent: 'center', padding: 24 },
-  logo: { fontSize: 56, textAlign: 'center', marginBottom: 8 },
-  title: { fontSize: 32, fontWeight: '800', color: Colors.accent, textAlign: 'center' },
-  subtitle: { color: Colors.textSecondary, textAlign: 'center', marginBottom: 32, fontSize: 14 },
+  logoHeader: { width: 220, height: 180, alignSelf: 'center', marginBottom: 20 },
   card: {
     backgroundColor: Colors.cardBg,
     borderRadius: 20,

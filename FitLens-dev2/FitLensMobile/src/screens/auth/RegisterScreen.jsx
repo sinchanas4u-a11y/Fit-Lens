@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Alert, Image } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { authApi } from '../../api/authApi';
 import Input from '../../components/common/Input';
 import Button from '../../components/common/Button';
 import { Colors } from '../../constants/colors';
+
+const brandLogo = require('../../assets/logo.png');
 
 const RegisterScreen = ({ navigation }) => {
   const [name, setName] = useState('');
@@ -44,8 +46,7 @@ const RegisterScreen = ({ navigation }) => {
   return (
     <LinearGradient colors={['#0A0E27', '#1A1F3A', '#0D1B2A']} style={styles.container}>
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.logo}>📏</Text>
-        <Text style={styles.title}>FitLens AI</Text>
+        <Image source={brandLogo} style={styles.logoHeader} resizeMode="contain" />
 
         <View style={styles.card}>
           <Text style={styles.heading}>Create Account</Text>
@@ -108,8 +109,7 @@ const RegisterScreen = ({ navigation }) => {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   content: { flexGrow: 1, justifyContent: 'center', padding: 24, paddingVertical: 40 },
-  logo: { fontSize: 48, textAlign: 'center', marginBottom: 4 },
-  title: { fontSize: 28, fontWeight: '800', color: Colors.accent, textAlign: 'center', marginBottom: 24 },
+  logoHeader: { width: 200, height: 160, alignSelf: 'center', marginBottom: 16 },
   card: {
     backgroundColor: Colors.cardBg,
     borderRadius: 20,

@@ -95,16 +95,12 @@ export default function LoginScreen({ onLoginSuccess }) {
         backdropFilter: 'blur(10px)'
       }}>
         {/* Header Branding */}
-        <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+        <div style={{ textAlign: 'center', marginBottom: '24px' }}>
           <img
             src="/logo.png"
             alt="FitLens Logo"
-            style={{ width: '70px', height: '70px', borderRadius: '16px', marginBottom: '12px' }}
-            onError={(e) => { e.target.style.display = 'none'; }}
+            style={{ height: '150px', width: 'auto', maxWidth: '100%', objectFit: 'contain', marginBottom: '8px' }}
           />
-          <h1 style={{ fontSize: '28px', fontWeight: '800', margin: '0 0 6px 0', color: '#ffffff' }}>
-            Fit<span style={{ color: '#00D4AA' }}>Lens</span>
-          </h1>
           <p style={{ color: '#a0aec0', fontSize: '14px', margin: 0 }}>
             {isRegister ? 'Create your account to save body scans' : 'Sign in to access your measurement profile'}
           </p>

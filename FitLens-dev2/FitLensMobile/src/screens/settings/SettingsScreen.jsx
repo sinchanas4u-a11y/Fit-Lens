@@ -1,9 +1,11 @@
 import React from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert, Image } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import Header from '../../components/common/Header';
 import { useAuthStore } from '../../store/authStore';
 import { Colors } from '../../constants/colors';
+
+const brandLogo = require('../../assets/logo.png');
 
 const SettingsScreen = ({ navigation }) => {
   const { user, logout } = useAuthStore();
@@ -64,6 +66,9 @@ const SettingsScreen = ({ navigation }) => {
         <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
           <Text style={styles.logoutText}>🚪 Log Out</Text>
         </TouchableOpacity>
+
+        {/* Brand Logo Footer */}
+        <Image source={brandLogo} style={{ width: 140, height: 100, alignSelf: 'center', marginBottom: 12 }} resizeMode="contain" />
 
         <Text style={styles.version}>FitLens Mobile v1.0.0 • AI Body Measurements</Text>
       </ScrollView>

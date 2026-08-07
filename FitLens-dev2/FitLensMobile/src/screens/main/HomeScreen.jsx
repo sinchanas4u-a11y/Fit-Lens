@@ -1,10 +1,12 @@
 import React, { useEffect } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, StatusBar } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, StyleSheet, StatusBar, Image } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { useAuthStore } from '../../store/authStore';
 import { useMeasurementStore } from '../../store/measurementStore';
 import { measurementApi } from '../../api/measurementApi';
 import { Colors } from '../../constants/colors';
+
+const brandLogo = require('../../assets/logo.png');
 
 const HomeScreen = ({ navigation }) => {
   const { user } = useAuthStore();
@@ -28,9 +30,12 @@ const HomeScreen = ({ navigation }) => {
 
         {/* Header */}
         <View style={styles.header}>
-          <View>
-            <Text style={styles.welcome}>Welcome back,</Text>
-            <Text style={styles.name}>{user?.name || 'User'} 👋</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Image source={brandLogo} style={{ width: 44, height: 44, marginRight: 12 }} resizeMode="contain" />
+            <View>
+              <Text style={styles.welcome}>Welcome back,</Text>
+              <Text style={styles.name}>{user?.name || 'User'} 👋</Text>
+            </View>
           </View>
           <TouchableOpacity onPress={() => navigation.navigate('Settings')}>
             <Text style={{ fontSize: 28 }}>⚙️</Text>

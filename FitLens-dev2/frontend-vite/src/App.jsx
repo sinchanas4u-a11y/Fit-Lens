@@ -92,7 +92,7 @@ function App() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px', marginBottom: '8px' }}>
-          <img src={logo} alt="FitLens Logo" style={{ height: '80px', objectFit: 'contain' }} />
+          <img src={logo} alt="FitLens Logo" style={{ height: '120px', objectFit: 'contain' }} />
         </div>
         <h2>Body Measurement System</h2>
         <p>YOLOv8 Segmentation + MediaPipe Landmarks + SMPL 3D Mesh</p>
