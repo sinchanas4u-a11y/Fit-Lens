@@ -131,12 +131,30 @@ measurements_col = db['measurements']
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # JWT config
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'fitlens-secret-key')
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = dt.timedelta(days=30)
 jwt = JWTManager(app)
+
+
+def to_native_types(obj):
+    """Recursively convert NumPy/pandas types to native Python types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: to_native_types(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [to_native_types(i) for i in obj]
+    elif isinstance(obj, np.ndarray):
+        return to_native_types(obj.tolist())
+    elif isinstance(obj, (np.float32, np.float64, np.float16, np.floating)):
+        return float(obj)
+    elif isinstance(obj, (np.int32, np.int64, np.int16, np.int8, np.integer)):
+        return int(obj)
+    elif isinstance(obj, np.generic):
+        return obj.item()
+    return obj
+
 
 # Flask-Mail config
 import secrets
@@ -635,6 +653,11 @@ temporal_stabilizer = TemporalStabilizer()
 measurement_engine = MeasurementEngine()
 segmentation_model = SegmentationModel()
 landmark_detector = LandmarkDetector()
+
+def get_landmark_detector():
+    """Get the global landmark detector instance."""
+    global landmark_detector
+    return landmark_detector
 
 # Optional face model used for best-effort gender detection.
 if FaceVerifier is not None:
@@ -1678,8 +1701,39 @@ def process():
 
 
 @app.route('/api/validate-person', methods=['POST'])
-def validate_person_stub():
-    return jsonify({'success': True}), 200
+@app.route('/validate/person-count', methods=['POST'])
+@app.route('/api/validate/person-count', methods=['POST'])
+def validate_person_route():
+    """Validate that exactly one person is present in the image."""
+    t_start = time.time()
+    print("-> /api/validate-person starting validation...")
+    try:
+        data = request.json or {}
+        image_b64 = data.get('image')
+        if not image_b64:
+            return jsonify({'error': 'Image is required'}), 400
+        
+        img = decode_image(image_b64)
+        if img is None:
+            return jsonify({'error': 'Invalid image data'}), 400
+            
+        padded_img = add_image_padding(img, padding_percent=0.10)
+        
+        if segmentation_model is not None and segmentation_model.model is not None:
+            segmentation_model.segment_person(padded_img, conf_threshold=0.5)
+            
+        t_elapsed = time.time() - t_start
+        print(f"✓ /api/validate-person completed successfully in {t_elapsed:.3f}s")
+        return jsonify({'success': True, 'message': 'Exactly 1 person detected'})
+        
+    except ValueError as e:
+        t_elapsed = time.time() - t_start
+        print(f"✗ /api/validate-person validation failed in {t_elapsed:.3f}s: {e}")
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        t_elapsed = time.time() - t_start
+        print(f"✗ /api/validate-person error in {t_elapsed:.3f}s: {e}")
+        return jsonify({'error': f'Validation failed: {str(e)}'}), 500
 
 
 @app.route('/api/upload/process', methods=['POST'])
@@ -3894,11 +3948,578 @@ def download_xml():
         return jsonify({'error': str(e)}), 500
 
 
+
+# --- Live Camera Session State & Socket.IO Real-Time Stream ---
+
+class LiveSession:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.captured_images = {}
+        self.processed_results = {}
+        self.current_view = 'front'
+        self.stability_start_time = None
+        self.is_stable = False
+        self.last_instruction = ""
+        self.last_instruction_time = 0.0
+        self.user_height_cm = 165.0
+        self.scale_factor = 0.0
+
+session_store = {}
+
+def get_session():
+    try:
+        sid = getattr(request, 'sid', 'global_session')
+    except Exception:
+        sid = 'global_session'
+    if sid not in session_store:
+        session_store[sid] = LiveSession()
+    return session_store[sid]
+
+
+def add_image_padding(image, padding_percent=0.10):
+    """Adds percentage-based padding to all sides of an image."""
+    h, w = image.shape[:2]
+    pad_h = int(h * padding_percent)
+    pad_w = int(w * padding_percent)
+    return cv2.copyMakeBorder(
+        image, pad_h, pad_h, pad_w, pad_w, 
+        cv2.BORDER_CONSTANT, value=[128, 128, 128]
+    )
+
+
+def _compute_scale_from_height_px(user_height_cm, height_px, fallback=0.0):
+    if user_height_cm is None:
+        return fallback
+    try:
+        user_height_cm = float(user_height_cm)
+        height_px = float(height_px)
+    except Exception:
+        return fallback
+
+    if user_height_cm <= 0 or height_px <= 0:
+        return fallback
+    return user_height_cm / height_px
+
+
+def _ensure_pixel_landmarks(landmarks, image_shape):
+    if landmarks is None:
+        return None
+    if len(landmarks) == 0:
+        return landmarks
+
+    h, w = image_shape[:2]
+    lm = np.array(landmarks, dtype=np.float32).copy()
+    max_x = float(np.max(np.abs(lm[:, 0])) or 0.0) if lm.shape[1] >= 1 else 0.0
+    max_y = float(np.max(np.abs(lm[:, 1])) or 0.0) if lm.shape[1] >= 2 else 0.0
+
+    if max_x <= 1.5 and max_y <= 1.5:
+        lm[:, 0] = lm[:, 0] * float(w or 1)
+        lm[:, 1] = lm[:, 1] * float(h or 1)
+    return lm
+
+
+def _normalize_height_to_cm(user_height, height_unit='cm', fallback=0.0):
+    if user_height is None:
+        return fallback
+    try:
+        height_cm = float(user_height)
+    except Exception:
+        return fallback
+
+    unit = str(height_unit or 'cm').strip().lower()
+    if unit in ('inches', 'in'):
+        height_cm *= 2.54
+    elif unit in ('feet', 'ft'):
+        height_cm *= 30.48
+    return height_cm if height_cm > 0 else fallback
+
+
+def _normalize_engine_view(view_name):
+    if view_name in ('right', 'left', 'side'):
+        return 'side'
+    return 'front' if view_name == 'back' else view_name
+
+
+def get_next_view(current):
+    order = ['front', 'side']
+    try:
+        idx = order.index(current)
+        if idx < len(order) - 1:
+            return order[idx + 1]
+    except ValueError:
+        pass
+    return 'complete'
+
+
+def process_alignment(image, view, session=None):
+    if session is None:
+        session = get_session()
+    h, w, _ = image.shape
+    
+    # 1. YOLO Person Count Check (with conf=0.35 for live streaming webcam frames)
+    if segmentation_model is not None and segmentation_model.model is not None:
+        try:
+            pad_h = int(h * 0.1)
+            pad_w = int(w * 0.1)
+            padded = cv2.copyMakeBorder(image, pad_h, pad_h, pad_w, pad_w, 
+                                       cv2.BORDER_CONSTANT, value=[128, 128, 128])
+            results = segmentation_model.model(padded, conf=0.35, imgsz=1024, verbose=False, classes=[0])
+            num_people = len(results[0].boxes) if len(results) > 0 and results[0].boxes is not None else 0
+            
+            if num_people > 1:
+                session.stability_start_time = None
+                return 'red', "Multiple people detected. Please ensure only one person is visible in the camera.", None
+        except Exception as e:
+            print(f"Error checking person count in process_alignment: {e}")
+
+    # 2. MediaPipe Pose Landmark Detection
+    ld = get_landmark_detector()
+    if ld is None:
+        return 'red', 'Landmark detector unavailable', None
+    landmarks = ld.detect(image)
+    landmarks = _ensure_pixel_landmarks(landmarks, image.shape) if landmarks is not None else None
+
+    if landmarks is None:
+        session.stability_start_time = None
+        return 'red', 'No person detected. Please stand in front of camera.', None
+
+    # 3. Critical Landmarks Confidence Check (Nose, Shoulders, Hips, Ankles)
+    critical_landmarks = [0, 11, 12, 23, 24, 27, 28]
+    for idx in critical_landmarks:
+        if idx >= len(landmarks):
+            session.stability_start_time = None
+            return 'red', 'Full body not visible. Step back.', None
+        if len(landmarks[idx]) >= 3 and landmarks[idx][2] < 0.4:
+            session.stability_start_time = None
+            return 'red', 'Full body not visible. Adjust position.', None
+
+    # 4. Feet Visibility Check
+    left_ankle = landmarks[27]
+    right_ankle = landmarks[28]
+    max_ankle_y = max(left_ankle[1], right_ankle[1])
+    feet_limit_y = h * 0.96
+    if max_ankle_y > feet_limit_y:
+        session.stability_start_time = None
+        return 'red', 'Step back. Feet not fully visible.', None
+
+    # 5. Head Margin Check
+    nose = landmarks[0]
+    nose_y = nose[1]
+    head_limit_y = h * 0.04
+    if nose_y < head_limit_y:
+        session.stability_start_time = None
+        return 'red', 'Move back. Head too close to edge.', None
+
+    # 6. Horizontal Centering Check (12% frame width tolerance)
+    left_shoulder = landmarks[11]
+    right_shoulder = landmarks[12]
+    center_x = (left_shoulder[0] + right_shoulder[0]) / 2
+    frame_center_x = w / 2
+    offset_x = abs(center_x - frame_center_x)
+    threshold_x = w * 0.12
+
+    if offset_x > threshold_x:
+        session.stability_start_time = None
+        direction = "left" if center_x < frame_center_x else "right"
+        return 'red', f'Move {direction} to center yourself.', None
+
+    # 7. Body Height Ratio (Distance) Check (0.48 - 0.85 calibrated for 1.0m - 1.5m webcam distance)
+    ankle_y = max(left_ankle[1], right_ankle[1])
+    height_px = ankle_y - nose[1]
+    target_ratio_min = 0.48
+    target_ratio_max = 0.85
+    current_ratio = height_px / h
+
+    if current_ratio < target_ratio_min:
+        session.stability_start_time = None
+        return 'red', 'Move closer. Stand at 1 meter distance.', None
+    elif current_ratio > target_ratio_max:
+        session.stability_start_time = None
+        return 'red', 'Move back. Stand at 1 meter distance.', None
+
+    # All alignment conditions passed!
+    if session.stability_start_time is None:
+        session.stability_start_time = time.time()
+        return 'green', 'Perfect! Hold still...', 3
+    
+    elapsed = time.time() - session.stability_start_time
+    remaining = max(0, 3 - int(elapsed))
+    
+    if remaining == 0:
+        return 'green', 'Auto-capturing!', 0
+    else:
+        return 'green', f'Hold still... {remaining}', remaining
+
+
+def process_all_captured_images(session=None):
+    if session is None:
+        session = get_session()
+    print("Processing all captured images...")
+    try:
+        final_results = {}
+        scale = session.scale_factor
+        
+        if scale == 0 and 'front' in session.captured_images:
+            front_img = decode_image(session.captured_images['front'])
+            ld = get_landmark_detector()
+            if ld is not None:
+                landmarks = ld.detect(front_img)
+                landmarks = _ensure_pixel_landmarks(landmarks, front_img.shape) if landmarks is not None else None
+                if landmarks is not None:
+                    nose = landmarks[0]
+                    left_ankle = landmarks[27]
+                    right_ankle = landmarks[28]
+                    height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
+                    scale = _compute_scale_from_height_px(session.user_height_cm, height_px, fallback=scale)
+                    if scale > 0:
+                        session.scale_factor = scale
+
+        views = ['front', 'side']
+        for v in views:
+            if v in session.processed_results:
+                res = session.processed_results[v]
+                final_results[v] = {
+                    'measurements': res.get('measurements', {}),
+                    'visualization': res.get('visualization'),
+                    'original_image': res.get('original_image') or session.captured_images.get(v),
+                    'mask': res.get('mask'),
+                    'smpl': res.get('smpl'),
+                }
+            elif v in session.captured_images:
+                img = decode_image(session.captured_images[v])
+                if img is not None:
+                    view_scale = scale
+                    view_ld = get_landmark_detector()
+                    if view_ld is not None:
+                        view_lm = view_ld.detect(img)
+                        view_lm = _ensure_pixel_landmarks(view_lm, img.shape) if view_lm is not None else None
+                        if view_lm is not None:
+                            v_nose = view_lm[0]
+                            v_left_ankle = view_lm[27]
+                            v_right_ankle = view_lm[28]
+                            v_height_px = max(v_left_ankle[1], v_right_ankle[1]) - v_nose[1]
+                            view_scale = _compute_scale_from_height_px(session.user_height_cm, v_height_px, fallback=scale)
+                    engine_view = _normalize_engine_view(v)
+                    auto_results = process_single_image(img, view_scale, engine_view, user_height_cm=session.user_height_cm)
+                    if auto_results and auto_results.get('success'):
+                        final_results[v] = {
+                            'measurements': auto_results.get('measurements', {}),
+                            'visualization': auto_results.get('visualization'),
+                            'original_image': session.captured_images.get(v),
+                            'mask': auto_results.get('mask'),
+                            'smpl': auto_results.get('smpl'),
+                        }
+
+        payload = {
+            'success': True,
+            'results': final_results,
+            'calibration': {
+                'user_height_cm': session.user_height_cm,
+                'scale_factor': scale
+            }
+        }
+        
+        socketio.emit('processing_complete', payload)
+        
+    except Exception as e:
+        print(f"Error in final processing: {e}")
+        traceback.print_exc()
+        socketio.emit('error', {'message': str(e)})
+
+
+@app.route('/mesh/<view>/000.obj')
+@app.route('/mesh/<session_id>/<view>/000.obj')
+def serve_mesh_obj(view, session_id=None):
+    """Serve 000.obj mesh file."""
+    if session_id:
+        obj_path = os.path.join(MESHES_DIR, session_id, "000.obj")
+        if os.path.exists(obj_path):
+            return send_file(obj_path, mimetype='text/plain')
+            
+    legacy_path = os.path.join(MESHES_DIR, view, "000.obj")
+    if os.path.exists(legacy_path):
+         return send_file(legacy_path, mimetype='text/plain')
+         
+    return jsonify({"error": "Mesh not found"}), 404
+
+
+@app.route('/api/calibrate', methods=['POST'])
+def calibrate_measurement():
+    """Add calibration data point."""
+    try:
+        data = request.json or {}
+        return jsonify({'success': True, 'message': 'Calibration recorded', 'data': data})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# --- Socket.IO Event Handlers ---
+
+@socketio.on('connect')
+def handle_connect():
+    print(f'Client connected: {getattr(request, "sid", "unknown")}')
+    session = get_session()
+    session.reset()
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print(f'Client disconnected: {getattr(request, "sid", "unknown")}')
+    sid = getattr(request, 'sid', None)
+    if sid and sid in session_store:
+        session_store.pop(sid, None)
+
+@socketio.on('reset_session')
+def handle_reset():
+    session = get_session()
+    session.reset()
+    print('Session reset')
+
+@socketio.on('process_frame')
+def handle_frame(data):
+    try:
+        session = get_session()
+        image_data = data.get('image')
+        view = data.get('view', 'front')
+        user_height = data.get('user_height')
+        height_unit = data.get('height_unit', 'cm')
+
+        if not image_data:
+            return
+
+        # Guard: If this view is already captured, do not re-process or re-capture!
+        if view in session.captured_images:
+            emit('frame_processed', {
+                'alignment': 'green',
+                'instruction': f'{view.capitalize()} view captured.',
+                'countdown': None,
+                'speak': False
+            })
+            return
+
+        if user_height:
+            session.user_height_cm = _normalize_height_to_cm(
+                user_height,
+                height_unit,
+                fallback=session.user_height_cm
+            )
+
+        img = decode_image(image_data)
+        if img is None:
+            return
+
+        alignment, instruction, countdown = process_alignment(img, view, session=session)
+
+        should_speak = False
+        current_time = time.time()
+        if instruction != session.last_instruction:
+            if (current_time - session.last_instruction_time) > 2.5:
+                should_speak = True
+                session.last_instruction = instruction
+                session.last_instruction_time = current_time
+
+        if countdown == 0 and view not in session.captured_images:
+            print(f"Capturing {view} view!")
+            session.captured_images[view] = image_data
+            next_view = get_next_view(view)
+            session.current_view = next_view
+            session.stability_start_time = None
+            
+            after_capture_alerts = {
+                'front': 'Front view captured.',
+                'side': 'Side view captured.'
+            }
+            before_msg = 'Turn towards your side.' if next_view != 'complete' else ''
+            after_msg = after_capture_alerts.get(view, '')
+            voice_message = f"{after_msg} {before_msg}".strip()
+            
+            emit('capture_complete', {
+                'view': view,
+                'image': image_data,
+                'next_view': next_view,
+                'voice_message': voice_message
+            })
+
+        emit('frame_processed', {
+            'alignment': alignment,
+            'instruction': instruction,
+            'countdown': countdown if countdown is not None else None,
+            'speak': should_speak
+        })
+
+    except Exception as e:
+        print(f"Error processing frame: {e}")
+        traceback.print_exc()
+
+@socketio.on('retake_view')
+def handle_retake(data):
+    session = get_session()
+    view = data.get('view')
+    print(f"Retake requested for {view}")
+    if view in session.captured_images:
+        session.captured_images.pop(view, None)
+    if view in session.processed_results:
+        session.processed_results.pop(view, None)
+    session.stability_start_time = None
+    session.current_view = view
+
+@socketio.on('process_selection')
+def handle_process_selection(data):
+    try:
+        session = get_session()
+        view = data.get('view')
+        image_data = data.get('image')
+        selection_type = data.get('type') # 'auto' or 'manual'
+        manual_landmarks = data.get('landmarks', [])
+        height_unit = data.get('height_unit', 'cm')
+        user_height_cm = _normalize_height_to_cm(
+            data.get('user_height'),
+            height_unit,
+            fallback=session.user_height_cm
+        )
+
+        if user_height_cm and user_height_cm > 0:
+            session.user_height_cm = user_height_cm
+
+        if not image_data and view in session.captured_images:
+            image_data = session.captured_images.get(view)
+
+        img = decode_image(image_data)
+        if img is None:
+            emit('selection_processed', {'error': 'Invalid image data'})
+            return
+
+        if selection_type == 'auto':
+            try:
+                segmentation_model.segment_person(img, conf_threshold=0.5)
+            except ValueError as e:
+                emit('selection_processed', {
+                    'error': str(e),
+                    'view': view
+                })
+                return
+
+        if selection_type == 'manual':
+            h, w = img.shape[:2]
+            results = process_manual_view(
+                {'landmarks': manual_landmarks, 'imageWidth': w, 'imageHeight': h},
+                user_height_cm,
+                view,
+                image=img
+            )
+
+            if not results.get('success'):
+                emit('selection_processed', {
+                    'error': results.get('error', 'Manual processing failed'),
+                    'view': view
+                })
+                return
+            
+            ld = get_landmark_detector()
+            landmarks = ld.detect(img) if ld is not None else None
+            landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
+            
+            view_scale = session.scale_factor
+            if landmarks is not None:
+                nose = landmarks[0]
+                left_ankle = landmarks[27]
+                right_ankle = landmarks[28]
+                height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
+                view_scale = _compute_scale_from_height_px(user_height_cm, height_px, fallback=session.scale_factor)
+                
+            if view == 'front':
+                if view_scale > 0:
+                    session.scale_factor = view_scale
+                scale = session.scale_factor
+            else:
+                scale = view_scale
+
+            engine_view = _normalize_engine_view(view)
+            auto_visuals = process_single_image(img, scale, engine_view, user_height_cm=user_height_cm)
+            visualization_b64 = auto_visuals.get('visualization') if auto_visuals and auto_visuals.get('success') else results.get('visualization')
+            mask_b64 = auto_visuals.get('mask') if auto_visuals and auto_visuals.get('success') else results.get('mask')
+            smpl_meta = auto_visuals.get('smpl') if auto_visuals and auto_visuals.get('success') else None
+
+            session.processed_results[view] = {
+                'measurements': results.get('measurements', {}),
+                'visualization': visualization_b64,
+                'original_image': image_data,
+                'mask': mask_b64,
+                'smpl': smpl_meta,
+            }
+            
+            emit('selection_processed', {
+                'view': view,
+                'next_view': get_next_view(view),
+                'visualization': visualization_b64,
+                'measurements': results.get('measurements', {}),
+                'smpl': smpl_meta,
+            })
+
+        else: # auto
+            ld = get_landmark_detector()
+            if ld is None:
+                emit('selection_processed', {'error': 'Landmark detector not initialized.'})
+                return
+            landmarks = ld.detect(img)
+            landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
+            if landmarks is None:
+                emit('selection_processed', {'error': 'Could not detect body landmarks. Please retake photo or use Manual Marking.'})
+                return
+
+            view_scale = session.scale_factor
+            nose = landmarks[0]
+            left_ankle = landmarks[27]
+            right_ankle = landmarks[28]
+            height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
+            view_scale = _compute_scale_from_height_px(user_height_cm, height_px, fallback=session.scale_factor)
+            
+            if view == 'front':
+                if view_scale > 0:
+                    session.scale_factor = view_scale
+                scale = session.scale_factor
+            else:
+                scale = view_scale
+
+            engine_view = _normalize_engine_view(view)
+            auto_results = process_single_image(img, scale, engine_view, user_height_cm=user_height_cm)
+            if not auto_results or not auto_results.get('success'):
+                emit('selection_processed', {
+                    'error': auto_results.get('error', 'Auto processing failed') if auto_results else 'Auto processing error',
+                    'view': view
+                })
+                return
+            
+            res = {
+                'measurements': auto_results.get('measurements', {}),
+                'visualization': auto_results.get('visualization'),
+                'original_image': image_data,
+                'mask': auto_results.get('mask'),
+                'smpl': auto_results.get('smpl'),
+            }
+            session.processed_results[view] = res
+            
+            emit('selection_processed', {
+                'view': view,
+                'next_view': get_next_view(view),
+                'visualization': res.get('visualization'),
+                'measurements': res.get('measurements', {}),
+                'smpl': res.get('smpl'),
+            })
+
+    except Exception as e:
+        print(f"Error in process_selection: {e}")
+        traceback.print_exc()
+        emit('selection_processed', {'error': str(e)})
+
+@socketio.on('finalize_session')
+def handle_finalize():
+    print("Finalizing live session...")
+    process_all_captured_images()
+
+
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
 
-
-
-if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
 

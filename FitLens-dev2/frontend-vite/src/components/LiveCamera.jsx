@@ -106,7 +106,7 @@ const LiveCamera = () => {
     const [countdown, setCountdown] = useState(null);
     
     // Workflow state
-    const VIEW_ORDER = ['front', 'right', 'back', 'left'];
+    const VIEW_ORDER = ['front', 'side'];
     const [captureSequenceComplete, setCaptureSequenceComplete] = useState(false);
     const [markingMode, setMarkingMode] = useState(null); // 'manual' | 'auto'
     
@@ -203,6 +203,12 @@ const LiveCamera = () => {
             setInstruction(data.instruction);
             setCountdown(data.countdown);
 
+            if (data.alignment === 'red' || data.countdown === null) {
+                clearInterval(captureTimerRef.current);
+                captureTimerRef.current = null;
+                setCaptureCountdown(null);
+            }
+
             if (data.speak) {
                 speak(data.instruction);
             }
@@ -212,9 +218,22 @@ const LiveCamera = () => {
             console.log('Capture complete:', data);
             setCapturedImages(prev => ({ ...prev, [data.view]: data.image }));
             setCompletedViews(prev => [...new Set([...prev, data.view])]);
-            
-            // In the new flow, we handle view switching manually or via capture button
-            // but the socket still confirms "captured"
+            setAlignment('red');
+            setCameraActive(false);
+
+            if (data.voice_message) {
+                speak(data.voice_message);
+            }
+
+            if (data.next_view && data.next_view !== 'complete') {
+                setTimeout(() => {
+                    setCurrentView(data.next_view);
+                    setCameraActive(true);
+                }, 600);
+            } else if (data.next_view === 'complete') {
+                setIsReviewing(true);
+                speak('All views captured. Please review your photos.');
+            }
         });
 
         newSocket.on('processing_complete', (data) => {
@@ -236,30 +255,47 @@ const LiveCamera = () => {
         return () => newSocket.close();
     }, []);
 
-    // Frame processing loop
+    // Keep refs in sync for high-frequency frame loop
+    const socketRef = useRef(socket);
+    const userHeightRef = useRef(userHeight);
+    const heightUnitRef = useRef(heightUnit);
+
+    useEffect(() => {
+        socketRef.current = socket;
+    }, [socket]);
+
+    useEffect(() => {
+        userHeightRef.current = userHeight;
+    }, [userHeight]);
+
+    useEffect(() => {
+        heightUnitRef.current = heightUnit;
+    }, [heightUnit]);
+
+    const captureAndSendFrame = useCallback(() => {
+        if (webcamRef.current && socketRef.current) {
+            const imageSrc = webcamRef.current.getScreenshot();
+            if (imageSrc) {
+                socketRef.current.emit('process_frame', {
+                    image: imageSrc,
+                    view: currentViewRef.current,
+                    user_height: parseFloat(userHeightRef.current),
+                    height_unit: heightUnitRef.current
+                });
+            }
+        }
+    }, []);
+
+    // Frame processing loop (5 FPS)
     useEffect(() => {
         if (!sessionStarted || !isConnected || !socket || !cameraActive || isReviewing) return;
 
         const interval = setInterval(() => {
             captureAndSendFrame();
-        }, 200); // 5 FPS
+        }, 200);
 
         return () => clearInterval(interval);
-    }, [sessionStarted, isConnected, socket, currentView, userHeight, heightUnit, cameraActive, isReviewing]);
-
-    const captureAndSendFrame = useCallback(() => {
-        if (webcamRef.current) {
-            const imageSrc = webcamRef.current.getScreenshot();
-            if (imageSrc) {
-                socket.emit('process_frame', {
-                    image: imageSrc,
-                    view: currentView,
-                    user_height: parseFloat(userHeight),
-                    height_unit: heightUnit
-                });
-            }
-        }
-    }, [socket, currentView, userHeight, heightUnit]);
+    }, [sessionStarted, isConnected, socket, cameraActive, isReviewing, captureAndSendFrame]);
 
     const speak = (text) => {
         if ('speechSynthesis' in window) {
@@ -346,9 +382,9 @@ const LiveCamera = () => {
                 setAlignment('red');
 
                 const currentIndex = VIEW_ORDER.indexOf(view);
-                if (currentIndex < 3) {
+                if (currentIndex < VIEW_ORDER.length - 1) {
                     const nextView = VIEW_ORDER[currentIndex + 1];
-                    speak(`${view} captured. Now turn to show your ${nextView}.`);
+                    speak(`${view} captured. Now turn to show your ${nextView} view.`);
                     setTimeout(() => {
                         setCurrentView(nextView);
                         setCameraActive(true);
@@ -467,16 +503,12 @@ const LiveCamera = () => {
     };
 
     const getNextManualLabel = () => {
-        if (markingViewIndex === 0) return 'Next: Right ->';
-        if (markingViewIndex === 1) return 'Next: Back ->';
-        if (markingViewIndex === 2) return 'Next: Left ->';
+        if (markingViewIndex === 0) return 'Next: Side ->';
         return isEditingMarkings ? 'Recalculate ->' : 'Finish & Calculate ->';
     };
 
     const getPreviousManualLabel = () => {
         if (markingViewIndex === 1) return '<- Front';
-        if (markingViewIndex === 2) return '<- Right';
-        if (markingViewIndex === 3) return '<- Back';
         return '<- Previous';
     };
 
@@ -534,7 +566,7 @@ const LiveCamera = () => {
             const nextIndex = currentIndex + 1;
             const autoTotal = (markingModeRef.current === 'auto')
                 ? (autoViewOrderRef.current?.length || 0)
-                : 4;
+                : 2;
 
             if (nextIndex < autoTotal) {
                 setMarkingViewIndex(nextIndex);
@@ -668,7 +700,7 @@ const LiveCamera = () => {
             <div className="manual-marker-wrapper">
                 <div className="marking-progress-header">
                     <h3>Manual Marking: {currentMarkingView.charAt(0).toUpperCase() + currentMarkingView.slice(1)} View</h3>
-                    <div className="progress-badge">Marking {markingViewIndex + 1} of 4</div>
+                    <div className="progress-badge">Marking {markingViewIndex + 1} of {VIEW_ORDER.length}</div>
                 </div>
                 <ManualLandmarkMarker
                     key={currentMarkingView}
@@ -706,7 +738,7 @@ const LiveCamera = () => {
             <div className="live-camera-selection">
                 <div className="selection-content">
                     <h2>Choose marking method</h2>
-                    <p>All 4 views captured. How would you like to proceed?</p>
+                    <p>All {VIEW_ORDER.length} views captured. How would you like to proceed?</p>
                     
                     <div className="captured-preview-grid">
                         {VIEW_ORDER.map(view => (
@@ -789,7 +821,7 @@ const LiveCamera = () => {
                 </div>
                 <div className="overall-status">
                     {(() => {
-                        const total = autoViewOrder.length || VIEW_ORDER.filter(view => Boolean(capturedImages[view])).length || 4;
+                        const total = autoViewOrder.length || VIEW_ORDER.filter(view => Boolean(capturedImages[view])).length || VIEW_ORDER.length;
                         return markingViewIndex < total
                             ? `Processing photo ${markingViewIndex + 1} of ${total}...`
                             : 'Finalizing analysis...';
@@ -879,11 +911,8 @@ const LiveCamera = () => {
                     </div>
 
                     <div className="view-instruction-overlay">
-                        <h2>{markingViewIndex + 1} of 4 — {currentView.charAt(0).toUpperCase() + currentView.slice(1)} {currentView === 'right' || currentView === 'left' ? 'Side ' : ''}View</h2>
-                        <p>{currentView === 'front' ? 'Stand facing the camera' : 
-                            currentView === 'right' ? 'Turn to show your right side' :
-                            currentView === 'back' ? 'Turn to show your back' :
-                            'Turn to show your left side'}</p>
+                        <h2>{VIEW_ORDER.indexOf(currentView) + 1} of {VIEW_ORDER.length} — {currentView.charAt(0).toUpperCase() + currentView.slice(1)} View</h2>
+                        <p>{currentView === 'front' ? 'Stand facing the camera' : 'Turn to show your side'}</p>
                     </div>
 
                     <div className="webcam-wrapper">
