@@ -1,13 +1,18 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { View, Image, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Colors } from '../../constants/colors';
+import ZoomableImageModal from '../common/ZoomableImageModal';
 
 const CapturedThumbnail = ({ label, imageUri, onRetake }) => {
+  const [zoomVisible, setZoomVisible] = useState(false);
+
   if (!imageUri) return null;
 
   return (
     <View style={styles.container}>
-      <Image source={{ uri: imageUri }} style={styles.image} resizeMode="cover" />
+      <TouchableOpacity activeOpacity={0.85} onPress={() => setZoomVisible(true)} style={styles.imageWrap}>
+        <Image source={{ uri: imageUri }} style={styles.image} resizeMode="cover" />
+      </TouchableOpacity>
       <View style={styles.overlay}>
         <Text style={styles.label}>{label}</Text>
         {onRetake && (
@@ -16,6 +21,13 @@ const CapturedThumbnail = ({ label, imageUri, onRetake }) => {
           </TouchableOpacity>
         )}
       </View>
+
+      <ZoomableImageModal
+        visible={zoomVisible}
+        imageSource={{ uri: imageUri }}
+        title={`Captured ${label}`}
+        onClose={() => setZoomVisible(false)}
+      />
     </View>
   );
 };
@@ -30,6 +42,7 @@ const styles = StyleSheet.create({
     borderColor: Colors.accent,
     backgroundColor: Colors.secondary,
   },
+  imageWrap: { flex: 1 },
   image: { width: '100%', height: '100%' },
   overlay: {
     position: 'absolute',

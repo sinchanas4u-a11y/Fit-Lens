@@ -6,6 +6,27 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Fix for Windows socket teardown error: OSError: [WinError 10038] An operation was attempted on something that is not a socket
+if sys.platform == 'win32':
+    import selectors
+    _orig_select = selectors.SelectSelector._select
+    def _safe_select(self, r, w, x, timeout=None):
+        try:
+            return _orig_select(self, r, w, x, timeout)
+        except OSError as e:
+            if getattr(e, 'winerror', None) == 10038 or getattr(e, 'errno', None) == 10038:
+                valid_r = [s for s in r if hasattr(s, 'fileno') and (callable(s.fileno) and s.fileno() >= 0)]
+                valid_w = [s for s in w if hasattr(s, 'fileno') and (callable(s.fileno) and s.fileno() >= 0)]
+                valid_x = [s for s in x if hasattr(s, 'fileno') and (callable(s.fileno) and s.fileno() >= 0)]
+                if valid_r or valid_w or valid_x:
+                    try:
+                        return _orig_select(self, valid_r, valid_w, valid_x, timeout)
+                    except Exception:
+                        pass
+                return [], [], []
+            raise
+    selectors.SelectSelector._select = _safe_select
+
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
@@ -131,12 +152,26 @@ measurements_col = db['measurements']
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    async_mode='threading',
+    logger=False,
+    engineio_logger=False,
+    ping_timeout=120,
+    ping_interval=25,
+    max_http_buffer_size=10 * 1024 * 1024
+)
 
 # JWT config
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'fitlens-secret-key')
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = dt.timedelta(days=30)
 jwt = JWTManager(app)
+
+# Global directory paths
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MESHES_DIR = os.path.join(BASE_DIR, "generated_meshes")
+os.makedirs(MESHES_DIR, exist_ok=True)
 
 
 def to_native_types(obj):
@@ -1693,6 +1728,111 @@ def process_manual_view(landmarks_data, user_height_cm, view_name, image=None):
         }
     except Exception as e:
         return {'success': False, 'error': str(e), 'measurements': {}}
+
+
+@app.route('/api/camera/check-pose', methods=['POST'])
+def check_pose():
+    """Real-time pose quality check endpoint for live camera web interface."""
+    try:
+        data = request.get_json() or {}
+        image_b64 = data.get('frame') or data.get('image')
+        view = data.get('view', 'front')
+
+        if not image_b64:
+            return jsonify({'aligned': False, 'reason': 'No frame provided'}), 400
+
+        # Decode frame
+        if ',' in image_b64:
+            image_b64 = image_b64.split(',')[1]
+        img_data = base64.b64decode(image_b64)
+        img_array = np.frombuffer(img_data, np.uint8)
+        image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+
+        if image is None:
+            return jsonify({'aligned': False, 'reason': 'Invalid image format'}), 400
+
+        h, w = image.shape[:2]
+
+        # Step 1 — detect person with YOLO or MediaPipe
+        num_people = 0
+        x1, y1, x2, y2 = 0, 0, w, h
+        boxes = None
+        if segmentation_model is not None and segmentation_model.model is not None:
+            try:
+                results = segmentation_model.model(image, classes=[0], conf=0.35, verbose=False)
+                if len(results) > 0 and results[0].boxes is not None:
+                    boxes = results[0].boxes
+                    num_people = len(boxes)
+            except Exception as ex:
+                print(f"YOLO error in check_pose: {ex}")
+
+        # If YOLO did not detect or returned 0, try MediaPipe pose detector fallback
+        if num_people == 0:
+            ld = get_landmark_detector()
+            landmarks = ld.detect(image) if ld else None
+            landmarks = _ensure_pixel_landmarks(landmarks, image.shape) if landmarks is not None else None
+            if landmarks is not None and len(landmarks) >= 29:
+                xs = landmarks[:, 0]
+                ys = landmarks[:, 1]
+                x1, y1, x2, y2 = float(np.min(xs)), float(np.min(ys)), float(np.max(xs)), float(np.max(ys))
+                num_people = 1
+            else:
+                return jsonify({'aligned': False, 'reason': 'No person detected'}), 200
+
+        if num_people > 1:
+            return jsonify({'aligned': False, 'reason': 'Multiple persons detected'}), 200
+
+        # Calculate bounding box coordinates
+        if boxes is not None and len(boxes) > 0:
+            box = boxes[0].xyxy[0].cpu().numpy()
+            x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+
+        person_height = y2 - y1
+        frame_coverage = float(person_height / h)
+
+        # Step 2 — check person fills frame adequately (min 0.48 for 1.0m-1.5m webcam FOV)
+        if frame_coverage < 0.48:
+            return jsonify({
+                'aligned': False,
+                'reason': 'Move closer — body not filling frame',
+                'coverage': frame_coverage
+            }), 200
+
+        # Step 3 — check person is centered horizontally (within 20% of center)
+        person_center_x = (x1 + x2) / 2
+        frame_center_x = w / 2
+        center_offset = abs(person_center_x - frame_center_x) / w
+        if center_offset > 0.20:
+            return jsonify({
+                'aligned': False,
+                'reason': 'Move to center of frame',
+                'offset': float(center_offset)
+            }), 200
+
+        # Step 4 — check head visible at top
+        if y1 < h * 0.02:
+            return jsonify({
+                'aligned': False,
+                'reason': 'Move back — head cut off at top',
+            }), 200
+
+        # Step 5 — check feet visible at bottom
+        if y2 > h * 0.98:
+            return jsonify({
+                'aligned': False,
+                'reason': 'Move back — feet cut off at bottom',
+            }), 200
+
+        # All checks passed — person is aligned!
+        return jsonify({
+            'aligned': True,
+            'reason': 'Perfect! Hold still...',
+            'coverage': frame_coverage
+        }), 200
+
+    except Exception as e:
+        print(f"Pose check error: {e}")
+        return jsonify({'aligned': False, 'reason': str(e)}), 500
 
 
 @app.route('/api/process', methods=['POST'])
@@ -4053,110 +4193,182 @@ def get_next_view(current):
     return 'complete'
 
 
+debug_frame_counter = 0
+
+
 def process_alignment(image, view, session=None):
-    if session is None:
-        session = get_session()
-    h, w, _ = image.shape
-    
-    # 1. YOLO Person Count Check (with conf=0.35 for live streaming webcam frames)
-    if segmentation_model is not None and segmentation_model.model is not None:
+    global debug_frame_counter
+    debug_frame_counter += 1
+
+    try:
+        if session is None:
+            session = get_session()
+        h, w, _ = image.shape
+
+        # Save actual decoded frame to disk on every 5th frame for visual inspection
+        if debug_frame_counter % 5 == 0 or debug_frame_counter == 1:
+            try:
+                debug_path = os.path.join(BASE_DIR, "debug_frame.jpg")
+                cv2.imwrite(debug_path, image)
+                print(f"[DEBUG FRAME #{debug_frame_counter}] Saved decoded frame to {debug_path} ({w}x{h}, mean_val: {np.mean(image):.2f})")
+            except Exception as e_dbg:
+                print(f"Debug frame save error: {e_dbg}")
+
+        print(f"--- [ALIGNMENT DEBUG #{debug_frame_counter} | View: {view}] ---")
+        print(f"  Frame dimensions: {w}x{h}")
+
+        # 1. YOLO Person Count Check (with conf=0.35 for live streaming webcam frames)
+        num_people = 0
+        if segmentation_model is not None and segmentation_model.model is not None:
+            try:
+                pad_h = int(h * 0.1)
+                pad_w = int(w * 0.1)
+                padded = cv2.copyMakeBorder(image, pad_h, pad_h, pad_w, pad_w, 
+                                           cv2.BORDER_CONSTANT, value=[128, 128, 128])
+                results = segmentation_model.model(padded, conf=0.35, imgsz=1024, verbose=False, classes=[0])
+                num_people = len(results[0].boxes) if len(results) > 0 and results[0].boxes is not None else 0
+                print(f"  Condition 1 (YOLO person count): {num_people}")
+                if num_people > 1:
+                    session.stability_start_time = None
+                    print("  => FAIL: Multiple people detected")
+                    return 'red', "Multiple people detected. Please ensure only one person is visible in the camera.", None
+            except Exception as e_yolo:
+                print(f"  Condition 1 (YOLO person count): EXCEPTION -> {e_yolo}")
+                traceback.print_exc()
+
+        # 2. MediaPipe Pose Landmark Detection
+        ld = get_landmark_detector()
+        if ld is None:
+            print("  Condition 2 (MediaPipe detection): FAIL (Landmark detector is None)")
+            return 'red', 'Landmark detector unavailable', None
+        
         try:
-            pad_h = int(h * 0.1)
-            pad_w = int(w * 0.1)
-            padded = cv2.copyMakeBorder(image, pad_h, pad_h, pad_w, pad_w, 
-                                       cv2.BORDER_CONSTANT, value=[128, 128, 128])
-            results = segmentation_model.model(padded, conf=0.35, imgsz=1024, verbose=False, classes=[0])
-            num_people = len(results[0].boxes) if len(results) > 0 and results[0].boxes is not None else 0
-            
-            if num_people > 1:
+            landmarks = ld.detect(image)
+            landmarks = _ensure_pixel_landmarks(landmarks, image.shape) if landmarks is not None else None
+        except Exception as e_ld:
+            print(f"  Condition 2 (MediaPipe detection): EXCEPTION -> {e_ld}")
+            traceback.print_exc()
+            landmarks = None
+
+        if landmarks is None:
+            session.stability_start_time = None
+            print("  Condition 2 (MediaPipe detection): FAIL (0 landmarks detected)")
+            return 'red', 'No person detected. Please stand in front of camera.', None
+        else:
+            print(f"  Condition 2 (MediaPipe detection): PASS ({len(landmarks)} landmarks detected)")
+
+        # 3. Critical Landmarks Confidence Check (Nose, Shoulders, Hips, Ankles)
+        critical_landmarks = [0, 11, 12, 23, 24, 27, 28]
+        conf_values = {}
+        for idx in critical_landmarks:
+            if idx >= len(landmarks):
                 session.stability_start_time = None
-                return 'red', "Multiple people detected. Please ensure only one person is visible in the camera.", None
-        except Exception as e:
-            print(f"Error checking person count in process_alignment: {e}")
+                print(f"  Condition 3 (Critical landmarks): FAIL (landmark index {idx} out of range)")
+                return 'red', 'Full body not visible. Step back.', None
+            c = float(landmarks[idx][2]) if len(landmarks[idx]) >= 3 else 1.0
+            conf_values[idx] = round(c, 3)
+            if c < 0.4:
+                session.stability_start_time = None
+                print(f"  Condition 3 (Critical landmarks): FAIL (landmark {idx} conf={c:.2f} < 0.4)")
+                return 'red', 'Full body not visible. Adjust position.', None
+        print(f"  Condition 3 (Critical landmarks conf): PASS ({conf_values})")
 
-    # 2. MediaPipe Pose Landmark Detection
-    ld = get_landmark_detector()
-    if ld is None:
-        return 'red', 'Landmark detector unavailable', None
-    landmarks = ld.detect(image)
-    landmarks = _ensure_pixel_landmarks(landmarks, image.shape) if landmarks is not None else None
-
-    if landmarks is None:
-        session.stability_start_time = None
-        return 'red', 'No person detected. Please stand in front of camera.', None
-
-    # 3. Critical Landmarks Confidence Check (Nose, Shoulders, Hips, Ankles)
-    critical_landmarks = [0, 11, 12, 23, 24, 27, 28]
-    for idx in critical_landmarks:
-        if idx >= len(landmarks):
+        # 4. Feet Visibility Check
+        left_ankle = landmarks[27]
+        right_ankle = landmarks[28]
+        max_ankle_y = max(left_ankle[1], right_ankle[1])
+        feet_limit_y = h * 0.96
+        print(f"  Condition 4 (Feet y): max_ankle_y={max_ankle_y:.1f} vs limit={feet_limit_y:.1f} (h={h})")
+        if max_ankle_y > feet_limit_y:
             session.stability_start_time = None
-            return 'red', 'Full body not visible. Step back.', None
-        if len(landmarks[idx]) >= 3 and landmarks[idx][2] < 0.4:
+            print("  => FAIL: Feet cut off at bottom")
+            return 'red', 'Step back. Feet not fully visible.', None
+
+        # 5. Head Margin Check
+        nose = landmarks[0]
+        nose_y = nose[1]
+        head_limit_y = h * 0.04
+        print(f"  Condition 5 (Head y): nose_y={nose_y:.1f} vs limit={head_limit_y:.1f}")
+        if nose_y < head_limit_y:
             session.stability_start_time = None
-            return 'red', 'Full body not visible. Adjust position.', None
+            print("  => FAIL: Head too close to top edge")
+            return 'red', 'Move back. Head too close to edge.', None
 
-    # 4. Feet Visibility Check
-    left_ankle = landmarks[27]
-    right_ankle = landmarks[28]
-    max_ankle_y = max(left_ankle[1], right_ankle[1])
-    feet_limit_y = h * 0.96
-    if max_ankle_y > feet_limit_y:
-        session.stability_start_time = None
-        return 'red', 'Step back. Feet not fully visible.', None
+        # 6. Horizontal Centering Check (Calibrated to visual silhouette bounds)
+        left_shoulder = landmarks[11]
+        right_shoulder = landmarks[12]
+        center_x = (left_shoulder[0] + right_shoulder[0]) / 2
+        frame_center_x = w / 2
+        offset_x = abs(center_x - frame_center_x)
+        # Tightened to match on-screen silhouette outline (32px max offset for side view, 38.4px for front)
+        threshold_x = w * 0.05 if view == 'side' else w * 0.06
+        print(f"  Condition 6 (Centering): offset_x={offset_x:.1f}px vs threshold={threshold_x:.1f}px (center_x={center_x:.1f}, frame_center={frame_center_x:.1f})")
 
-    # 5. Head Margin Check
-    nose = landmarks[0]
-    nose_y = nose[1]
-    head_limit_y = h * 0.04
-    if nose_y < head_limit_y:
-        session.stability_start_time = None
-        return 'red', 'Move back. Head too close to edge.', None
+        if offset_x > threshold_x:
+            session.stability_start_time = None
+            direction = "left" if center_x < frame_center_x else "right"
+            print(f"  => FAIL: Not centered horizontally (Move {direction})")
+            return 'red', f'Move {direction} to center yourself.', None
 
-    # 6. Horizontal Centering Check (12% frame width tolerance)
-    left_shoulder = landmarks[11]
-    right_shoulder = landmarks[12]
-    center_x = (left_shoulder[0] + right_shoulder[0]) / 2
-    frame_center_x = w / 2
-    offset_x = abs(center_x - frame_center_x)
-    threshold_x = w * 0.12
+        # 7. Body Height Ratio (Distance) Check (0.48 - 0.85 calibrated for 1.0m - 1.5m webcam distance)
+        ankle_y = max(left_ankle[1], right_ankle[1])
+        height_px = ankle_y - nose[1]
+        target_ratio_min = 0.48
+        target_ratio_max = 0.85
+        current_ratio = height_px / h
+        print(f"  Condition 7 (Height Ratio): current={current_ratio:.3f} vs target_range=[{target_ratio_min}, {target_ratio_max}] (height_px={height_px:.1f})")
 
-    if offset_x > threshold_x:
-        session.stability_start_time = None
-        direction = "left" if center_x < frame_center_x else "right"
-        return 'red', f'Move {direction} to center yourself.', None
+        if current_ratio < target_ratio_min:
+            session.stability_start_time = None
+            print("  => FAIL: Body height ratio too small (Move closer)")
+            return 'red', 'Move closer. Stand at 1 meter distance.', None
+        elif current_ratio > target_ratio_max:
+            session.stability_start_time = None
+            print("  => FAIL: Body height ratio too large (Move back)")
+            return 'red', 'Move back. Stand at 1 meter distance.', None
 
-    # 7. Body Height Ratio (Distance) Check (0.48 - 0.85 calibrated for 1.0m - 1.5m webcam distance)
-    ankle_y = max(left_ankle[1], right_ankle[1])
-    height_px = ankle_y - nose[1]
-    target_ratio_min = 0.48
-    target_ratio_max = 0.85
-    current_ratio = height_px / h
+        # All alignment conditions passed!
+        print("  ===> ALL CONDITIONS PASSED: GREEN ALIGNMENT! <===")
+        if session.stability_start_time is None:
+            session.stability_start_time = time.time()
+            return 'green', 'Perfect! Hold still...', 3
+        
+        elapsed = time.time() - session.stability_start_time
+        remaining = max(0, 3 - int(elapsed))
+        
+        if remaining == 0:
+            return 'green', 'Auto-capturing!', 0
+        else:
+            return 'green', f'Hold still... {remaining}', remaining
 
-    if current_ratio < target_ratio_min:
-        session.stability_start_time = None
-        return 'red', 'Move closer. Stand at 1 meter distance.', None
-    elif current_ratio > target_ratio_max:
-        session.stability_start_time = None
-        return 'red', 'Move back. Stand at 1 meter distance.', None
-
-    # All alignment conditions passed!
-    if session.stability_start_time is None:
-        session.stability_start_time = time.time()
-        return 'green', 'Perfect! Hold still...', 3
-    
-    elapsed = time.time() - session.stability_start_time
-    remaining = max(0, 3 - int(elapsed))
-    
-    if remaining == 0:
-        return 'green', 'Auto-capturing!', 0
-    else:
-        return 'green', f'Hold still... {remaining}', remaining
+    except Exception as e_main:
+        print(f"❌ CRITICAL EXCEPTION IN process_alignment: {e_main}")
+        traceback.print_exc()
+        return 'red', 'Alignment processing error', None
 
 
 def process_all_captured_images(session=None):
     if session is None:
         session = get_session()
     print("Processing all captured images...")
+
+    # Image comparison debug log to verify distinct front vs side captures
+    import hashlib
+    front_b64 = session.captured_images.get('front', '')
+    side_b64 = session.captured_images.get('side', '')
+    front_len = len(front_b64)
+    side_len = len(side_b64)
+    front_md5 = hashlib.md5(front_b64.encode('utf-8')).hexdigest() if front_b64 else 'NONE'
+    side_md5 = hashlib.md5(side_b64.encode('utf-8')).hexdigest() if side_b64 else 'NONE'
+
+    print("================ [CAPTURED IMAGES COMPARISON] ================")
+    print(f"  Front image: length={front_len} chars, md5={front_md5[:10]}")
+    print(f"  Side image:  length={side_len} chars, md5={side_md5[:10]}")
+    if front_md5 == side_md5 and front_md5 != 'NONE':
+        print("  ⚠️ ALERT: Front and side captured images are IDENTICAL (same image reused)!")
+    else:
+        print("  ✓ SUCCESS: Front and side captured images are DISTINCT!")
+    print("=============================================================")
     try:
         final_results = {}
         scale = session.scale_factor
@@ -4232,16 +4444,25 @@ def process_all_captured_images(session=None):
 @app.route('/mesh/<view>/000.obj')
 @app.route('/mesh/<session_id>/<view>/000.obj')
 def serve_mesh_obj(view, session_id=None):
-    """Serve 000.obj mesh file."""
+    """Serve 000.obj mesh file with multi-directory fallback."""
+    candidate_paths = []
     if session_id:
-        obj_path = os.path.join(MESHES_DIR, session_id, "000.obj")
-        if os.path.exists(obj_path):
-            return send_file(obj_path, mimetype='text/plain')
+        candidate_paths.extend([
+            os.path.join(MESHES_DIR, session_id, view, "000.obj"),
+            os.path.join(MESHES_DIR, session_id, "000.obj"),
+            os.path.join(BASE_DIR, "output", "meshes", session_id, view, "000.obj"),
+        ])
+    
+    candidate_paths.extend([
+        os.path.join(MESHES_DIR, view, "000.obj"),
+        os.path.join(BASE_DIR, "output", "meshes", view, "000.obj"),
+        os.path.join(BASE_DIR, "output", "meshes", "front", "000.obj"),
+    ])
+
+    for path in candidate_paths:
+        if os.path.exists(path):
+            return send_file(path, mimetype='text/plain')
             
-    legacy_path = os.path.join(MESHES_DIR, view, "000.obj")
-    if os.path.exists(legacy_path):
-         return send_file(legacy_path, mimetype='text/plain')
-         
     return jsonify({"error": "Mesh not found"}), 404
 
 
@@ -4513,13 +4734,40 @@ def handle_process_selection(data):
         traceback.print_exc()
         emit('selection_processed', {'error': str(e)})
 
+@app.route('/api/finalize-session', methods=['POST'])
+def finalize_session_route():
+    """REST endpoint fallback to process captured images and return results."""
+    try:
+        session = get_session()
+        data = request.json or {}
+        if data.get('front_image'):
+            session.captured_images['front'] = data.get('front_image')
+        if data.get('side_image'):
+            session.captured_images['side'] = data.get('side_image')
+        if data.get('user_height'):
+            session.user_height_cm = _normalize_height_to_cm(data.get('user_height'), data.get('height_unit', 'cm'), fallback=session.user_height_cm)
+
+        process_all_captured_images(session=session)
+        return jsonify({'success': True, 'message': 'Session finalized successfully'})
+    except Exception as e:
+        print(f"REST Finalize Error: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @socketio.on('finalize_session')
 def handle_finalize():
-    print("Finalizing live session...")
-    process_all_captured_images()
+    print("Finalizing live session in background task...")
+    session = get_session()
+    
+    def run_async_finalize(app_ctx, session_obj):
+        with app_ctx:
+            process_all_captured_images(session=session_obj)
+
+    threading.Thread(target=run_async_finalize, args=(app.app_context(), session), daemon=True).start()
 
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
 
 

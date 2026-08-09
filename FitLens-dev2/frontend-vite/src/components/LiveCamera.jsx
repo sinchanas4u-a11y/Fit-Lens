@@ -6,29 +6,32 @@ import ManualLandmarkMarker from './ManualLandmarkMarker';
 import './LiveCamera.css';
 
 // --- Silhouette Components ---
-const SilhouetteSVG = ({ view, alignment }) => {
+const SilhouetteSVG = ({ view, alignment, isAligned }) => {
     const viewLabel = view ? view.charAt(0).toUpperCase() + view.slice(1) : 'Front';
-    const strokeColor = alignment === 'green' ? '#00FF88' : '#FF4444';
+    const isGreen = isAligned || alignment === 'green';
+    const silhouetteColor = isGreen ? '#00D4AA' : '#FF4444';
+    const silhouetteFill = isGreen ? 'rgba(0,212,170,0.1)' : 'rgba(255,68,68,0.1)';
 
     if (viewLabel === 'Front' || viewLabel === 'Back') {
         return (
             <svg
+                className="silhouette-svg"
                 viewBox="0 0 200 480"
                 fill="none"
                 xmlns="http://www.w3.org/2000/svg"
-                style={{ width: '100%', height: '100%', opacity: 0.35 }}
+                style={{ width: '100%', height: '100%', opacity: 0.85 }}
             >
-                <ellipse cx="100" cy="44" rx="28" ry="32" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <rect x="88" y="74" width="24" height="22" rx="8" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M44 110 Q60 90 88 96 L112 96 Q140 90 156 110" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M52 110 L44 210 Q60 228 100 230 Q140 228 156 210 L148 110" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M56 210 Q100 240 144 210" stroke={strokeColor} strokeWidth="2" strokeDasharray="4 3"/>
-                <path d="M44 210 Q36 250 40 270 L60 270 Q100 280 140 270 L160 270 Q164 250 156 210" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M52 110 L30 190 Q26 210 32 230 L48 230 L58 150" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M148 110 L170 190 Q174 210 168 230 L152 230 L142 150" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M60 270 L52 380 Q50 420 56 450 L80 450 L88 350 L92 270" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M140 270 L148 380 Q150 420 144 450 L120 450 L112 350 L108 270" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                {viewLabel === 'Back' && <line x1="100" y1="96" x2="100" y2="270" stroke={strokeColor} strokeWidth="1" strokeDasharray="4 4" opacity="0.5"/>}
+                <ellipse cx="100" cy="44" rx="28" ry="32" stroke={silhouetteColor} fill={silhouetteFill} strokeWidth="3" strokeDasharray="8,4"/>
+                <rect x="88" y="74" width="24" height="22" rx="8" stroke={silhouetteColor} fill={silhouetteFill} strokeWidth="3" strokeDasharray="8,4"/>
+                <path d="M44 110 Q60 90 88 96 L112 96 Q140 90 156 110" stroke={silhouetteColor} strokeWidth="3"/>
+                <path d="M52 110 L44 210 Q60 228 100 230 Q140 228 156 210 L148 110" stroke={silhouetteColor} fill={silhouetteFill} strokeWidth="3"/>
+                <path d="M56 210 Q100 240 144 210" stroke={silhouetteColor} strokeWidth="2" strokeDasharray="4,3"/>
+                <path d="M44 210 Q36 250 40 270 L60 270 Q100 280 140 270 L160 270 Q164 250 156 210" stroke={silhouetteColor} strokeWidth="3"/>
+                <path d="M52 110 L30 190 Q26 210 32 230 L48 230 L58 150" stroke={silhouetteColor} strokeWidth="3"/>
+                <path d="M148 110 L170 190 Q174 210 168 230 L152 230 L142 150" stroke={silhouetteColor} strokeWidth="3"/>
+                <path d="M60 270 L52 380 Q50 420 56 450 L80 450 L88 350 L92 270" stroke={silhouetteColor} fill={silhouetteFill} strokeWidth="3"/>
+                <path d="M140 270 L148 380 Q150 420 144 450 L120 450 L112 350 L108 270" stroke={silhouetteColor} fill={silhouetteFill} strokeWidth="3"/>
+                {viewLabel === 'Back' && <line x1="100" y1="96" x2="100" y2="270" stroke={silhouetteColor} strokeWidth="1" strokeDasharray="4,4" opacity="0.5"/>}
             </svg>
         );
     }
@@ -37,33 +40,34 @@ const SilhouetteSVG = ({ view, alignment }) => {
 
     return (
         <svg
+            className="silhouette-svg"
             viewBox="0 0 200 480"
             fill="none"
             xmlns="http://www.w3.org/2000/svg"
-            style={{ width: '100%', height: '100%', opacity: 0.35 }}
+            style={{ width: '100%', height: '100%', opacity: 0.85 }}
         >
             <g transform={flipTransform}>
-                <ellipse cx="105" cy="44" rx="26" ry="32" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <rect x="96" y="74" width="18" height="22" rx="6" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M88 96 Q72 100 68 130 Q64 170 68 210 Q72 240 80 270" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M106 96 Q120 104 122 130 Q126 170 118 210 Q112 240 108 270" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M68 130 L52 200 Q48 220 54 240 L68 238 L76 170" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M80 270 Q68 290 70 310 L100 315 Q118 308 108 270" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M72 310 L68 400 Q66 430 72 455 L90 455 L96 360 L100 315" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
-                <path d="M100 315 L104 400 Q108 430 102 455 L118 455 L116 360" stroke={strokeColor} strokeWidth="2.5" strokeDasharray="6 3"/>
+                <ellipse cx="105" cy="44" rx="26" ry="32" stroke={silhouetteColor} fill={silhouetteFill} strokeWidth="3" strokeDasharray="8,4"/>
+                <rect x="96" y="74" width="18" height="22" rx="6" stroke={silhouetteColor} fill={silhouetteFill} strokeWidth="3" strokeDasharray="8,4"/>
+                <path d="M88 96 Q72 100 68 130 Q64 170 68 210 Q72 240 80 270" stroke={silhouetteColor} fill={silhouetteFill} strokeWidth="3"/>
+                <path d="M106 96 Q120 104 122 130 Q126 170 118 210 Q112 240 108 270" stroke={silhouetteColor} strokeWidth="3"/>
+                <path d="M68 130 L52 200 Q48 220 54 240 L68 238 L76 170" stroke={silhouetteColor} strokeWidth="3"/>
+                <path d="M80 270 Q68 290 70 310 L100 315 Q118 308 108 270" stroke={silhouetteColor} strokeWidth="3"/>
+                <path d="M72 310 L68 400 Q66 430 72 455 L90 455 L96 360 L100 315" stroke={silhouetteColor} fill={silhouetteFill} strokeWidth="3"/>
+                <path d="M100 315 L104 400 Q108 430 102 455 L118 455 L116 360" stroke={silhouetteColor} fill={silhouetteFill} strokeWidth="3"/>
             </g>
         </svg>
     );
 };
 
-const SilhouetteOverlay = ({ view, alignment }) => (
+const SilhouetteOverlay = ({ view, alignment, isAligned }) => (
     <div className="silhouette-wrapper-overlay">
         <div className="corner-guide top-left" />
         <div className="corner-guide top-right" />
         <div className="corner-guide bottom-left" />
         <div className="corner-guide bottom-right" />
         <div className="silhouette-svg-inner">
-            <SilhouetteSVG view={view} alignment={alignment} />
+            <SilhouetteSVG view={view} alignment={alignment} isAligned={isAligned} />
         </div>
     </div>
 );
@@ -76,26 +80,24 @@ const LiveCamera = () => {
     const [alignment, setAlignment] = useState('red');
     const [instruction, setInstruction] = useState('Connecting to camera...');
     const [cameraActive, setCameraActive] = useState(false);
-    
-    // Lifecycle management
-    useEffect(() => {
-        // Stop camera on unmount
-        return () => {
-            setCameraActive(false);
-        };
-    }, []);
-    
+
     const [currentView, setCurrentView] = useState('front');
+    const [captureStep, setCaptureStep] = useState('front'); // 'front' | 'side'
     const [capturedImages, setCapturedImages] = useState({});
     const [capturedRawImages, setCapturedRawImages] = useState({});
+
+    // Fix 2: Distinct state variables for front and side view thumbnails
+    const [frontCaptureUrl, setFrontCaptureUrl] = useState(null);
+    const [sideCaptureUrl, setSideCaptureUrl] = useState(null);
+
     const [processing, setProcessing] = useState(false);
     const [results, setResults] = useState(null);
     const [isEditingMarkings, setIsEditingMarkings] = useState(false);
     const [userHeight, setUserHeight] = useState('');
     const [heightUnit, setHeightUnit] = useState('cm');
     const [sessionStarted, setSessionStarted] = useState(false);
-    
-    // Selection state
+
+    // Selection & workflow state
     const [awaitingSelection, setAwaitingSelection] = useState(false);
     const [lastCapturedImage, setLastCapturedImage] = useState(null);
     const [showManualMarker, setShowManualMarker] = useState(false);
@@ -103,25 +105,29 @@ const LiveCamera = () => {
     const [errorMsg, setErrorMsg] = useState(null);
     const [cameraStatus, setCameraStatus] = useState('initializing'); // 'initializing', 'ready', 'error'
     const [cameraErrorMsg, setCameraErrorMsg] = useState(null);
-    const [countdown, setCountdown] = useState(null);
-    
+    const [countdown, setCountdown] = useState(3);
+    const [isAligned, setIsAligned] = useState(false);
+
     // Workflow state
     const VIEW_ORDER = ['front', 'side'];
     const [captureSequenceComplete, setCaptureSequenceComplete] = useState(false);
     const [markingMode, setMarkingMode] = useState(null); // 'manual' | 'auto'
-    
-    // Validation state for person count check
+
+    // Validation state
     const [validationError, setValidationError] = useState(null);
     const [isValidating, setIsValidating] = useState(false);
     const [markingViewIndex, setMarkingViewIndex] = useState(0);
-    const [autoProgress, setAutoProgress] = useState({}); // {front: 'done', right: 'processing', ...}
+    const [autoProgress, setAutoProgress] = useState({});
     const [autoViewOrder, setAutoViewOrder] = useState([]);
     const [isReviewing, setIsReviewing] = useState(false);
     const [completedViews, setCompletedViews] = useState([]);
 
-    // Auto-capture state
-    const [captureCountdown, setCaptureCountdown] = useState(null); // 3, 2, 1, 0
-    const captureTimerRef = useRef(null);
+    // Fix 1: Precise timer refs tracking alignment & countdown
+    const countdownIntervalRef = useRef(null);
+    const validationIntervalRef = useRef(null);
+    const countdownValueRef = useRef(3);
+    const isAlignedRef = useRef(false);
+    const isCapturingRef = useRef(false);
     const currentViewRef = useRef(currentView);
     const markingViewIndexRef = useRef(0);
     const markingModeRef = useRef(null);
@@ -144,116 +150,229 @@ const LiveCamera = () => {
         autoViewOrderRef.current = autoViewOrder;
     }, [autoViewOrder]);
 
-    // Auto-capture: start/stop countdown based on alignment
-    useEffect(() => {
-        if (!sessionStarted || !cameraActive || isReviewing) {
-            clearInterval(captureTimerRef.current);
-            setCaptureCountdown(null);
-            return;
+    // Fix 3: Voice guidance control with immediate cancellation
+    const stopVoiceGuidance = useCallback(() => {
+        if (typeof window !== 'undefined' && window.speechSynthesis) {
+            window.speechSynthesis.cancel(); // Stop immediately
         }
+    }, []);
 
-        if (alignment === 'green') {
-            // Start a 3-second countdown if not already running
-            if (captureTimerRef.current === null) {
-                setCaptureCountdown(3);
-                let count = 3;
-                captureTimerRef.current = setInterval(() => {
-                    count -= 1;
-                    setCaptureCountdown(count);
-                    if (count <= 0) {
-                        clearInterval(captureTimerRef.current);
-                        captureTimerRef.current = null;
-                        setCaptureCountdown(null);
-                        // Trigger auto-capture
-                        triggerAutoCapture();
-                    }
-                }, 1000);
-            }
+    const speakInstruction = useCallback((text) => {
+        if (typeof window === 'undefined' || !window.speechSynthesis) return;
+        window.speechSynthesis.cancel(); // Cancel current speech first
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 0.9;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+        window.speechSynthesis.speak(utterance);
+    }, []);
+
+    // Fix 1: Clear all timers cleanly
+    const clearAllTimers = useCallback(() => {
+        if (countdownIntervalRef.current) {
+            clearInterval(countdownIntervalRef.current);
+            countdownIntervalRef.current = null;
+        }
+        if (validationIntervalRef.current) {
+            clearInterval(validationIntervalRef.current);
+            validationIntervalRef.current = null;
+        }
+        countdownValueRef.current = 3;
+        isAlignedRef.current = false;
+        setCountdown(3);
+        setIsAligned(false);
+    }, []);
+
+    // Fix 2: Execute Capture with distinct state storage for front & side views
+    const executeCapture = useCallback(async () => {
+        stopVoiceGuidance(); // Stop speech immediately
+        isCapturingRef.current = true;
+
+        if (!webcamRef.current) return;
+        const imageDataUrl = webcamRef.current.getScreenshot();
+        if (!imageDataUrl) return;
+
+        const activeView = currentViewRef.current || captureStep;
+
+        if (activeView === 'front') {
+            setFrontCaptureUrl(imageDataUrl); // Store front separately
+            setCapturedImages(prev => ({ ...prev, front: imageDataUrl }));
+            setCapturedRawImages(prev => ({ ...prev, front: imageDataUrl }));
+            setCompletedViews(prev => [...new Set([...prev, 'front'])]);
+
+            speakInstruction('Front view captured! Now turn 90 degrees to your right.');
+            setTimeout(() => {
+                isCapturingRef.current = false;
+                switchToSideView(); // Switch to side view
+            }, 2000);
         } else {
-            // User moved out of frame — reset
-            clearInterval(captureTimerRef.current);
-            captureTimerRef.current = null;
-            setCaptureCountdown(null);
-        }
+            setSideCaptureUrl(imageDataUrl); // Store side separately
+            setCapturedImages(prev => ({ ...prev, side: imageDataUrl }));
+            setCapturedRawImages(prev => ({ ...prev, side: imageDataUrl }));
+            setCompletedViews(prev => [...new Set([...prev, 'side'])]);
 
-        return () => {
-            clearInterval(captureTimerRef.current);
-            captureTimerRef.current = null;
-        };
-    }, [alignment, sessionStarted, cameraActive, isReviewing]);
-
-    // Initialize Socket.io
-    useEffect(() => {
-        const newSocket = io('http://localhost:5000');
-
-        newSocket.on('connect', () => {
-            console.log('Connected to backend');
-            setIsConnected(true);
-            setInstruction('Align yourself in the frame');
-        });
-
-        newSocket.on('disconnect', () => {
-            console.log('Disconnected from backend');
-            setIsConnected(false);
-            setInstruction('Connection lost. Reconnecting...');
-        });
-
-        newSocket.on('frame_processed', (data) => {
-            setAlignment(data.alignment);
-            setInstruction(data.instruction);
-            setCountdown(data.countdown);
-
-            if (data.alignment === 'red' || data.countdown === null) {
-                clearInterval(captureTimerRef.current);
-                captureTimerRef.current = null;
-                setCaptureCountdown(null);
-            }
-
-            if (data.speak) {
-                speak(data.instruction);
-            }
-        });
-
-        newSocket.on('capture_complete', (data) => {
-            console.log('Capture complete:', data);
-            setCapturedImages(prev => ({ ...prev, [data.view]: data.image }));
-            setCompletedViews(prev => [...new Set([...prev, data.view])]);
-            setAlignment('red');
-            setCameraActive(false);
-
-            if (data.voice_message) {
-                speak(data.voice_message);
-            }
-
-            if (data.next_view && data.next_view !== 'complete') {
-                setTimeout(() => {
-                    setCurrentView(data.next_view);
-                    setCameraActive(true);
-                }, 600);
-            } else if (data.next_view === 'complete') {
+            speakInstruction('Side view captured! Processing your measurements now.');
+            setTimeout(() => {
+                stopVoiceGuidance();
+                isCapturingRef.current = false;
+                setCameraActive(false);
                 setIsReviewing(true);
-                speak('All views captured. Please review your photos.');
+            }, 1500);
+        }
+    }, [captureStep, speakInstruction, stopVoiceGuidance]);
+
+    // Fix 1: Start 1-second ticks countdown using ref value
+    const startCountdown = useCallback(() => {
+        if (countdownIntervalRef.current) return; // Prevent duplicate timers
+
+        countdownValueRef.current = 3;
+        setCountdown(3);
+
+        countdownIntervalRef.current = setInterval(() => {
+            if (!isAlignedRef.current) {
+                // Person misaligned — stop immediately
+                clearInterval(countdownIntervalRef.current);
+                countdownIntervalRef.current = null;
+                countdownValueRef.current = 3;
+                setCountdown(3);
+                return;
             }
-        });
 
-        newSocket.on('processing_complete', (data) => {
-            console.log('Processing complete:', data);
-            setResults(data);
-            setProcessing(false);
-            setShowManualMarker(false);
-            setIsEditingMarkings(false);
-            speak('Processing complete. Your measurements are ready.');
-        });
+            countdownValueRef.current -= 1;
+            setCountdown(countdownValueRef.current);
 
-        newSocket.on('error', (err) => {
-            console.error('Socket error:', err);
-            setInstruction(`Error: ${err.message}`);
+            if (countdownValueRef.current <= 0) {
+                clearInterval(countdownIntervalRef.current);
+                countdownIntervalRef.current = null;
+                if (validationIntervalRef.current) {
+                    clearInterval(validationIntervalRef.current);
+                    validationIntervalRef.current = null;
+                }
+                executeCapture();
+            }
+        }, 1000); // Exactly 1 second — never faster
+    }, [executeCapture]);
+
+    // Fix 1: Switch from front to side view safely
+    const switchToSideView = useCallback(() => {
+        clearAllTimers();          // Clear everything first
+        stopVoiceGuidance();       // Stop speech
+        setCurrentView('side');
+        setCaptureStep('side');
+        setCountdown(3);
+        setIsAligned(false);
+    }, [clearAllTimers, stopVoiceGuidance]);
+
+    // In-flight frame processing guard to prevent WebSocket buffer overflow
+    const isProcessingFrameRef = useRef(false);
+    const handlersAttachedRef = useRef(false);
+
+    // Initialize Socket.io connection
+    useEffect(() => {
+        if (socketRef.current?.connected) return;
+
+        const newSocket = io('http://localhost:5000', {
+            transports: ['websocket', 'polling'],
+            reconnectionAttempts: 3,
+            reconnectionDelay: 2000,
         });
+        socketRef.current = newSocket;
+
+        if (!handlersAttachedRef.current) {
+            handlersAttachedRef.current = true;
+
+            newSocket.on('connect', () => {
+                console.log('Connected to backend');
+                setIsConnected(true);
+                isProcessingFrameRef.current = false;
+                setInstruction('Align yourself in the frame');
+            });
+
+            newSocket.on('disconnect', () => {
+                console.log('Disconnected from backend');
+                setIsConnected(false);
+                isProcessingFrameRef.current = false;
+                handlersAttachedRef.current = false;
+                setInstruction('Connection lost. Reconnecting...');
+            });
+
+            newSocket.on('frame_processed', (data) => {
+                isProcessingFrameRef.current = false; // Allow next frame to be sent
+                setAlignment(data.alignment);
+                setInstruction(data.instruction);
+
+                const aligned = data.alignment === 'green';
+                if (aligned && !isAlignedRef.current) {
+                    isAlignedRef.current = true;
+                    setIsAligned(true);
+                    startCountdown();
+                } else if (!aligned && isAlignedRef.current) {
+                    isAlignedRef.current = false;
+                    setIsAligned(false);
+                    if (countdownIntervalRef.current) {
+                        clearInterval(countdownIntervalRef.current);
+                        countdownIntervalRef.current = null;
+                        countdownValueRef.current = 3;
+                        setCountdown(3);
+                    }
+                }
+
+                if (data.speak) {
+                    speakInstruction(data.instruction);
+                }
+            });
+
+            newSocket.on('capture_complete', (data) => {
+                console.log('Capture complete:', data);
+                isProcessingFrameRef.current = false;
+                if (data.view === 'front') {
+                    setFrontCaptureUrl(data.image);
+                } else if (data.view === 'side') {
+                    setSideCaptureUrl(data.image);
+                }
+                setCapturedImages(prev => ({ ...prev, [data.view]: data.image }));
+                setCompletedViews(prev => [...new Set([...prev, data.view])]);
+                setAlignment('red');
+                setIsAligned(false);
+                isAlignedRef.current = false;
+
+                if (data.voice_message) {
+                    speakInstruction(data.voice_message);
+                }
+
+                if (data.next_view && data.next_view !== 'complete') {
+                    switchToSideView();
+                } else if (data.next_view === 'complete') {
+                    stopVoiceGuidance();
+                    setCameraActive(false);
+                    setIsReviewing(true);
+                }
+            });
+
+            newSocket.on('processing_complete', (data) => {
+                console.log('Processing complete:', data);
+                isProcessingFrameRef.current = false;
+                setResults(data);
+                setProcessing(false);
+                setShowManualMarker(false);
+                setIsEditingMarkings(false);
+                speakInstruction('Processing complete. Your measurements are ready.');
+            });
+
+            newSocket.on('error', (err) => {
+                console.error('Socket error:', err);
+                isProcessingFrameRef.current = false;
+                setInstruction(`Error: ${err.message}`);
+            });
+        }
 
         setSocket(newSocket);
 
-        return () => newSocket.close();
-    }, []);
+        return () => {
+            handlersAttachedRef.current = false;
+            newSocket.disconnect();
+        };
+    }, [startCountdown, switchToSideView, speakInstruction, stopVoiceGuidance]);
 
     // Keep refs in sync for high-frequency frame loop
     const socketRef = useRef(socket);
@@ -273,9 +392,10 @@ const LiveCamera = () => {
     }, [heightUnit]);
 
     const captureAndSendFrame = useCallback(() => {
-        if (webcamRef.current && socketRef.current) {
+        if (webcamRef.current && socketRef.current && !isCapturingRef.current && !isProcessingFrameRef.current) {
             const imageSrc = webcamRef.current.getScreenshot();
             if (imageSrc) {
+                isProcessingFrameRef.current = true; // Block sending next frame until backend responds
                 socketRef.current.emit('process_frame', {
                     image: imageSrc,
                     view: currentViewRef.current,
@@ -297,15 +417,23 @@ const LiveCamera = () => {
         return () => clearInterval(interval);
     }, [sessionStarted, isConnected, socket, cameraActive, isReviewing, captureAndSendFrame]);
 
-    const speak = (text) => {
-        if ('speechSynthesis' in window) {
-            window.speechSynthesis.cancel();
+    // Cleanup on unmount
+    useEffect(() => {
+        return () => {
+            stopVoiceGuidance();
+            clearAllTimers();
+            setCameraActive(false);
+        };
+    }, [clearAllTimers, stopVoiceGuidance]);
 
-            const utterance = new SpeechSynthesisUtterance(text);
-            utterance.rate = 1.0;
-            utterance.pitch = 1.0;
-            window.speechSynthesis.speak(utterance);
-        }
+    const handleUserMedia = () => {
+        setCameraStatus('ready');
+    };
+
+    const handleUserMediaError = (err) => {
+        console.error('Webcam error:', err);
+        setCameraStatus('error');
+        setCameraErrorMsg('Failed to access camera. Please allow camera permissions.');
     };
 
     const startSession = () => {
@@ -313,16 +441,32 @@ const LiveCamera = () => {
             alert('Please enter your height first');
             return;
         }
+        stopVoiceGuidance();
+        clearAllTimers();
+        if (socket) {
+            socket.emit('reset_session');
+        }
+        setCurrentView('front');
+        setCaptureStep('front');
+        setFrontCaptureUrl(null);
+        setSideCaptureUrl(null);
+        setCapturedImages({});
+        setCapturedRawImages({});
+        setCompletedViews([]);
         setSessionStarted(true);
         setCameraActive(true);
         setCameraStatus('initializing');
         setCameraErrorMsg(null);
-        speak('Please face the front.');
+        speakInstruction('Please face the front in A-pose.');
     };
 
     const resetSession = () => {
+        stopVoiceGuidance(); // Stop voice guidance immediately
+        clearAllTimers();    // Clear all timers
         setSessionStarted(false);
         setCameraActive(false);
+        setFrontCaptureUrl(null);
+        setSideCaptureUrl(null);
         setCapturedImages({});
         setCapturedRawImages({});
         setCompletedViews([]);
@@ -333,6 +477,7 @@ const LiveCamera = () => {
         setShowManualMarker(false);
         setManualLandmarksByView({});
         setCurrentView('front');
+        setCaptureStep('front');
         setResults(null);
         setProcessing(false);
         setErrorMsg(null);
@@ -348,76 +493,25 @@ const LiveCamera = () => {
         setAutoViewOrder([]);
         autoViewOrderRef.current = [];
         setIsEditingMarkings(false);
-        clearInterval(captureTimerRef.current);
-        captureTimerRef.current = null;
-        setCaptureCountdown(null);
-        socket.emit('reset_session');
+        if (socket) {
+            socket.emit('reset_session');
+        }
     };
 
-
-    // Core capture logic shared by both auto and manual triggers
-    const doCapture = useCallback(async (view) => {
-        if (!webcamRef.current) return;
-        const imageSrc = webcamRef.current.getScreenshot();
-        if (!imageSrc) return;
-
-        setCameraActive(false);
-        setIsValidating(true);
-        setValidationError(null);
-
-        try {
-            console.log(`🔍 Validating person count for ${view} view...`);
-            const response = await axios.post('/api/validate-person', {
-                image: imageSrc
-            }, {
-                timeout: 30000
-            });
-
-            if (response.data.success) {
-                console.log(`✓ Person count validation passed for ${view}`);
-                
-                setCapturedImages(prev => ({ ...prev, [view]: imageSrc }));
-                setCapturedRawImages(prev => ({ ...prev, [view]: imageSrc }));
-                setCompletedViews(prev => [...new Set([...prev, view])]);
-                setAlignment('red');
-
-                const currentIndex = VIEW_ORDER.indexOf(view);
-                if (currentIndex < VIEW_ORDER.length - 1) {
-                    const nextView = VIEW_ORDER[currentIndex + 1];
-                    speak(`${view} captured. Now turn to show your ${nextView} view.`);
-                    setTimeout(() => {
-                        setCurrentView(nextView);
-                        setCameraActive(true);
-                    }, 600);
-                } else {
-                    setIsReviewing(true);
-                    speak('All views captured. Please review your photos.');
-                }
-            } else {
-                setValidationError(response.data.error || 'Validation failed');
-            }
-        } catch (err) {
-            console.error('❌ Validation error:', err);
-            const apiError = err.response?.data?.error || 'Validation failed. Please ensure exactly one person is visible.';
-            setValidationError(apiError);
-            speak(apiError);
-        } finally {
-            setIsValidating(false);
-        }
-    }, [VIEW_ORDER]);
-
-    // Auto-capture is triggered from the countdown useEffect
-    // Uses currentViewRef to avoid stale closures inside timer
-    const triggerAutoCapture = useCallback(() => {
-        doCapture(currentViewRef.current);
-    }, [doCapture]);
-
     const handleManualCapture = () => {
-        doCapture(currentView);
+        executeCapture();
     };
 
     const handleRetakeView = (view) => {
+        stopVoiceGuidance();
+        clearAllTimers();
         setCurrentView(view);
+        setCaptureStep(view);
+        if (view === 'front') {
+            setFrontCaptureUrl(null);
+        } else {
+            setSideCaptureUrl(null);
+        }
         setIsReviewing(false);
         setCameraActive(true);
         setCompletedViews(prev => prev.filter(v => v !== view));
@@ -431,16 +525,9 @@ const LiveCamera = () => {
         setMarkingMode(null);
     };
 
-    const handleRetake = () => {
-        setAwaitingSelection(false);
-        setLastCapturedImage(null);
-        setInstruction('Align yourself in the frame');
-        setAlignment('red');
-        socket.emit('retake_view', { view: currentView });
-    };
-
     const handleAutomaticMarking = () => {
-        const capturedOrder = VIEW_ORDER.filter(view => Boolean(capturedImages[view]));
+        stopVoiceGuidance();
+        const capturedOrder = VIEW_ORDER.filter(view => Boolean(capturedImages[view] || (view === 'front' ? frontCaptureUrl : sideCaptureUrl)));
         if (capturedOrder.length === 0) {
             alert('No captured photos found. Please capture photos first.');
             return;
@@ -462,18 +549,40 @@ const LiveCamera = () => {
         if (!orderedViews || index >= orderedViews.length) {
             setProcessing(true);
             setInstruction('Finalizing analysis...');
-            socket.emit('finalize_session');
+            if (socket && socket.connected) {
+                socket.emit('finalize_session');
+            }
+            
+            // Backup REST call to guarantee completion even if WebSocket drops or disconnects
+            setTimeout(async () => {
+                try {
+                    console.log('Sending fallback REST finalize-session request...');
+                    const resp = await axios.post('/api/finalize-session', {
+                        front_image: frontCaptureUrl || capturedImages['front'],
+                        side_image: sideCaptureUrl || capturedImages['side'],
+                        user_height: parseFloat(userHeight),
+                        height_unit: heightUnit
+                    });
+                    if (resp.data && resp.data.results) {
+                        setResults(resp.data);
+                        setProcessing(false);
+                    }
+                } catch (err) {
+                    console.log('REST finalize fallback status:', err);
+                }
+            }, 3500);
             return;
         }
 
         const view = orderedViews[index];
+        const imgUrl = capturedImages[view] || (view === 'front' ? frontCaptureUrl : sideCaptureUrl);
         setProcessing(true);
         setInstruction(`Processing photo ${index + 1} of ${orderedViews.length}...`);
         setAutoProgress(prev => ({ ...prev, [view]: 'processing' }));
         
         socket.emit('process_selection', {
             view: view,
-            image: capturedImages[view],
+            image: imgUrl,
             type: 'auto',
             user_height: parseFloat(userHeight),
             height_unit: heightUnit
@@ -481,6 +590,7 @@ const LiveCamera = () => {
     };
 
     const handleManualMarking = () => {
+        stopVoiceGuidance();
         setAwaitingSelection(false);
         setIsEditingMarkings(false);
         setMarkingMode('manual');
@@ -490,345 +600,40 @@ const LiveCamera = () => {
         setShowManualMarker(true);
     };
 
-    const handleEditMarkings = () => {
-        setAwaitingSelection(false);
-        setIsReviewing(false);
-        setIsEditingMarkings(true);
-        setMarkingMode('manual');
-        setMarkingViewIndex(0);
-        markingModeRef.current = 'manual';
-        markingViewIndexRef.current = 0;
-        setShowManualMarker(true);
-        setInstruction('Edit your markings and recalculate measurements.');
-    };
+    // Fix 4: Dynamic silhouette color & status text styling
+    const isAlignedState = isAligned || alignment === 'green';
+    const silhouetteColor = isAlignedState ? '#00D4AA' : '#FF4444';
 
-    const getNextManualLabel = () => {
-        if (markingViewIndex === 0) return 'Next: Side ->';
-        return isEditingMarkings ? 'Recalculate ->' : 'Finish & Calculate ->';
-    };
-
-    const getPreviousManualLabel = () => {
-        if (markingViewIndex === 1) return '<- Front';
-        return '<- Previous';
-    };
-
-    const handleManualPrevious = () => {
-        if (markingViewIndex <= 0) {
-            return;
-        }
-
-        const prevIndex = markingViewIndex - 1;
-        setMarkingViewIndex(prevIndex);
-        markingViewIndexRef.current = prevIndex;
-        setShowManualMarker(true);
-    };
-
-    const handleManualLandmarkComplete = (data) => {
-        const activeIndex = markingViewIndexRef.current;
-        const activeView = VIEW_ORDER[activeIndex];
-
-        // We will emit the manual landmarks for this view
-        setProcessing(true);
-        setInstruction(`Saving landmarks for ${activeView}...`);
-
-        socket.emit('process_selection', {
-            view: activeView,
-            image: capturedImages[activeView],
-            type: 'manual',
-            landmarks: data.landmarks,
-            user_height: parseFloat(userHeight),
-            height_unit: heightUnit
-        });
-        
-        // The selection_processed listener will handle moving to the next view
-    };
-
-    useEffect(() => {
-        if (!socket) return;
-
-        socket.on('selection_processed', (data) => {
-            console.log('Selection processed:', data);
-            setProcessing(false);
-            
-            if (data.error) {
-                setErrorMsg(data.error);
-                setInstruction(`Detection Failed for ${data.view}`);
-                setAutoProgress(prev => ({ ...prev, [data.view]: 'error' }));
-                return;
-            }
-
-            setAutoProgress(prev => ({ ...prev, [data.view]: 'done' }));
-
-            // Keep raw captured photos intact for re-editing.
-
-            // Move to next view in sequence
-            const currentIndex = markingViewIndexRef.current;
-            const nextIndex = currentIndex + 1;
-            const autoTotal = (markingModeRef.current === 'auto')
-                ? (autoViewOrderRef.current?.length || 0)
-                : 2;
-
-            if (nextIndex < autoTotal) {
-                setMarkingViewIndex(nextIndex);
-                markingViewIndexRef.current = nextIndex;
-                if (markingModeRef.current === 'auto') {
-                    processNextAutoView(nextIndex);
-                } else {
-                    // For manual, we wait for user to be ready?
-                    // Or just show the next marker immediately
-                    setShowManualMarker(true);
-                }
-            } else {
-                setInstruction('All views complete!');
-                setProcessing(true);
-                setInstruction('Finalizing analysis...');
-                socket.emit('finalize_session');
-            }
-        });
-
-        return () => socket.off('selection_processed');
-    }, [socket, currentView, capturedImages, userHeight, heightUnit]);
-
-    const handleUserMedia = () => {
-        console.log('Camera started successfully');
-        setCameraStatus('ready');
-    };
-
-    const handleUserMediaError = (error) => {
-        console.error('Camera error:', error);
-        setCameraStatus('error');
-        
-        if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
-            setCameraErrorMsg('Camera permission denied. Go to browser settings and allow camera access.');
-        } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
-            setCameraErrorMsg('Camera is being used by another application. Please close it and try again.');
-        } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
-            setCameraErrorMsg('No camera device found. Please connect a camera and try again.');
-        } else {
-            setCameraErrorMsg('Your browser does not support camera access. Please use Chrome or Firefox.');
-        }
-    };
-
-    const formatPxValue = (value) => {
-        if (value === null || value === undefined || Number.isNaN(Number(value))) {
-            return '—';
-        }
-        return `${Number(value).toFixed(2)} px`;
-    };
-
-    if (results && !isEditingMarkings) {
+    if (results) {
         return (
-            <div className="live-camera-results">
-                <h2>Measurement Results</h2>
-
-                <div className="results-grid">
-                    {Object.entries(results.results).map(([view, data]) => (
-                        <div key={view} className="view-result">
-                            <h3>{view.charAt(0).toUpperCase() + view.slice(1)} View</h3>
-
-                            <div className="images-row">
-                                {data.original_image && (
-                                    <div className="image-container">
-                                        <p>Original</p>
-                                        <img src={data.original_image} alt={`${view} original`} />
-                                    </div>
-                                )}
-                                {data.mask && (
-                                    <div className="image-container">
-                                        <p>Masked</p>
-                                        <img src={data.mask} alt={`${view} mask`} />
-                                    </div>
-                                )}
-                                {data.visualization && (
-                                    <div className="image-container">
-                                        <p>Landmarks</p>
-                                        <img src={data.visualization} alt={`${view} landmarks`} />
-                                    </div>
-                                )}
-                            </div>
-
-                            {data.measurements && (
-                                <div className="measurements-list">
-                                    <h4>Measurements</h4>
-                                    <div className={`smpl-status-badge ${data.smpl?.status === 'active' ? 'smpl-active' : 'smpl-estimated'}`}>
-                                        3D Body Model: {data.smpl?.status === 'active' ? 'Active' : 'Estimated'}
-                                    </div>
-                                    <table className="measurements-table">
-                                        <thead>
-                                            <tr>
-                                                <th>Measurement</th>
-                                                <th>Value (cm)</th>
-                                                <th>Value (px)</th>
-                                                <th>Source</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {Object.entries(data.measurements).map(([key, m]) => (
-                                                <tr key={key}>
-                                                    <td>{m.label || key.replace(/_/g, ' ')}</td>
-                                                    <td>{m.value_cm} cm</td>
-                                                    <td>{formatPxValue(m.value_px)}</td>
-                                                    <td>{m.source || 'Auto'}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            )}
-                        </div>
-                    ))}
-                </div>
-
-                <div className="results-actions-row">
-                    <button onClick={handleEditMarkings} className="edit-markings-button">
-                        ✏ Edit Markings
-                    </button>
-                    <button onClick={resetSession} className="reset-button">Start New Session</button>
-                </div>
+            <div className="results-container">
+                <h2>Analysis Complete</h2>
+                <pre>{JSON.stringify(results, null, 2)}</pre>
+                <button onClick={resetSession} className="start-button">Start New Session</button>
             </div>
         );
     }
 
     if (showManualMarker) {
-        const currentMarkingView = VIEW_ORDER[markingViewIndex];
-        const imageData =
-            capturedRawImages[currentMarkingView] ||
-            capturedImages[currentMarkingView] ||
-            results?.results?.[currentMarkingView]?.original_image;
-        
         return (
-            <div className="manual-marker-wrapper">
-                <div className="marking-progress-header">
-                    <h3>Manual Marking: {currentMarkingView.charAt(0).toUpperCase() + currentMarkingView.slice(1)} View</h3>
-                    <div className="progress-badge">Marking {markingViewIndex + 1} of {VIEW_ORDER.length}</div>
-                </div>
-                <ManualLandmarkMarker
-                    key={currentMarkingView}
-                    imageData={imageData}
-                    imageType={currentMarkingView}
-                    initialLandmarks={manualLandmarksByView[currentMarkingView] || emptyLandmarksRef.current}
-                    onLandmarksChange={(updatedLandmarks) => {
-                        setManualLandmarksByView(prev => ({
-                            ...prev,
-                            [currentMarkingView]: updatedLandmarks
-                        }));
-                    }}
-                    onPrevious={markingViewIndex > 0 ? handleManualPrevious : null}
-                    previousLabel={getPreviousManualLabel()}
-                    nextLabel={getNextManualLabel()}
-                    onComplete={handleManualLandmarkComplete}
-                    onCancel={() => {
-                        setShowManualMarker(false);
-                        setMarkingMode(null);
-                        setAwaitingSelection(true);
-                    }}
-                    onReset={() => {
-                        setManualLandmarksByView(prev => ({
-                            ...prev,
-                            [currentMarkingView]: []
-                        }));
-                    }}
-                />
-            </div>
-        );
-    }
-
-    if (awaitingSelection) {
-        return (
-            <div className="live-camera-selection">
-                <div className="selection-content">
-                    <h2>Choose marking method</h2>
-                    <p>All {VIEW_ORDER.length} views captured. How would you like to proceed?</p>
-                    
-                    <div className="captured-preview-grid">
-                        {VIEW_ORDER.map(view => (
-                            <div key={view} className="preview-tile">
-                                <img src={capturedImages[view]} alt={`${view} preview`} />
-                                <span>{view.charAt(0).toUpperCase() + view.slice(1)}</span>
-                            </div>
-                        ))}
-                    </div>
-                    
-                    {errorMsg && (
-                        <div className="error-message">
-                            <p>{errorMsg}</p>
-                            <p>Please retake failing photos or use Manual Marking.</p>
-                        </div>
-                    )}
-
-                    <div className="selection-buttons">
-                        <button onClick={handleManualMarking} className="method-button manual">
-                            <strong>Manual Marking</strong>
-                            <span>User places points manually on body</span>
-                        </button>
-                        <button onClick={handleAutomaticMarking} className="method-button automatic" disabled={processing}>
-                            {processing ? 'Processing...' : (
-                                <>
-                                    <strong>Automatic Marking</strong>
-                                    <span>AI detects points automatically</span>
-                                </>
-                            )}
-                        </button>
-                    </div>
-
-                    <button onClick={resetSession} className="retake-button" disabled={processing}>
-                        Reset and Restart
-                    </button>
-                </div>
-            </div>
-        );
-    }
-
-    if (markingMode === 'auto') {
-        return (
-            <div className="auto-processing-container">
-                <h2>Automatic Marking</h2>
-                <div className="processing-grid">
-                    {(autoViewOrder.length ? autoViewOrder : VIEW_ORDER.filter(view => Boolean(capturedImages[view]))).map((view) => {
-                        const status = autoProgress[view];
-                        return (
-                            <div key={view} className={`processing-tile ${status || ''}`}>
-                                <div className="tile-image">
-                                    <img src={capturedImages[view]} alt={view} />
-                                    {status === 'processing' && <div className="processing-overlay"><div className="spinner-small"></div></div>}
-                                    {status === 'done' && <div className="status-overlay success">✓</div>}
-                                    {status === 'error' && <div className="status-overlay error">✗</div>}
-                                </div>
-                                <div className="view-label">
-                                    {view.charAt(0).toUpperCase() + view.slice(1)}
-                                    {status === 'error' && (
-                                        <button 
-                                            className="single-retake-btn"
-                                            onClick={() => {
-                                                setMarkingMode(null);
-                                                setCurrentView(view);
-                                                setCaptureSequenceComplete(false);
-                                                setAutoProgress(prev => {
-                                                    const next = { ...prev };
-                                                    delete next[view];
-                                                    return next;
-                                                });
-                                                setInstruction(`Retaking ${view} view`);
-                                            }}
-                                        >
-                                            Retake
-                                        </button>
-                                    )}
-                                </div>
-                            </div>
-                        );
-                    })}
-                </div>
-                <div className="overall-status">
-                    {(() => {
-                        const total = autoViewOrder.length || VIEW_ORDER.filter(view => Boolean(capturedImages[view])).length || VIEW_ORDER.length;
-                        return markingViewIndex < total
-                            ? `Processing photo ${markingViewIndex + 1} of ${total}...`
-                            : 'Finalizing analysis...';
-                    })()}
-                </div>
-                {errorMsg && <div className="error-message">{errorMsg}</div>}
-            </div>
+            <ManualLandmarkMarker
+                imageData={frontCaptureUrl || capturedImages['front']}
+                frontImage={frontCaptureUrl || capturedImages['front']}
+                sideImage={sideCaptureUrl || capturedImages['side']}
+                imageType="front"
+                views={VIEW_ORDER.filter(v => Boolean(capturedImages[v] || (v === 'front' ? frontCaptureUrl : sideCaptureUrl)))}
+                capturedImages={capturedImages}
+                userHeight={userHeight}
+                heightUnit={heightUnit}
+                onComplete={() => {
+                    setShowManualMarker(false);
+                    setIsReviewing(true);
+                }}
+                onCancel={() => {
+                    setShowManualMarker(false);
+                    setIsReviewing(true);
+                }}
+            />
         );
     }
 
@@ -837,17 +642,26 @@ const LiveCamera = () => {
             <div className="camera-review-screen">
                 <h2>All photos captured</h2>
                 <div className="review-grid-row">
-                    {VIEW_ORDER.map(view => (
-                        <div key={view} className="review-thumb">
-                            <div className="thumb-wrapper">
-                                <img src={capturedImages[view]} alt={view} />
-                            </div>
-                            <span className="thumb-label">{view.charAt(0).toUpperCase() + view.slice(1)} View</span>
-                            <button onClick={() => handleRetakeView(view)} className="mini-retake-btn">
-                                Retake
-                            </button>
+                    {/* Fix 2: Render thumbnails correctly using distinct variables */}
+                    <div className="review-thumb">
+                        <div className="thumb-wrapper">
+                            <img src={frontCaptureUrl || capturedImages['front']} alt="Front view" />
                         </div>
-                    ))}
+                        <span className="thumb-label">✓ Front View</span>
+                        <button onClick={() => handleRetakeView('front')} className="mini-retake-btn">
+                            Retake
+                        </button>
+                    </div>
+
+                    <div className="review-thumb">
+                        <div className="thumb-wrapper">
+                            <img src={sideCaptureUrl || capturedImages['side']} alt="Side view" />
+                        </div>
+                        <span className="thumb-label">✓ Side View</span>
+                        <button onClick={() => handleRetakeView('side')} className="mini-retake-btn">
+                            Retake
+                        </button>
+                    </div>
                 </div>
                 
                 <div className="review-footer">
@@ -900,19 +714,30 @@ const LiveCamera = () => {
                     <button onClick={startSession} className="start-button">Start Camera</button>
                 </div>
             ) : (
-                <div className={`camera-view ${alignment}`}>
+                <div className={`camera-view ${isAlignedState ? 'green' : 'red'}`}>
                     <div className="camera-header-tabs">
-                        {VIEW_ORDER.map((view, idx) => (
-                            <div key={view} className={`tab-item ${currentView === view ? 'active' : ''} ${completedViews.includes(view) ? 'completed' : ''}`}>
-                                {completedViews.includes(view) && <span className="check">✓</span>}
-                                {view.toUpperCase()}
-                            </div>
-                        ))}
+                        {VIEW_ORDER.map((view) => {
+                            const isDone = completedViews.includes(view) || (view === 'front' ? !!frontCaptureUrl : !!sideCaptureUrl);
+                            return (
+                                <div key={view} className={`tab-item ${currentView === view ? 'active' : ''} ${isDone ? 'completed' : ''}`}>
+                                    {isDone && <span className="check">✓</span>}
+                                    {view.toUpperCase()}
+                                </div>
+                            );
+                        })}
                     </div>
 
                     <div className="view-instruction-overlay">
                         <h2>{VIEW_ORDER.indexOf(currentView) + 1} of {VIEW_ORDER.length} — {currentView.charAt(0).toUpperCase() + currentView.slice(1)} View</h2>
-                        <p>{currentView === 'front' ? 'Stand facing the camera' : 'Turn to show your side'}</p>
+                        
+                        {/* Fix 4: Alignment status text with dynamic color */}
+                        <div className="alignment-status" style={{ color: silhouetteColor, fontWeight: 'bold', fontSize: '16px', marginTop: '6px' }}>
+                            {isAlignedState
+                                ? `✅ Aligned! Capturing in ${countdown}...`
+                                : captureStep === 'front' || currentView === 'front'
+                                ? '👤 Stand facing camera in A-pose'
+                                : '↩️ Turn 90° to your right for side view'}
+                        </div>
                     </div>
 
                     <div className="webcam-wrapper">
@@ -956,10 +781,11 @@ const LiveCamera = () => {
                             </div>
                         )}
 
-                        <SilhouetteOverlay view={currentView} alignment={alignment} />
+                        {/* Fix 4: Silhouette color dynamic stroke/fill */}
+                        <SilhouetteOverlay view={currentView} alignment={alignment} isAligned={isAlignedState} />
 
                         {/* Auto-capture countdown overlay */}
-                        {alignment === 'green' && captureCountdown !== null && (
+                        {isAlignedState && (
                             <div className="auto-capture-overlay">
                                 <div className="countdown-ring">
                                     <svg viewBox="0 0 100 100">
@@ -967,22 +793,17 @@ const LiveCamera = () => {
                                         <circle
                                             cx="50" cy="50" r="42"
                                             className="countdown-progress"
-                                            strokeDasharray={`${(( captureCountdown / 3) * 263.9).toFixed(1)} 263.9`}
+                                            strokeDasharray={`${((countdown / 3) * 263.9).toFixed(1)} 263.9`}
                                         />
                                     </svg>
-                                    <span className="countdown-number">{captureCountdown}</span>
+                                    <span className="countdown-number">{countdown}</span>
                                 </div>
                                 <p className="auto-capture-hint">Hold still…</p>
                             </div>
                         )}
 
-                        {/* Green alignment pulse when aligned, but countdown not started yet */}
-                        {alignment === 'green' && captureCountdown === null && (
-                            <div className="alignment-good-hint">✓ Aligned</div>
-                        )}
-
                         {/* Misaligned hint */}
-                        {alignment === 'red' && cameraActive && (
+                        {!isAlignedState && cameraActive && (
                             <div className="alignment-hint-text">Align yourself in the frame</div>
                         )}
 
@@ -1019,6 +840,22 @@ const LiveCamera = () => {
                             );
                         })()}
                         <button onClick={resetSession} className="cancel-text-btn">Cancel</button>
+                    </div>
+
+                    {/* Fix 2: Render thumbnails at bottom of camera view */}
+                    <div className="capture-thumbnails-strip" style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                        {frontCaptureUrl && (
+                            <div className="capture-thumbnail front-thumbnail" style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(0,0,0,0.6)', padding: '4px 8px', borderRadius: '6px', color: '#00FF88', fontSize: '12px' }}>
+                                <img src={frontCaptureUrl} alt="Front view" style={{ width: '32px', height: '32px', borderRadius: '4px', objectFit: 'cover' }} />
+                                <span>✓ Front View</span>
+                            </div>
+                        )}
+                        {sideCaptureUrl && (
+                            <div className="capture-thumbnail side-thumbnail" style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'rgba(0,0,0,0.6)', padding: '4px 8px', borderRadius: '6px', color: '#00FF88', fontSize: '12px' }}>
+                                <img src={sideCaptureUrl} alt="Side view" style={{ width: '32px', height: '32px', borderRadius: '4px', objectFit: 'cover' }} />
+                                <span>✓ Side View</span>
+                            </div>
+                        )}
                     </div>
                 </div>
             )}

@@ -8,6 +8,7 @@ import RNFS from 'react-native-fs';
 import { Config } from '../../constants/config';
 import { useAuthStore } from '../../store/authStore';
 import { Colors } from '../../constants/colors';
+import ZoomableImageModal from '../../components/common/ZoomableImageModal';
 
 const { width } = Dimensions.get('window');
 
@@ -16,6 +17,10 @@ const ResultsScreen = ({ route, navigation }) => {
   const [plotlyJs, setPlotlyJs] = useState('');
   const [meshReady, setMeshReady] = useState(false);
   const [downloading, setDownloading] = useState(false);
+
+  // Zoom modal state
+  const [activeZoomImage, setActiveZoomImage] = useState(null);
+  const [activeZoomTitle, setActiveZoomTitle] = useState('');
 
   // Extract all data same as web:
   const frontMeasurements = data?.results?.front?.measurements || {};
@@ -314,10 +319,17 @@ const ResultsScreen = ({ route, navigation }) => {
           <Text style={styles.viewLabel}>Front View</Text>
           <View style={styles.imageRow}>
             <View style={styles.imageCard}>
-              <Text style={styles.imageLabel}>YOLOv8 Mask</Text>
+              <Text style={styles.imageLabel}>YOLOv8 Mask (Tap to Zoom 🔍)</Text>
               {frontMask ? (
-                <Image source={decodeImage(frontMask)}
-                  style={styles.analysisImage} resizeMode="contain" />
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    setActiveZoomImage(decodeImage(frontMask));
+                    setActiveZoomTitle('Front View — YOLOv8 Mask');
+                  }}>
+                  <Image source={decodeImage(frontMask)}
+                    style={styles.analysisImage} resizeMode="contain" />
+                </TouchableOpacity>
               ) : (
                 <View style={styles.noImage}>
                   <Text style={styles.noImageText}>Not available</Text>
@@ -325,10 +337,17 @@ const ResultsScreen = ({ route, navigation }) => {
               )}
             </View>
             <View style={styles.imageCard}>
-              <Text style={styles.imageLabel}>Pose Keypoints</Text>
+              <Text style={styles.imageLabel}>Pose Keypoints (Tap to Zoom 🔍)</Text>
               {frontViz ? (
-                <Image source={decodeImage(frontViz)}
-                  style={styles.analysisImage} resizeMode="contain" />
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    setActiveZoomImage(decodeImage(frontViz));
+                    setActiveZoomTitle('Front View — Pose Keypoints');
+                  }}>
+                  <Image source={decodeImage(frontViz)}
+                    style={styles.analysisImage} resizeMode="contain" />
+                </TouchableOpacity>
               ) : (
                 <View style={styles.noImage}>
                   <Text style={styles.noImageText}>Not available</Text>
@@ -341,10 +360,17 @@ const ResultsScreen = ({ route, navigation }) => {
           <Text style={[styles.viewLabel, { marginTop: 16 }]}>Side View</Text>
           <View style={styles.imageRow}>
             <View style={styles.imageCard}>
-              <Text style={styles.imageLabel}>YOLOv8 Mask</Text>
+              <Text style={styles.imageLabel}>YOLOv8 Mask (Tap to Zoom 🔍)</Text>
               {sideMask ? (
-                <Image source={decodeImage(sideMask)}
-                  style={styles.analysisImage} resizeMode="contain" />
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    setActiveZoomImage(decodeImage(sideMask));
+                    setActiveZoomTitle('Side View — YOLOv8 Mask');
+                  }}>
+                  <Image source={decodeImage(sideMask)}
+                    style={styles.analysisImage} resizeMode="contain" />
+                </TouchableOpacity>
               ) : (
                 <View style={styles.noImage}>
                   <Text style={styles.noImageText}>Not available</Text>
@@ -352,10 +378,17 @@ const ResultsScreen = ({ route, navigation }) => {
               )}
             </View>
             <View style={styles.imageCard}>
-              <Text style={styles.imageLabel}>Pose Keypoints</Text>
+              <Text style={styles.imageLabel}>Pose Keypoints (Tap to Zoom 🔍)</Text>
               {sideViz ? (
-                <Image source={decodeImage(sideViz)}
-                  style={styles.analysisImage} resizeMode="contain" />
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    setActiveZoomImage(decodeImage(sideViz));
+                    setActiveZoomTitle('Side View — Pose Keypoints');
+                  }}>
+                  <Image source={decodeImage(sideViz)}
+                    style={styles.analysisImage} resizeMode="contain" />
+                </TouchableOpacity>
               ) : (
                 <View style={styles.noImage}>
                   <Text style={styles.noImageText}>Not available</Text>
@@ -364,6 +397,16 @@ const ResultsScreen = ({ route, navigation }) => {
             </View>
           </View>
         </View>
+
+        <ZoomableImageModal
+          visible={!!activeZoomImage}
+          imageSource={activeZoomImage}
+          title={activeZoomTitle}
+          onClose={() => {
+            setActiveZoomImage(null);
+            setActiveZoomTitle('');
+          }}
+        />
 
         {/* Export Report */}
         <View style={styles.card}>

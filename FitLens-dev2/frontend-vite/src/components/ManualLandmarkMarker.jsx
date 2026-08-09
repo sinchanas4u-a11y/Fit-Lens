@@ -4,7 +4,9 @@ import './ManualLandmarkMarker.css';
 
 const ManualLandmarkMarker = ({
   imageData,
-  imageType,
+  frontImage,
+  sideImage,
+  imageType = 'front',
   onComplete,
   onCancel,
   onReset,
@@ -16,6 +18,8 @@ const ManualLandmarkMarker = ({
   imageHeight,
   imageWidth
 }) => {
+  const currentImgData = imageData || (imageType === 'side' ? sideImage : frontImage) || frontImage;
+
   const [landmarks, setLandmarks] = useState([]);
   const [currentLine, setCurrentLine] = useState(null);
   const [hoveredPoint, setHoveredPoint] = useState(null);
@@ -65,15 +69,12 @@ const ManualLandmarkMarker = ({
     }));
 
   useEffect(() => {
-    // Only rehydrate when switching to a different photo/view.
-    // Including `initialLandmarks` here causes a parent-child update loop
-    // that can reset in-progress clicks and make marking feel unresponsive.
     setLandmarks(cloneLandmarks(initialLandmarks));
     setCurrentLine(null);
     setHoveredPoint(null);
     setSelectedPoint(null);
     setDraggingPoint(null);
-  }, [imageType, imageData]);
+  }, [imageType, currentImgData]);
 
   useEffect(() => {
     if (onLandmarksChange) {
@@ -81,28 +82,35 @@ const ManualLandmarkMarker = ({
     }
   }, [landmarks, onLandmarksChange]);
 
+  const updateScaleAndOffset = () => {
+    const image = imageRef.current;
+    const canvas = canvasRef.current;
+    if (!image || !canvas) return;
+    const w = image.naturalWidth || image.width;
+    const h = image.naturalHeight || image.height;
+    if (!w || !h) return;
+
+    const maxWidth = canvas.width;
+    const maxHeight = canvas.height;
+    const scaleX = maxWidth / w;
+    const scaleY = maxHeight / h;
+    const newScale = Math.min(scaleX, scaleY, 1);
+
+    setScale(newScale);
+    setOffset({
+      x: (maxWidth - w * newScale) / 2,
+      y: (maxHeight - h * newScale) / 2
+    });
+  };
+
   useEffect(() => {
-    if (imageRef.current && canvasRef.current) {
-      const image = imageRef.current;
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
-
-      // Calculate scale to fit image in canvas
-      const maxWidth = canvas.width;
-      const maxHeight = canvas.height;
-      const scaleX = maxWidth / image.naturalWidth;
-      const scaleY = maxHeight / image.naturalHeight;
-      const newScale = Math.min(scaleX, scaleY, 1);
-
-      setScale(newScale);
-      setOffset({
-        x: (maxWidth - image.naturalWidth * newScale) / 2,
-        y: (maxHeight - image.naturalHeight * newScale) / 2
-      });
-
-      redrawCanvas();
+    if (imageRef.current) {
+      if (imageRef.current.complete && imageRef.current.naturalWidth > 0) {
+        updateScaleAndOffset();
+        redrawCanvas();
+      }
     }
-  }, [imageData, landmarks, currentLine, hoveredPoint]);
+  }, [currentImgData, landmarks, currentLine, hoveredPoint]);
 
   const redrawCanvas = () => {
     const canvas = canvasRef.current;
@@ -402,10 +410,13 @@ const ManualLandmarkMarker = ({
           />
           <img
             ref={imageRef}
-            src={imageData}
+            src={currentImgData}
             alt="Marking target"
             style={{ display: 'none' }}
-            onLoad={redrawCanvas}
+            onLoad={() => {
+              updateScaleAndOffset();
+              redrawCanvas();
+            }}
           />
 
           {currentLine && (

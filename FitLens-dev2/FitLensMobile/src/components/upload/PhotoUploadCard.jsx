@@ -1,8 +1,11 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { View, Text, Image, TouchableOpacity, StyleSheet } from 'react-native';
 import { Colors } from '../../constants/colors';
+import ZoomableImageModal from '../common/ZoomableImageModal';
 
 const PhotoUploadCard = ({ title, description, imageUri, onSelect, onRemove }) => {
+  const [zoomVisible, setZoomVisible] = useState(false);
+
   return (
     <View style={styles.card}>
       <Text style={styles.title}>{title}</Text>
@@ -10,10 +13,20 @@ const PhotoUploadCard = ({ title, description, imageUri, onSelect, onRemove }) =
 
       {imageUri ? (
         <View style={styles.imagePreviewWrap}>
-          <Image source={{ uri: imageUri }} style={styles.previewImage} resizeMode="contain" />
+          <TouchableOpacity activeOpacity={0.8} onPress={() => setZoomVisible(true)} style={{ width: '100%' }}>
+            <Image source={{ uri: imageUri }} style={styles.previewImage} resizeMode="contain" />
+            <Text style={styles.tapZoomHint}>🔍 Tap image to zoom & inspect</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.removeBtn} onPress={onRemove}>
             <Text style={styles.removeText}>✕ Remove Photo</Text>
           </TouchableOpacity>
+
+          <ZoomableImageModal
+            visible={zoomVisible}
+            imageSource={{ uri: imageUri }}
+            title={title}
+            onClose={() => setZoomVisible(false)}
+          />
         </View>
       ) : (
         <TouchableOpacity style={styles.uploadArea} onPress={onSelect}>
@@ -52,6 +65,13 @@ const styles = StyleSheet.create({
   uploadSub: { color: Colors.textSecondary, fontSize: 11, marginTop: 2 },
   imagePreviewWrap: { alignItems: 'center' },
   previewImage: { width: '100%', height: 180, borderRadius: 10 },
+  tapZoomHint: {
+    color: Colors.accent,
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 4,
+  },
   removeBtn: {
     marginTop: 8,
     paddingVertical: 6,

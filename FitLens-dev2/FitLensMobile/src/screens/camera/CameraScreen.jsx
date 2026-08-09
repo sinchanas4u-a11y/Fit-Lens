@@ -5,6 +5,7 @@ import Svg, { Circle, Line } from 'react-native-svg';
 import axios from 'axios';
 import { Config } from '../../constants/config';
 import ManualLandmarkModal from '../../components/measurement/ManualLandmarkModal';
+import ZoomableImageModal from '../../components/common/ZoomableImageModal';
 import { uriToBase64 } from '../../utils/base64Utils';
 import { measurementApi } from '../../api/measurementApi';
 
@@ -17,6 +18,7 @@ const CameraScreen = ({ navigation }) => {
   const [captureStep, setCaptureStep] = useState(1); // 1=front, 2=side
   const [frontCapture, setFrontCapture] = useState(null);
   const [sideCapture, setSideCapture] = useState(null);
+  const [frontZoomVisible, setFrontZoomVisible] = useState(false);
   const [checking, setChecking] = useState(false);
   const [userHeight, setUserHeight] = useState('165');
   const [processingManual, setProcessingManual] = useState(false);
@@ -344,12 +346,22 @@ const CameraScreen = ({ navigation }) => {
       )}
 
       {frontCapture && captureStep === 2 && (
-        <View style={styles.thumbnail}>
+        <TouchableOpacity
+          activeOpacity={0.8}
+          onPress={() => setFrontZoomVisible(true)}
+          style={styles.thumbnail}>
           <Image source={{ uri: frontCapture }}
             style={styles.thumbnailImg} />
           <Text style={styles.thumbnailLabel}>Front ✓</Text>
-        </View>
+        </TouchableOpacity>
       )}
+
+      <ZoomableImageModal
+        visible={frontZoomVisible}
+        imageSource={{ uri: frontCapture }}
+        title="Captured Front View Photo"
+        onClose={() => setFrontZoomVisible(false)}
+      />
 
       <TouchableOpacity
         style={[

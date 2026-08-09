@@ -37,7 +37,10 @@ class SegmentationModel:
             model_name = f'yolov8{model_size}-seg.pt'
             print(f"Loading YOLOv8 segmentation model: {model_name}")
             self.model = YOLO(model_name)
-            print("✓ YOLOv8 segmentation model loaded successfully")
+            # Pre-warm model with dummy tensor to fuse weights once at server startup
+            dummy_img = np.zeros((480, 640, 3), dtype=np.uint8)
+            self.model(dummy_img, verbose=False, conf=0.5, imgsz=640)
+            print("✓ YOLOv8 segmentation model loaded and pre-warmed successfully")
         except Exception as e:
             print(f"Failed to initialize YOLOv8: {e}")
             self.model = None
