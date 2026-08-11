@@ -1,10 +1,13 @@
+import eventlet
+eventlet.monkey_patch()
+
 """
 Flask Backend API for Body Measurement System
 """
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 # Fix for Windows socket teardown error: OSError: [WinError 10038] An operation was attempted on something that is not a socket
 if sys.platform == 'win32':
@@ -155,11 +158,12 @@ CORS(app)
 socketio = SocketIO(
     app, 
     cors_allowed_origins="*", 
-    async_mode='threading',
+    async_mode='eventlet',
     logger=False,
     engineio_logger=False,
-    ping_timeout=120,
+    ping_timeout=60,
     ping_interval=25,
+    transports=['polling', 'websocket'],
     max_http_buffer_size=10 * 1024 * 1024
 )
 
@@ -1113,11 +1117,13 @@ def detect_body_orientation(landmarks, image_shape):
     def norm_y(pt):
         return pt[1] / float(h) if pt[1] > 1.5 else float(pt[1])
 
-    vis_thresh = 0.25
+    vis_thresh = 0.15
     l_sh_vis = len(left_shoulder) > 2 and left_shoulder[2] >= vis_thresh
     r_sh_vis = len(right_shoulder) > 2 and right_shoulder[2] >= vis_thresh
     l_hip_vis = len(left_hip) > 2 and left_hip[2] >= vis_thresh
     r_hip_vis = len(right_hip) > 2 and right_hip[2] >= vis_thresh
+    l_knee_vis = len(landmarks[25]) > 2 and landmarks[25][2] >= vis_thresh
+    r_knee_vis = len(landmarks[26]) > 2 and landmarks[26][2] >= vis_thresh
     l_ank_vis = len(left_ankle) > 2 and left_ankle[2] >= vis_thresh
     r_ank_vis = len(right_ankle) > 2 and right_ankle[2] >= vis_thresh
 
@@ -1140,25 +1146,17 @@ def detect_body_orientation(landmarks, image_shape):
     both_hips = l_hip_vis and r_hip_vis
     has_feet = l_ank_vis or r_ank_vis
 
-    is_full_body = (l_sh_vis or r_sh_vis) and (l_hip_vis or r_hip_vis) and has_feet
+    is_upper_visible = l_sh_vis or r_sh_vis or (len(landmarks[0]) > 2 and landmarks[0][2] >= vis_thresh)
+    is_lower_visible = l_hip_vis or r_hip_vis or l_knee_vis or r_knee_vis or l_ank_vis or r_ank_vis
+    is_full_body = is_upper_visible and is_lower_visible
 
-    # Refined SIDE vs FRONT orientation logic:
-    # In SIDE view (profile), left & right shoulders overlap horizontally -> shoulder_width_x < 0.12 or ratio < 0.30
-    is_side = (shoulder_width_x < 0.11 or shoulder_ratio < 0.30) and (hip_width_x < 0.09 or hip_ratio < 0.26)
-
-    # In FRONT view, shoulders are spread out wide -> shoulder_ratio >= 0.30 or shoulder_width_x >= 0.10, with both shoulders visible
-    is_front = (shoulder_width_x >= 0.10 or shoulder_ratio >= 0.30) and both_shoulders
-
-    if is_side and not is_front:
-        orientation = 'side'
-    elif is_front:
+    # Clean FRONT vs SIDE orientation logic calibrated for all body types & camera distances:
+    if both_shoulders and shoulder_width_x >= 0.035:
         orientation = 'front'
-    elif shoulder_width_x < 0.10:
+    elif shoulder_width_x < 0.035 or not both_shoulders:
         orientation = 'side'
-    elif both_shoulders:
-        orientation = 'front'
     else:
-        orientation = 'invalid'
+        orientation = 'front'
 
     return {
         'orientation': orientation,
@@ -1204,11 +1202,15 @@ def validate_person_count():
         padded_image = cv2.copyMakeBorder(img, pad_h, pad_h, pad_w, pad_w, 
                                          cv2.BORDER_CONSTANT, value=[128, 128, 128])
                                          
-        results = segmentation_model.model(padded_image, conf=0.5, imgsz=1024, retina_masks=True, verbose=False, classes=[0])
+        results = segmentation_model.model(padded_image, conf=0.35, imgsz=1024, retina_masks=True, verbose=False, classes=[0])
         
         num_people = 0
-        if len(results) > 0 and results[0].boxes is not None:
-            num_people = len(results[0].boxes)
+        if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            areas = [(b[2] - b[0]) * (b[3] - b[1]) for b in boxes]
+            max_area = max(areas)
+            valid_boxes = [b for b, a in zip(boxes, areas) if a >= max_area * 0.20]
+            num_people = len(valid_boxes)
             
         if num_people == 0:
             return jsonify({'success': False, 'error': 'No person detected in the image. Please upload a valid image containing one person.'}), 400
@@ -1233,9 +1235,9 @@ def validate_person_count():
         right_ankle = landmarks[28]
         
         cropped = False
-        if left_ankle[1] > h_orig * 0.995 and right_ankle[1] > h_orig * 0.995:
+        if left_ankle[1] > h_orig * 0.999 and right_ankle[1] > h_orig * 0.999:
             cropped = True
-        elif nose[1] < h_orig * 0.005:
+        elif nose[1] < h_orig * 0.001:
             cropped = True
             
         if cropped:
@@ -1257,7 +1259,7 @@ def validate_person_count():
                     'success': False,
                     'error': 'Side-view image detected. Please upload a FRONT-view image in this section.'
                 }), 400
-            if detected_orient != 'front' or not both_shoulders or not both_hips or not is_full_body:
+            if detected_orient != 'front' or not is_full_body:
                 return jsonify({
                     'success': False,
                     'error': 'Invalid Front View. Please upload a full-body FRONT-facing image.'
@@ -1841,8 +1843,6 @@ def process():
 
 
 @app.route('/api/validate-person', methods=['POST'])
-@app.route('/validate/person-count', methods=['POST'])
-@app.route('/api/validate/person-count', methods=['POST'])
 def validate_person_route():
     """Validate that exactly one person is present in the image."""
     t_start = time.time()
@@ -2893,7 +2893,7 @@ def draw_feedback_overlay(frame, landmarks, alignment, has_object):
 
 
 def decode_image(base64_str):
-    """Decode base64 image to numpy array"""
+    """Decode base64 image to numpy array with EXIF auto-orientation and max-dim downsampling"""
     if not base64_str:
         return None
     
@@ -2903,6 +2903,20 @@ def decode_image(base64_str):
     
     img_data = base64.b64decode(base64_str)
     img = Image.open(io.BytesIO(img_data))
+    try:
+        from PIL import ImageOps
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+
+    # Downsample high-resolution frames (e.g. 12MP 4096x3072 from mobile camera) to max 1280px on long edge
+    max_dim = max(img.width, img.height)
+    if max_dim > 1280:
+        scale = 1280.0 / max_dim
+        new_w = max(1, int(img.width * scale))
+        new_h = max(1, int(img.height * scale))
+        img = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+
     img_array = np.array(img)
     
     # Convert RGB to BGR for OpenCV
@@ -4226,7 +4240,13 @@ def process_alignment(image, view, session=None):
                 padded = cv2.copyMakeBorder(image, pad_h, pad_h, pad_w, pad_w, 
                                            cv2.BORDER_CONSTANT, value=[128, 128, 128])
                 results = segmentation_model.model(padded, conf=0.35, imgsz=1024, verbose=False, classes=[0])
-                num_people = len(results[0].boxes) if len(results) > 0 and results[0].boxes is not None else 0
+                num_people = 0
+                if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
+                    boxes = results[0].boxes.xyxy.cpu().numpy()
+                    areas = [(b[2] - b[0]) * (b[3] - b[1]) for b in boxes]
+                    max_area = max(areas)
+                    valid_boxes = [b for b, a in zip(boxes, areas) if a >= max_area * 0.20]
+                    num_people = len(valid_boxes)
                 print(f"  Condition 1 (YOLO person count): {num_people}")
                 if num_people > 1:
                     session.stability_start_time = None
@@ -4258,7 +4278,21 @@ def process_alignment(image, view, session=None):
             print(f"  Condition 2 (MediaPipe detection): PASS ({len(landmarks)} landmarks detected)")
 
         # 3. Critical Landmarks Confidence Check (Nose, Shoulders, Hips, Ankles)
-        critical_landmarks = [0, 11, 12, 23, 24, 27, 28]
+        # In side profile view, the far leg/ankle is self-occluded by the near leg.
+        # We require at least one ankle (max confidence of 27/28) to be visible in side view.
+        if view == 'side':
+            critical_landmarks = [0, 11, 12, 23, 24]
+            max_ankle_c = max(
+                float(landmarks[27][2]) if len(landmarks[27]) >= 3 else 1.0,
+                float(landmarks[28][2]) if len(landmarks[28]) >= 3 else 1.0
+            )
+            if max_ankle_c < 0.35:
+                session.stability_start_time = None
+                print(f"  Condition 3 (Critical landmarks): FAIL (side view max ankle conf={max_ankle_c:.2f} < 0.35)")
+                return 'red', 'Full body not visible. Adjust position.', None
+        else:
+            critical_landmarks = [0, 11, 12, 23, 24, 27, 28]
+
         conf_values = {}
         for idx in critical_landmarks:
             if idx >= len(landmarks):

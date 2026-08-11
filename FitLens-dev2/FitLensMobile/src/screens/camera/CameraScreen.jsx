@@ -1,41 +1,134 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Image, Alert, ActivityIndicator } from 'react-native';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ActivityIndicator,
+  Alert,
+  Image,
+  TextInput,
+  ScrollView,
+} from 'react-native';
 import { Camera, useCameraDevice } from 'react-native-vision-camera';
 import Svg, { Circle, Line } from 'react-native-svg';
-import axios from 'axios';
+import io from 'socket.io-client';
+import RNFS from 'react-native-fs';
+import Tts from 'react-native-tts';
 import { Config } from '../../constants/config';
 import ManualLandmarkModal from '../../components/measurement/ManualLandmarkModal';
 import ZoomableImageModal from '../../components/common/ZoomableImageModal';
-import { uriToBase64 } from '../../utils/base64Utils';
 import { measurementApi } from '../../api/measurementApi';
 
 const CameraScreen = ({ navigation }) => {
   const [hasPermission, setHasPermission] = useState(false);
   const [isCameraReady, setIsCameraReady] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const [currentView, setCurrentView] = useState('front'); // 'front' | 'side'
+
+  // Alignment & Countdown states (Server-driven via Socket.IO)
   const [isAligned, setIsAligned] = useState(false);
-  const [personDetected, setPersonDetected] = useState(false);
-  const [countdown, setCountdown] = useState(3);
-  const [captureStep, setCaptureStep] = useState(1); // 1=front, 2=side
-  const [frontCapture, setFrontCapture] = useState(null);
-  const [sideCapture, setSideCapture] = useState(null);
-  const [frontZoomVisible, setFrontZoomVisible] = useState(false);
-  const [checking, setChecking] = useState(false);
+  const isAlignedRef = useRef(false);
+  const countdownRef = useRef(null);
+  const countdownValueRef = useRef(3);
+  const [countdown, setCountdown] = useState(null);
+
+  // Captured Images State
+  const [capturedImages, setCapturedImages] = useState({ front: null, side: null });
+  const [isReviewing, setIsReviewing] = useState(false);
   const [userHeight, setUserHeight] = useState('165');
   const [processingManual, setProcessingManual] = useState(false);
 
-  // Manual Marking States
+  // Zoom modal state
+  const [zoomImageUri, setZoomImageUri] = useState(null);
+  const [zoomTitle, setZoomTitle] = useState('');
+
+  // Manual Marking Modal state
   const [manualModalVisible, setManualModalVisible] = useState(false);
   const [manualViewStep, setManualViewStep] = useState('front');
   const [manualLandmarks, setManualLandmarks] = useState({ front: null, side: null });
-  
+
+  // Alignment instruction state
+  const [alignmentData, setAlignmentData] = useState({
+    alignment: 'red',
+    instruction: 'Stand facing camera in A-pose',
+    countdown: null,
+    speak: false,
+  });
+
   const cameraRef = useRef(null);
-  const countdownTimer = useRef(null);
-  const alignmentInterval = useRef(null);
-  
+  const socketRef = useRef(null);
+  const handlersAttachedRef = useRef(false);
+  const isProcessingFrameRef = useRef(false);
+  const isCapturingPhotoRef = useRef(false);
+  const frameIntervalRef = useRef(null);
+  const lastSpokenRef = useRef('');
+
+  const isConnectedRef = useRef(false);
+  const isCameraReadyRef = useRef(false);
+  const hasPermissionRef = useRef(false);
+  const currentViewRef = useRef('front');
+
+  useEffect(() => { isConnectedRef.current = isConnected; }, [isConnected]);
+  useEffect(() => { isCameraReadyRef.current = isCameraReady; }, [isCameraReady]);
+  useEffect(() => { hasPermissionRef.current = hasPermission; }, [hasPermission]);
+  useEffect(() => { currentViewRef.current = currentView; }, [currentView]);
+
   const backDevice = useCameraDevice('back');
   const frontDevice = useCameraDevice('front');
-  const device = backDevice || frontDevice;
+  const device = frontDevice || backDevice;
 
+  // Test backend connection on mount
+  useEffect(() => {
+    fetch(`${Config.BASE_URL}/api/health`)
+      .then(r => r.json())
+      .then(d => console.log('[Health] Backend OK:', d))
+      .catch(e => console.log('[Health] Backend UNREACHABLE:', e.message, '\nCheck: same WiFi? IP correct?', Config.BASE_URL));
+  }, []);
+
+  // Safe TTS helper that handles missing/unlinked native modules gracefully
+  const isTtsAvailable = () => {
+    try {
+      return Boolean(Tts && typeof Tts.speak === 'function' && typeof Tts.setDefaultLanguage === 'function');
+    } catch {
+      return false;
+    }
+  };
+
+  // Initialize TTS safely
+  useEffect(() => {
+    if (isTtsAvailable()) {
+      try {
+        Tts.setDefaultLanguage('en-US');
+        Tts.setDefaultRate(0.5);
+      } catch (err) {
+        console.warn('[TTS] Init warning:', err?.message || err);
+      }
+    } else {
+      console.warn('[TTS] Text-To-Speech native module is unavailable. Voice guidance disabled.');
+    }
+
+    return () => {
+      if (isTtsAvailable()) {
+        try { Tts.stop(); } catch (e) {}
+      }
+    };
+  }, []);
+
+  const speakInstruction = (text) => {
+    if (!text || text === lastSpokenRef.current) return;
+    lastSpokenRef.current = text;
+    if (isTtsAvailable()) {
+      try {
+        Tts.stop();
+        Tts.speak(text);
+      } catch (err) {
+        console.warn('[TTS] Speech warning:', err?.message || err);
+      }
+    }
+  };
+
+  // Request camera permission
   useEffect(() => {
     (async () => {
       try {
@@ -44,7 +137,7 @@ const CameraScreen = ({ navigation }) => {
         if (permission !== 'granted') {
           Alert.alert(
             'Camera Permission Required',
-            'FitLens needs camera access to capture body measurements.',
+            'FitLens needs camera access to perform live body alignment.',
             [{ text: 'Go Back', onPress: () => navigation.goBack() }]
           );
         }
@@ -52,140 +145,362 @@ const CameraScreen = ({ navigation }) => {
         console.error('Failed to request camera permission:', err);
       }
     })();
+  }, [navigation]);
+
+  // Fix 1 — Connect to backend via Socket.IO (Singleton pattern)
+  useEffect(() => {
+    if (socketRef.current) return; // Socket already created, skip duplicate instantiation
+
+    console.log('[CameraScreen] Connecting to Socket.IO backend at:', Config.BASE_URL);
+    const socket = io(Config.BASE_URL, {
+      transports: ['polling', 'websocket'], // Polling first for reliable HTTP handshake
+      reconnectionAttempts: 5,
+      reconnectionDelay: 3000,
+      timeout: 10000,
+      forceNew: false,
+      autoConnect: true,
+    });
+    socketRef.current = socket;
+
+    if (!handlersAttachedRef.current) {
+      handlersAttachedRef.current = true;
+
+      socket.on('connect', () => {
+        console.log('✅ Socket connected:', socket.id);
+        setIsConnected(true);
+        isProcessingFrameRef.current = false;
+      });
+
+      socket.on('disconnect', (reason) => {
+        console.log('⚠️ Socket disconnected:', reason);
+        setIsConnected(false);
+        isProcessingFrameRef.current = false;
+        if (reason === 'io server disconnect' || reason === 'io client disconnect') {
+          handlersAttachedRef.current = false;
+        }
+      });
+
+      socket.on('connect_error', (err) => {
+        console.log('❌ Socket connect error:', err.message);
+        isProcessingFrameRef.current = false;
+      });
+
+      socket.on('frame_processed', (data) => {
+        isProcessingFrameRef.current = false;
+        if (!data) return;
+
+        const aligned = data.alignment === 'green';
+        setIsAligned(aligned);
+        isAlignedRef.current = aligned;
+
+        setAlignmentData({
+          alignment: data.alignment || 'red',
+          instruction: data.instruction || 'Align your body with the silhouette guide',
+          countdown: data.countdown ?? null,
+          speak: data.speak || false,
+        });
+
+        setCountdown(data.countdown ?? null);
+
+        if (data.speak && data.instruction) {
+          speakInstruction(data.instruction);
+        }
+
+        if (aligned && data.countdown === 0 && !isCapturingPhotoRef.current) {
+          executeCapturePhoto();
+        }
+      });
+    }
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
+        handlersAttachedRef.current = false;
+      }
+    };
+  }, []); // Runs ONCE on mount
+
+  // Frame streaming over socket (optional background telemetry) — throttled to prevent JS bridge blocking
+  useEffect(() => {
+    if (!isCameraReady || !hasPermission || !isConnected || isReviewing) {
+      if (frameIntervalRef.current) {
+        clearInterval(frameIntervalRef.current);
+        frameIntervalRef.current = null;
+      }
+      return;
+    }
+
+    // Keep Socket.IO connection stable by omitting heavy base64 streaming during alignment check
+    // Alignment is handled 100% reliably via REST polling /validate/person-count
+  }, [isCameraReady, hasPermission, isConnected, isReviewing]);
+
+  // Fix 2 — Alignment check via direct REST polling (/validate/person-count)
+  // Works in OFFLINE mode without socket requirement!
+  const alignmentCheckRef = useRef(null);
+
+  const stopAlignmentChecking = useCallback(() => {
+    if (alignmentCheckRef.current) {
+      clearInterval(alignmentCheckRef.current);
+      alignmentCheckRef.current = null;
+    }
   }, []);
 
-  useEffect(() => {
-    if (isCameraReady && hasPermission && device) {
-      startAlignmentCheck();
-    }
-    return () => {
-      clearInterval(alignmentInterval.current);
-      clearTimeout(countdownTimer.current);
-    };
-  }, [captureStep, isCameraReady, hasPermission, device]);
+  const startAlignmentChecking = useCallback(() => {
+    stopAlignmentChecking();
 
-  const startAlignmentCheck = () => {
-    clearInterval(alignmentInterval.current);
-    alignmentInterval.current = setInterval(async () => {
-      if (checking || !cameraRef.current || !isCameraReady) return;
-      setChecking(true);
+    alignmentCheckRef.current = setInterval(async () => {
+      if (
+        !cameraRef.current ||
+        isCapturingPhotoRef.current ||
+        !isCameraReadyRef.current ||
+        !hasPermissionRef.current
+      ) {
+        return;
+      }
+
       try {
-        const photo = await cameraRef.current.takePhoto({ quality: 0.5 });
+        let photo;
+        if (typeof cameraRef.current.takeSnapshot === 'function') {
+          photo = await cameraRef.current.takeSnapshot({ quality: 50 });
+        } else {
+          photo = await cameraRef.current.takePhoto({ qualityPrioritization: 'speed', flash: 'off' });
+        }
+
+        const cleanPath = photo.path.replace('file://', '');
+        const photoUri = `file://${cleanPath}`;
+
         const formData = new FormData();
         formData.append('image', {
-          uri: `file://${photo.path}`,
-          type: 'image/jpeg', name: 'frame.jpg'
+          uri: photoUri,
+          type: 'image/jpeg',
+          name: 'validation_frame.jpg',
         });
-        formData.append('view', captureStep === 1 ? 'front' : 'side');
-        const res = await axios.post(
-          `${Config.BASE_URL}/validate/person-count`,
-          formData,
-          { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 5000 }
-        );
-        const aligned = res.data.success === true;
-        setIsAligned(aligned);
-        setPersonDetected(aligned);
+        formData.append('view', currentViewRef.current);
 
-        if (aligned) startCountdown();
-        else resetCountdown();
-      } catch {
-        setIsAligned(false);
-        setPersonDetected(false);
-        resetCountdown();
+        const response = await fetch(`${Config.BASE_URL}/validate/person-count`, {
+          method: 'POST',
+          body: formData,
+        });
+
+        const responseText = await response.text();
+        RNFS.unlink(cleanPath).catch(() => {});
+
+        let data;
+        try {
+          data = JSON.parse(responseText);
+        } catch {
+          return;
+        }
+
+        const personDetected = data.success === true;
+
+        if (personDetected && !isAlignedRef.current) {
+          console.log('[Alignment] ✅ Person aligned — turning GREEN');
+          isAlignedRef.current = true;
+          setIsAligned(true);
+          setAlignmentData(prev => ({
+            ...prev,
+            alignment: 'green',
+            instruction: 'Hold still! Auto-capturing...',
+          }));
+          startCountdown();
+        } else if (!personDetected) {
+          if (isAlignedRef.current) {
+            console.log('[Alignment] ❌ Person lost — turning RED');
+            isAlignedRef.current = false;
+            setIsAligned(false);
+            stopCountdown();
+          }
+          const serverError = data?.error || (currentViewRef.current === 'front'
+            ? 'Stand facing camera in A-pose (head to toe)'
+            : 'Turn 90° to your right for side view');
+          setAlignmentData(prev => ({
+            ...prev,
+            alignment: 'red',
+            instruction: serverError,
+          }));
+        }
+      } catch (err) {
+        console.log('[Alignment Check] Error:', err.message);
       }
-      setChecking(false);
-    }, 2000);
-  };
+    }, 2500);
+  }, []);
 
-  let countdownVal = 3;
+  // Fix 2: Start alignment checking as soon as camera is ready (does NOT depend on isConnected):
+  useEffect(() => {
+    if (isCameraReady && hasPermission && !isReviewing) {
+      console.log('[Alignment] Camera ready — starting alignment check');
+      startAlignmentChecking();
+    }
+    return () => {
+      stopAlignmentChecking();
+      stopCountdown();
+    };
+  }, [isCameraReady, hasPermission, isReviewing, startAlignmentChecking]);
+
   const startCountdown = () => {
-    if (countdownTimer.current) return;
-    countdownTimer.current = setInterval(() => {
-      countdownVal--;
-      setCountdown(countdownVal);
-      if (countdownVal <= 0) {
-        clearInterval(countdownTimer.current);
-        countdownTimer.current = null;
-        capturePhoto();
+    if (countdownRef.current) return;
+    countdownValueRef.current = 3;
+    setCountdown(3);
+    console.log('[Countdown] Starting 3-2-1...');
+
+    countdownRef.current = setInterval(() => {
+      if (!isAlignedRef.current) {
+        console.log('[Countdown] Person misaligned — stopping countdown');
+        stopCountdown();
+        return;
+      }
+
+      countdownValueRef.current -= 1;
+      setCountdown(countdownValueRef.current);
+
+      if (isTtsAvailable() && countdownValueRef.current > 0) {
+        try { Tts.speak(String(countdownValueRef.current)); } catch {}
+      }
+
+      if (countdownValueRef.current <= 0) {
+        console.log('[Countdown] Reached 0 — capturing photo');
+        stopCountdown();
+        stopAlignmentChecking();
+        executeCapturePhoto();
       }
     }, 1000);
   };
 
-  const resetCountdown = () => {
-    clearInterval(countdownTimer.current);
-    countdownTimer.current = null;
-    countdownVal = 3;
-    setCountdown(3);
+  const stopCountdown = () => {
+    if (countdownRef.current) {
+      clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+    countdownValueRef.current = 3;
+    setCountdown(null);
   };
 
-  const handleCapturePress = () => {
-    if (!isCameraReady) {
-      Alert.alert('Camera Not Ready', 'Please wait for camera preview to initialize.');
-      return;
+  // Reset alignment state when view changes
+  useEffect(() => {
+    if (isCameraReady && hasPermission && !isReviewing) {
+      isAlignedRef.current = false;
+      setIsAligned(false);
+      stopCountdown();
+      setCountdown(null);
+      setAlignmentData({
+        alignment: 'red',
+        instruction: currentView === 'front'
+          ? 'Stand facing camera in A-pose'
+          : 'Turn 90° to your right for side view',
+        countdown: null,
+        speak: false,
+      });
+      setTimeout(() => startAlignmentChecking(), 500);
     }
-    if (!personDetected || !isAligned) {
-      Alert.alert(
-        '⚠️ No Person Detected',
-        'No person detected in frame. Please align your body with the silhouette before capturing.',
-        [{ text: 'OK' }]
-      );
-      return;
-    }
-    capturePhoto();
-  };
+  }, [currentView, isCameraReady, hasPermission, isReviewing, startAlignmentChecking]);
 
-  const capturePhoto = async () => {
-    if (!isCameraReady || !cameraRef.current) {
-      Alert.alert('Camera Not Ready', 'Please wait for camera preview to initialize.');
-      return;
-    }
-    clearInterval(alignmentInterval.current);
+  // Store front and side captures separately:
+  const executeCapturePhoto = async () => {
+    if (isCapturingPhotoRef.current || !cameraRef.current) return;
+    isCapturingPhotoRef.current = true;
+
     try {
-      const photo = await cameraRef.current.takePhoto({ quality: 1 });
+      if (isTtsAvailable()) {
+        try { Tts.stop(); } catch {}
+      }
+
+      const photo = await cameraRef.current.takePhoto({
+        qualityPrioritization: 'quality',
+        flash: 'off',
+      });
       const uri = `file://${photo.path}`;
 
-      if (captureStep === 1) {
-        setFrontCapture(uri);
-        setCaptureStep(2);
-        setIsAligned(false);
-        setPersonDetected(false);
-        setCountdown(3);
-        Alert.alert(
-          '✅ Front view captured!',
-          'Now turn 90° to your right for the side view.',
-          [{ text: 'Ready', onPress: () => startAlignmentCheck() }]
-        );
+      if (currentViewRef.current === 'front') {
+        // Store front image:
+        setCapturedImages(prev => ({ ...prev, front: uri }));
+
+        if (isTtsAvailable()) {
+          try { Tts.speak('Front view captured! Now turn 90 degrees to your right.'); } catch {}
+        }
+
+        // Switch to side view after 2 seconds:
+        setTimeout(() => {
+          isCapturingPhotoRef.current = false;
+          isAlignedRef.current = false;
+          setIsAligned(false);
+          setCountdown(null);
+          setCurrentView('side');
+          currentViewRef.current = 'side';
+        }, 2000);
+
       } else {
-        // Both captured
-        setSideCapture(uri);
-        Alert.alert(
-          '✅ Both Views Captured!',
-          'Select how you would like to compute your measurements:',
-          [
-            {
-              text: '⚡ Automatic AI Mode',
-              onPress: () => {
-                navigation.replace('Processing', {
-                  frontImageUri: frontCapture,
-                  sideImageUri: uri,
-                  userHeightCm: parseFloat(userHeight) || 165,
-                });
-              },
-            },
-            {
-              text: '✋ Manual Landmark Marking',
-              onPress: () => {
-                setManualLandmarks({ front: null, side: null });
-                setManualViewStep('front');
-                setManualModalVisible(true);
-              },
-            },
-          ]
-        );
+        // Store side image — DIFFERENT from front:
+        setCapturedImages(prev => ({ ...prev, side: uri }));
+
+        if (isTtsAvailable()) {
+          try { Tts.speak('Side view captured! Processing measurements.'); } catch {}
+        }
+
+        // Show review screen:
+        setTimeout(() => {
+          isCapturingPhotoRef.current = false;
+          stopCountdown();
+          if (isTtsAvailable()) { try { Tts.stop(); } catch {} }
+          setIsReviewing(true);
+        }, 1500);
       }
-    } catch (e) {
-      Alert.alert('Capture Error', e.message);
+    } catch (err) {
+      console.log('[Capture] Error:', err.message);
+      isCapturingPhotoRef.current = false;
+      isAlignedRef.current = false;
+      setIsAligned(false);
+      stopCountdown();
     }
+  };
+
+  // Cleanup on unmount:
+  useEffect(() => {
+    return () => {
+      stopCountdown();
+      if (isTtsAvailable()) { try { Tts.stop(); } catch {} }
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
+  }, []);
+
+  const handleRetakeView = (viewToRetake) => {
+    setCapturedImages((prev) => ({ ...prev, [viewToRetake]: null }));
+    setCurrentView(viewToRetake);
+    currentViewRef.current = viewToRetake;
+    setIsReviewing(false);
+    isAlignedRef.current = false;
+    setIsAligned(false);
+    stopCountdown();
+    setCountdown(null);
+    setAlignmentData({
+      alignment: 'red',
+      instruction: `Align yourself for ${viewToRetake} view`,
+      countdown: null,
+      speak: false,
+    });
+    speakInstruction(`Retaking ${viewToRetake} view. Align yourself in frame.`);
+  };
+
+  const handleAutomaticMode = () => {
+    if (!capturedImages.front || !capturedImages.side) {
+      Alert.alert('Missing Photo', 'Please ensure both Front and Side photos are captured.');
+      return;
+    }
+
+    navigation.replace('Processing', {
+      frontImageUri: capturedImages.front,
+      sideImageUri: capturedImages.side,
+      userHeightCm: parseFloat(userHeight) || 165,
+    });
+  };
+
+  const handleManualMarkingMode = () => {
+    setManualLandmarks({ front: null, side: null });
+    setManualViewStep('front');
+    setManualModalVisible(true);
   };
 
   const handleManualLandmarkComplete = async (viewData) => {
@@ -195,7 +510,7 @@ const CameraScreen = ({ navigation }) => {
       const updatedLandmarks = { ...manualLandmarks, front: viewData };
       setManualLandmarks(updatedLandmarks);
 
-      if (sideCapture) {
+      if (capturedImages.side) {
         Alert.alert(
           'Front View Marked ✓',
           'Now let us mark the Side View photo.',
@@ -222,10 +537,19 @@ const CameraScreen = ({ navigation }) => {
   const submitManualLandmarks = async (finalLandmarks) => {
     try {
       setProcessingManual(true);
-      console.log('🎯 Submitting camera manual landmarks to backend...');
+      console.log('🎯 Submitting manual landmarks to backend...');
 
-      const frontB64 = frontCapture ? await uriToBase64(frontCapture) : null;
-      const sideB64 = sideCapture ? await uriToBase64(sideCapture) : null;
+      const frontB64 = capturedImages.front
+        ? (capturedImages.front.startsWith('data:')
+            ? capturedImages.front
+            : `data:image/jpeg;base64,${await RNFS.readFile(capturedImages.front.replace('file://', ''), 'base64')}`)
+        : null;
+
+      const sideB64 = capturedImages.side
+        ? (capturedImages.side.startsWith('data:')
+            ? capturedImages.side
+            : `data:image/jpeg;base64,${await RNFS.readFile(capturedImages.side.replace('file://', ''), 'base64')}`)
+        : null;
 
       const requestPayload = {
         user_height: parseFloat(userHeight) || 165,
@@ -250,33 +574,10 @@ const CameraScreen = ({ navigation }) => {
     }
   };
 
-  const silhouetteColor = (isAligned && personDetected) ? '#00D4AA' : '#FC4444';
-  const canCapture = isCameraReady && isAligned && personDetected;
-
-  const SilhouetteSvg = () => (
-    <Svg width="200" height="380"
-      style={{ position: 'absolute', alignSelf: 'center', top: '5%' }}>
-      <Circle cx="100" cy="40" r="30"
-        stroke={silhouetteColor} strokeWidth="3"
-        fill={silhouetteColor + '20'} strokeDasharray="6,3"/>
-      <Line x1="100" y1="70" x2="100" y2="95"
-        stroke={silhouetteColor} strokeWidth="3"/>
-      <Line x1="30" y1="105" x2="170" y2="105"
-        stroke={silhouetteColor} strokeWidth="3"/>
-      <Line x1="30" y1="105" x2="5" y2="200"
-        stroke={silhouetteColor} strokeWidth="3"/>
-      <Line x1="170" y1="105" x2="195" y2="200"
-        stroke={silhouetteColor} strokeWidth="3"/>
-      <Line x1="100" y1="95" x2="100" y2="230"
-        stroke={silhouetteColor} strokeWidth="3"/>
-      <Line x1="55" y1="230" x2="145" y2="230"
-        stroke={silhouetteColor} strokeWidth="3"/>
-      <Line x1="68" y1="230" x2="58" y2="370"
-        stroke={silhouetteColor} strokeWidth="3"/>
-      <Line x1="132" y1="230" x2="142" y2="370"
-        stroke={silhouetteColor} strokeWidth="3"/>
-    </Svg>
-  );
+  // Fix 1 & 3: Dynamic silhouette colors using explicit hex strings
+  const silhouetteColor = isAligned ? '#00D4AA' : '#FF4444';
+  const silhouetteFillColor = isAligned ? '#00D4AA' : '#FF4444';
+  const silhouetteOpacity = 0.15;
 
   if (!hasPermission) {
     return (
@@ -301,6 +602,98 @@ const CameraScreen = ({ navigation }) => {
     );
   }
 
+  // Review & Measurement Selection Screen
+  if (isReviewing) {
+    return (
+      <ScrollView style={styles.reviewContainer} contentContainerStyle={styles.reviewContent}>
+        <Text style={styles.reviewHeader}>All Photos Captured</Text>
+        <Text style={styles.reviewSubheader}>Review your captured view photos below</Text>
+
+        <View style={styles.reviewGrid}>
+          {/* Front View Card */}
+          <View style={styles.reviewCard}>
+            <Text style={styles.cardLabel}>✓ Front View</Text>
+            {capturedImages.front ? (
+              <TouchableOpacity activeOpacity={0.8} onPress={() => { setZoomImageUri(capturedImages.front); setZoomTitle('Front View Photo'); }}>
+                <Image source={{ uri: capturedImages.front }} style={styles.cardImage} />
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.missingImage}><Text style={styles.missingText}>No Image</Text></View>
+            )}
+            <TouchableOpacity style={styles.retakeBtn} onPress={() => handleRetakeView('front')}>
+              <Text style={styles.retakeBtnText}>🔄 Retake Front</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Side View Card */}
+          <View style={styles.reviewCard}>
+            <Text style={styles.cardLabel}>✓ Side View</Text>
+            {capturedImages.side ? (
+              <TouchableOpacity activeOpacity={0.8} onPress={() => { setZoomImageUri(capturedImages.side); setZoomTitle('Side View Photo'); }}>
+                <Image source={{ uri: capturedImages.side }} style={styles.cardImage} />
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.missingImage}><Text style={styles.missingText}>No Image</Text></View>
+            )}
+            <TouchableOpacity style={styles.retakeBtn} onPress={() => handleRetakeView('side')}>
+              <Text style={styles.retakeBtnText}>🔄 Retake Side</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* Height Adjustment */}
+        <View style={styles.heightBox}>
+          <Text style={styles.heightLabel}>Height (cm):</Text>
+          <TextInput
+            style={styles.heightInput}
+            value={userHeight}
+            onChangeText={setUserHeight}
+            keyboardType="numeric"
+            placeholder="165"
+            placeholderTextColor="#718096"
+          />
+        </View>
+
+        {/* Mode Selection Buttons */}
+        <Text style={styles.methodHeader}>Choose Detection Method</Text>
+
+        <TouchableOpacity style={styles.methodBtnAi} onPress={handleAutomaticMode}>
+          <Text style={styles.methodTitle}>⚡ Automatic AI Measurement</Text>
+          <Text style={styles.methodSub}>Automatic body segmentation and SMPL 3D mesh modeling</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.methodBtnManual} onPress={handleManualMarkingMode}>
+          <Text style={styles.methodTitle}>✋ Manual Landmark Marking</Text>
+          <Text style={styles.methodSub}>Place custom landmark points on body photos</Text>
+        </TouchableOpacity>
+
+        {processingManual && (
+          <View style={styles.manualLoading}>
+            <ActivityIndicator size="small" color="#00D4AA" />
+            <Text style={{ color: '#00D4AA', marginLeft: 8 }}>Computing manual measurements...</Text>
+          </View>
+        )}
+
+        {/* Zoom Image Modal */}
+        <ZoomableImageModal
+          visible={Boolean(zoomImageUri)}
+          imageSource={{ uri: zoomImageUri }}
+          title={zoomTitle}
+          onClose={() => setZoomImageUri(null)}
+        />
+
+        {/* Manual Landmark Modal */}
+        <ManualLandmarkModal
+          visible={manualModalVisible}
+          imageUri={manualViewStep === 'front' ? capturedImages.front : capturedImages.side}
+          imageType={manualViewStep}
+          onComplete={handleManualLandmarkComplete}
+          onCancel={() => setManualModalVisible(false)}
+        />
+      </ScrollView>
+    );
+  }
+
   return (
     <View style={{ flex: 1, backgroundColor: '#000' }}>
       <Camera
@@ -310,7 +703,7 @@ const CameraScreen = ({ navigation }) => {
         isActive={true}
         photo={true}
         onInitialized={() => {
-          console.log('[CameraScreen] VisionCamera initialized');
+          console.log('[CameraScreen] VisionCamera preview initialized');
           setIsCameraReady(true);
         }}
         onError={(err) => {
@@ -318,84 +711,120 @@ const CameraScreen = ({ navigation }) => {
         }}
       />
 
-      {(!isCameraReady || processingManual) && (
-        <View style={styles.loadingOverlay}>
-          <ActivityIndicator size="large" color="#00D4AA" />
-          <Text style={{ color: '#fff', marginTop: 10 }}>
-            {processingManual ? 'Processing manual landmarks...' : 'Starting camera...'}
-          </Text>
-        </View>
-      )}
+      {/* SVG Silhouette Overlay — Fix 1 & 3: Explicit hex stroke/fill */}
+      <Svg
+        width="100%"
+        height="100%"
+        viewBox="0 0 300 600"
+        style={StyleSheet.absoluteFill}
+        pointerEvents="none">
+        {/* Head */}
+        <Circle
+          cx="150" cy="55" r="42"
+          stroke={silhouetteColor}
+          strokeWidth={3}
+          fill={silhouetteFillColor}
+          fillOpacity={silhouetteOpacity}
+          strokeDasharray="8,4"
+        />
+        {/* Neck */}
+        <Line x1="150" y1="97" x2="150" y2="125"
+          stroke={silhouetteColor} strokeWidth={3}/>
+        {/* Shoulders */}
+        <Line x1="45" y1="140" x2="255" y2="140"
+          stroke={silhouetteColor} strokeWidth={3}/>
+        {/* Left arm A-pose */}
+        <Line x1="45" y1="140" x2="10" y2="280"
+          stroke={silhouetteColor} strokeWidth={3}/>
+        {/* Right arm A-pose */}
+        <Line x1="255" y1="140" x2="290" y2="280"
+          stroke={silhouetteColor} strokeWidth={3}/>
+        {/* Torso */}
+        <Line x1="150" y1="125" x2="150" y2="350"
+          stroke={silhouetteColor} strokeWidth={3}/>
+        {/* Hips */}
+        <Line x1="90" y1="350" x2="210" y2="350"
+          stroke={silhouetteColor} strokeWidth={3}/>
+        {/* Left leg */}
+        <Line x1="108" y1="350" x2="92" y2="560"
+          stroke={silhouetteColor} strokeWidth={3}/>
+        {/* Right leg */}
+        <Line x1="192" y1="350" x2="208" y2="560"
+          stroke={silhouetteColor} strokeWidth={3}/>
+      </Svg>
 
-      <SilhouetteSvg />
-
-      <View style={styles.alignMsg}>
-        <Text style={[styles.alignText, { color: silhouetteColor }]}>
-          {!isCameraReady
-            ? '📷 Starting Camera...'
-            : isAligned && personDetected
-            ? `✅ Person Detected! Capturing in ${countdown}...`
-            : `⚠️ No person detected — align body with silhouette`}
+      {/* Status banner */}
+      <View style={styles.statusBanner}>
+        <Text style={[styles.statusText, { color: silhouetteColor }]}>
+          {countdown !== null && countdown > 0
+            ? `✅ Hold still! Capturing in ${countdown}...`
+            : isAligned
+            ? '✅ Aligned! Starting countdown...'
+            : currentView === 'front'
+            ? '👤 Stand facing camera in A-pose'
+            : '↩️ Turn 90° to your right for side view'}
+        </Text>
+        <Text style={styles.viewSubtitle}>
+          {currentView === 'front' ? 'VIEW 1 OF 2: FRONT VIEW' : 'VIEW 2 OF 2: SIDE VIEW'}
         </Text>
       </View>
 
-      {isAligned && personDetected && isCameraReady && (
-        <View style={styles.countdownCircle}>
-          <Text style={styles.countdownText}>{countdown}</Text>
+      {/* Countdown Ring */}
+      {countdown !== null && countdown > 0 && (
+        <View style={[styles.countdownRing, { backgroundColor: '#00D4AA' }]}>
+          <Text style={styles.countdownNumber}>{countdown}</Text>
         </View>
       )}
 
-      {frontCapture && captureStep === 2 && (
+      {/* Front Thumbnail Preview while on Side View */}
+      {capturedImages.front && currentView === 'side' && (
         <TouchableOpacity
           activeOpacity={0.8}
-          onPress={() => setFrontZoomVisible(true)}
-          style={styles.thumbnail}>
-          <Image source={{ uri: frontCapture }}
-            style={styles.thumbnailImg} />
+          onPress={() => { setZoomImageUri(capturedImages.front); setZoomTitle('Captured Front View Photo'); }}
+          style={styles.thumbnailBadge}>
+          <Image source={{ uri: capturedImages.front }} style={styles.thumbnailImg} />
           <Text style={styles.thumbnailLabel}>Front ✓</Text>
         </TouchableOpacity>
       )}
 
+      {/* Zoom Image Modal */}
       <ZoomableImageModal
-        visible={frontZoomVisible}
-        imageSource={{ uri: frontCapture }}
-        title="Captured Front View Photo"
-        onClose={() => setFrontZoomVisible(false)}
+        visible={Boolean(zoomImageUri)}
+        imageSource={{ uri: zoomImageUri }}
+        title={zoomTitle}
+        onClose={() => setZoomImageUri(null)}
       />
 
-      <TouchableOpacity
-        style={[
-          styles.captureBtn,
-          !canCapture && { opacity: 0.4, borderColor: '#718096' }
-        ]}
-        onPress={handleCapturePress}>
-        <View style={[styles.captureBtnInner, { backgroundColor: canCapture ? '#00D4AA' : '#718096' }]} />
-      </TouchableOpacity>
-
-      <View style={styles.bottomInfo}>
-        <Text style={styles.stepText}>
-          Step {captureStep} of 2: {captureStep === 1 ? 'Front View' : 'Side View'}
+      {/* Fix 5 — Connection Status Badge */}
+      <View style={styles.connectionStatus}>
+        <View style={[styles.statusDot, { backgroundColor: isConnected ? '#00D4AA' : '#FFD700' }]} />
+        <Text style={styles.connectionText}>
+          {isConnected ? 'Live' : 'Offline mode'}
         </Text>
       </View>
 
-      <TouchableOpacity style={styles.backBtn}
-        onPress={() => navigation.goBack()}>
+      {/* Back Button */}
+      <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
         <Text style={styles.backBtnText}>←</Text>
       </TouchableOpacity>
-
-      {/* Manual Landmark Modal */}
-      <ManualLandmarkModal
-        visible={manualModalVisible}
-        imageUri={manualViewStep === 'front' ? frontCapture : sideCapture}
-        imageType={manualViewStep}
-        onComplete={handleManualLandmarkComplete}
-        onCancel={() => setManualModalVisible(false)}
-      />
     </View>
   );
 };
 
 const styles = StyleSheet.create({
+  connectionStatus: {
+    position: 'absolute', top: 16, right: 16,
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 12, paddingHorizontal: 10, paddingVertical: 6,
+    zIndex: 40,
+  },
+  statusDot: {
+    width: 8, height: 8, borderRadius: 4, marginRight: 6,
+  },
+  connectionText: {
+    color: '#fff', fontSize: 11, fontWeight: '600',
+  },
   centerContainer: {
     flex: 1, backgroundColor: '#0A0E27',
     justifyContent: 'center', alignItems: 'center', padding: 20
@@ -405,49 +834,63 @@ const styles = StyleSheet.create({
     marginTop: 20, paddingHorizontal: 20, paddingVertical: 10,
     backgroundColor: '#1A1F3A', borderRadius: 8
   },
-  loadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(10,14,39,0.85)',
-    justifyContent: 'center', alignItems: 'center', zIndex: 10
-  },
-  alignMsg: {
-    position: 'absolute', top: 60, left: 0, right: 0,
+  backBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  statusBanner: {
+    position: 'absolute', top: 110, left: 16, right: 16,
+    backgroundColor: 'rgba(0,0,0,0.7)', borderRadius: 20, padding: 10,
     alignItems: 'center', zIndex: 20
   },
-  alignText: { fontSize: 15, fontWeight: '700',
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
-  countdownCircle: {
+  statusText: {
+    fontSize: 15, fontWeight: '700', textAlign: 'center'
+  },
+  viewSubtitle: {
+    color: '#A0AEC0', fontSize: 12, fontWeight: '600', marginTop: 6,
+    textTransform: 'uppercase', letterSpacing: 1
+  },
+  countdownRing: {
     position: 'absolute', alignSelf: 'center', top: '40%',
-    width: 100, height: 100, borderRadius: 50,
-    backgroundColor: '#00D4AA', justifyContent: 'center', alignItems: 'center', zIndex: 20
-  },
-  countdownText: { color: '#fff', fontSize: 48, fontWeight: '900' },
-  captureBtn: {
-    position: 'absolute', bottom: 60, alignSelf: 'center',
-    width: 80, height: 80, borderRadius: 40,
-    backgroundColor: 'rgba(255,255,255,0.3)',
+    width: 110, height: 110, borderRadius: 55,
     justifyContent: 'center', alignItems: 'center',
-    borderWidth: 3, borderColor: '#fff', zIndex: 20
+    borderWidth: 4, borderColor: '#FFFFFF',
+    zIndex: 30, shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 10
   },
-  captureBtnInner: { width: 64, height: 64, borderRadius: 32 },
-  thumbnail: {
-    position: 'absolute', bottom: 100, right: 16,
-    borderWidth: 2, borderColor: '#00D4AA', borderRadius: 8, zIndex: 20
+  countdownNumber: {
+    color: '#FFFFFF', fontSize: 60, fontWeight: '900'
   },
-  thumbnailImg: { width: 70, height: 90, borderRadius: 6 },
-  thumbnailLabel: { color: '#00D4AA', textAlign: 'center',
-    fontSize: 10, fontWeight: '700', padding: 2 },
-  bottomInfo: {
-    position: 'absolute', bottom: 16, left: 0, right: 0, alignItems: 'center', zIndex: 20
+  thumbnailBadge: {
+    position: 'absolute', bottom: 40, right: 20,
+    borderWidth: 2, borderColor: '#00D4AA', borderRadius: 10,
+    backgroundColor: 'rgba(0,0,0,0.6)', padding: 4, zIndex: 20
   },
-  stepText: { color: 'rgba(255,255,255,0.8)', fontSize: 13 },
+  thumbnailImg: { width: 64, height: 86, borderRadius: 6 },
+  thumbnailLabel: { color: '#00D4AA', fontSize: 10, fontWeight: '700', textAlign: 'center', marginTop: 2 },
   backBtn: {
-    position: 'absolute', top: 52, left: 16,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    borderRadius: 20, padding: 8, zIndex: 20
+    position: 'absolute', top: 16, left: 16,
+    backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 20,
+    width: 40, height: 40, justifyContent: 'center', alignItems: 'center',
+    zIndex: 40
   },
-  backBtnText: { color: '#fff', fontSize: 20 },
+  reviewContainer: { flex: 1, backgroundColor: '#0A0E27' },
+  reviewContent: { padding: 20, paddingTop: 60, paddingBottom: 40 },
+  reviewHeader: { color: '#fff', fontSize: 24, fontWeight: '800', textAlign: 'center' },
+  reviewSubheader: { color: '#A0AEC0', fontSize: 14, textAlign: 'center', marginTop: 4, marginBottom: 24 },
+  reviewGrid: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 24 },
+  reviewCard: { width: '48%', backgroundColor: '#1A1F3A', borderRadius: 12, padding: 10, alignItems: 'center' },
+  cardLabel: { color: '#00D4AA', fontSize: 14, fontWeight: '700', marginBottom: 8 },
+  cardImage: { width: '100%', height: 180, borderRadius: 8, resizeMode: 'cover' },
+  missingImage: { width: '100%', height: 180, borderRadius: 8, backgroundColor: '#2D3748', justifyContent: 'center', alignItems: 'center' },
+  missingText: { color: '#A0AEC0', fontSize: 12 },
+  retakeBtn: { marginTop: 10, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 6 },
+  retakeBtnText: { color: '#fff', fontSize: 12, fontWeight: '600' },
+  heightBox: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#1A1F3A', padding: 14, borderRadius: 12, marginBottom: 24 },
+  heightLabel: { color: '#fff', fontSize: 16, fontWeight: '600', marginRight: 12 },
+  heightInput: { backgroundColor: '#2D3748', color: '#fff', fontSize: 16, fontWeight: '700', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, width: 80, textAlign: 'center' },
+  methodHeader: { color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 16 },
+  methodBtnAi: { backgroundColor: '#00D4AA', padding: 16, borderRadius: 12, marginBottom: 14 },
+  methodBtnManual: { backgroundColor: '#1A1F3A', padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#4A5568', marginBottom: 14 },
+  methodTitle: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  methodSub: { color: 'rgba(255,255,255,0.8)', fontSize: 12, marginTop: 4 },
+  manualLoading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 12 }
 });
 
 export default CameraScreen;

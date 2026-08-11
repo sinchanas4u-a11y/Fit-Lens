@@ -35,9 +35,11 @@
     "react-native-share": "^10.0.2",
     "react-native-svg": "^14.1.0",
     "react-native-toast-message": "^2.2.0",
+    "react-native-tts": "^4.1.1",
     "react-native-vector-icons": "^10.0.3",
     "react-native-vision-camera": "^3.8.2",
     "react-native-webview": "^13.6.4",
+    "socket.io-client": "^4.8.3",
     "zustand": "^4.4.7"
   },
   "devDependencies": {
