@@ -1262,7 +1262,7 @@ def validate_person_count():
             if detected_orient != 'front' or not is_full_body:
                 return jsonify({
                     'success': False,
-                    'error': 'Invalid Front View. Please upload a full-body FRONT-facing image.'
+                    'error': 'Step back 6-8 ft so your full body (head to toe) is visible.'
                 }), 400
 
         elif expected_view == 'side':
@@ -1274,7 +1274,7 @@ def validate_person_count():
             if detected_orient != 'side' or not is_full_body:
                 return jsonify({
                     'success': False,
-                    'error': 'Invalid Side View. Please upload a full-body SIDE-facing image.'
+                    'error': 'Step back 6-8 ft so your full body (head to toe) is visible.'
                 }), 400
 
         return jsonify({'success': True, 'message': 'Image successfully validated.'}), 200
@@ -4619,154 +4619,159 @@ def handle_retake(data):
     session.stability_start_time = None
     session.current_view = view
 
+@app.route('/api/process-selection', methods=['POST'])
+def process_selection_route():
+    """REST endpoint for process_selection."""
+    try:
+        data = request.json or {}
+        res = process_selection_core(data)
+        return jsonify(res)
+    except Exception as e:
+        print(f"REST process_selection error: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 @socketio.on('process_selection')
 def handle_process_selection(data):
     try:
-        session = get_session()
-        view = data.get('view')
-        image_data = data.get('image')
-        selection_type = data.get('type') # 'auto' or 'manual'
-        manual_landmarks = data.get('landmarks', [])
-        height_unit = data.get('height_unit', 'cm')
-        user_height_cm = _normalize_height_to_cm(
-            data.get('user_height'),
-            height_unit,
-            fallback=session.user_height_cm
+        res = process_selection_core(data)
+        emit('selection_processed', res)
+    except Exception as e:
+        print(f"Error in process_selection: {e}")
+        traceback.print_exc()
+        emit('selection_processed', {'error': str(e)})
+
+
+def process_selection_core(data):
+    session = get_session()
+    view = data.get('view')
+    image_data = data.get('image')
+    selection_type = data.get('type') # 'auto' or 'manual'
+    manual_landmarks = data.get('landmarks', [])
+    height_unit = data.get('height_unit', 'cm')
+    user_height_cm = _normalize_height_to_cm(
+        data.get('user_height'),
+        height_unit,
+        fallback=session.user_height_cm
+    )
+
+    if user_height_cm and user_height_cm > 0:
+        session.user_height_cm = user_height_cm
+
+    if not image_data and view in session.captured_images:
+        image_data = session.captured_images.get(view)
+
+    img = decode_image(image_data)
+    if img is None:
+        return {'error': 'Invalid image data'}
+
+    if selection_type == 'auto':
+        try:
+            segmentation_model.segment_person(img, conf_threshold=0.5)
+        except ValueError as e:
+            return {'error': str(e), 'view': view}
+
+    if selection_type == 'manual':
+        h, w = img.shape[:2]
+        results = process_manual_view(
+            {'landmarks': manual_landmarks, 'imageWidth': w, 'imageHeight': h},
+            user_height_cm,
+            view,
+            image=img
         )
 
-        if user_height_cm and user_height_cm > 0:
-            session.user_height_cm = user_height_cm
-
-        if not image_data and view in session.captured_images:
-            image_data = session.captured_images.get(view)
-
-        img = decode_image(image_data)
-        if img is None:
-            emit('selection_processed', {'error': 'Invalid image data'})
-            return
-
-        if selection_type == 'auto':
-            try:
-                segmentation_model.segment_person(img, conf_threshold=0.5)
-            except ValueError as e:
-                emit('selection_processed', {
-                    'error': str(e),
-                    'view': view
-                })
-                return
-
-        if selection_type == 'manual':
-            h, w = img.shape[:2]
-            results = process_manual_view(
-                {'landmarks': manual_landmarks, 'imageWidth': w, 'imageHeight': h},
-                user_height_cm,
-                view,
-                image=img
-            )
-
-            if not results.get('success'):
-                emit('selection_processed', {
-                    'error': results.get('error', 'Manual processing failed'),
-                    'view': view
-                })
-                return
-            
-            ld = get_landmark_detector()
-            landmarks = ld.detect(img) if ld is not None else None
-            landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
-            
-            view_scale = session.scale_factor
-            if landmarks is not None:
-                nose = landmarks[0]
-                left_ankle = landmarks[27]
-                right_ankle = landmarks[28]
-                height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
-                view_scale = _compute_scale_from_height_px(user_height_cm, height_px, fallback=session.scale_factor)
-                
-            if view == 'front':
-                if view_scale > 0:
-                    session.scale_factor = view_scale
-                scale = session.scale_factor
-            else:
-                scale = view_scale
-
-            engine_view = _normalize_engine_view(view)
-            auto_visuals = process_single_image(img, scale, engine_view, user_height_cm=user_height_cm)
-            visualization_b64 = auto_visuals.get('visualization') if auto_visuals and auto_visuals.get('success') else results.get('visualization')
-            mask_b64 = auto_visuals.get('mask') if auto_visuals and auto_visuals.get('success') else results.get('mask')
-            smpl_meta = auto_visuals.get('smpl') if auto_visuals and auto_visuals.get('success') else None
-
-            session.processed_results[view] = {
-                'measurements': results.get('measurements', {}),
-                'visualization': visualization_b64,
-                'original_image': image_data,
-                'mask': mask_b64,
-                'smpl': smpl_meta,
-            }
-            
-            emit('selection_processed', {
-                'view': view,
-                'next_view': get_next_view(view),
-                'visualization': visualization_b64,
-                'measurements': results.get('measurements', {}),
-                'smpl': smpl_meta,
-            })
-
-        else: # auto
-            ld = get_landmark_detector()
-            if ld is None:
-                emit('selection_processed', {'error': 'Landmark detector not initialized.'})
-                return
-            landmarks = ld.detect(img)
-            landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
-            if landmarks is None:
-                emit('selection_processed', {'error': 'Could not detect body landmarks. Please retake photo or use Manual Marking.'})
-                return
-
-            view_scale = session.scale_factor
+        if not results.get('success'):
+            return {'error': results.get('error', 'Manual processing failed'), 'view': view}
+        
+        ld = get_landmark_detector()
+        landmarks = ld.detect(img) if ld is not None else None
+        landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
+        
+        view_scale = session.scale_factor
+        if landmarks is not None:
             nose = landmarks[0]
             left_ankle = landmarks[27]
             right_ankle = landmarks[28]
             height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
             view_scale = _compute_scale_from_height_px(user_height_cm, height_px, fallback=session.scale_factor)
             
-            if view == 'front':
-                if view_scale > 0:
-                    session.scale_factor = view_scale
-                scale = session.scale_factor
-            else:
-                scale = view_scale
+        if view == 'front':
+            if view_scale > 0:
+                session.scale_factor = view_scale
+            scale = session.scale_factor
+        else:
+            scale = view_scale
 
-            engine_view = _normalize_engine_view(view)
-            auto_results = process_single_image(img, scale, engine_view, user_height_cm=user_height_cm)
-            if not auto_results or not auto_results.get('success'):
-                emit('selection_processed', {
-                    'error': auto_results.get('error', 'Auto processing failed') if auto_results else 'Auto processing error',
-                    'view': view
-                })
-                return
-            
-            res = {
-                'measurements': auto_results.get('measurements', {}),
-                'visualization': auto_results.get('visualization'),
-                'original_image': image_data,
-                'mask': auto_results.get('mask'),
-                'smpl': auto_results.get('smpl'),
+        engine_view = _normalize_engine_view(view)
+        auto_visuals = process_single_image(img, scale, engine_view, user_height_cm=user_height_cm)
+        visualization_b64 = auto_visuals.get('visualization') if auto_visuals and auto_visuals.get('success') else results.get('visualization')
+        mask_b64 = auto_visuals.get('mask') if auto_visuals and auto_visuals.get('success') else results.get('mask')
+        smpl_meta = auto_visuals.get('smpl') if auto_visuals and auto_visuals.get('success') else None
+
+        session.processed_results[view] = {
+            'measurements': results.get('measurements', {}),
+            'visualization': visualization_b64,
+            'original_image': image_data,
+            'mask': mask_b64,
+            'smpl': smpl_meta,
+        }
+        
+        return {
+            'view': view,
+            'next_view': get_next_view(view),
+            'visualization': visualization_b64,
+            'measurements': results.get('measurements', {}),
+            'smpl': smpl_meta,
+        }
+
+    else: # auto
+        ld = get_landmark_detector()
+        if ld is None:
+            return {'error': 'Landmark detector not initialized.'}
+        landmarks = ld.detect(img)
+        landmarks = _ensure_pixel_landmarks(landmarks, img.shape) if landmarks is not None else None
+        if landmarks is None:
+            return {'error': 'Could not detect body landmarks. Please retake photo or use Manual Marking.'}
+
+        view_scale = session.scale_factor
+        nose = landmarks[0]
+        left_ankle = landmarks[27]
+        right_ankle = landmarks[28]
+        height_px = max(left_ankle[1], right_ankle[1]) - nose[1]
+        view_scale = _compute_scale_from_height_px(user_height_cm, height_px, fallback=session.scale_factor)
+        
+        if view == 'front':
+            if view_scale > 0:
+                session.scale_factor = view_scale
+            scale = session.scale_factor
+        else:
+            scale = view_scale
+
+        engine_view = _normalize_engine_view(view)
+        auto_results = process_single_image(img, scale, engine_view, user_height_cm=user_height_cm)
+        if not auto_results or not auto_results.get('success'):
+            return {
+                'error': auto_results.get('error', 'Auto processing failed') if auto_results else 'Auto processing error',
+                'view': view
             }
-            session.processed_results[view] = res
-            
-            emit('selection_processed', {
-                'view': view,
-                'next_view': get_next_view(view),
-                'visualization': res.get('visualization'),
-                'measurements': res.get('measurements', {}),
-                'smpl': res.get('smpl'),
-            })
-
-    except Exception as e:
-        print(f"Error in process_selection: {e}")
-        traceback.print_exc()
-        emit('selection_processed', {'error': str(e)})
+        
+        res = {
+            'measurements': auto_results.get('measurements', {}),
+            'visualization': auto_results.get('visualization'),
+            'original_image': image_data,
+            'mask': auto_results.get('mask'),
+            'smpl': auto_results.get('smpl'),
+        }
+        session.processed_results[view] = res
+        
+        return {
+            'view': view,
+            'next_view': get_next_view(view),
+            'visualization': res.get('visualization'),
+            'measurements': res.get('measurements', {}),
+            'smpl': res.get('smpl'),
+        }
 
 @app.route('/api/finalize-session', methods=['POST'])
 def finalize_session_route():

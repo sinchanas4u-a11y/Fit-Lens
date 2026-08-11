@@ -5,6 +5,7 @@ import ModeSelection from './ModeSelection';
 import ManualLandmarkMarker from './ManualLandmarkMarker';
 import SMPLViewer from './SMPLViewer';
 import { authHeaders } from '../services/authService';
+import ZoomableImage from './ZoomableImage';
 
 const PoseSilhouette = () => (
   <div style={{ display: 'flex', gap: '2rem', justifyContent: 'center', margin: '1.5rem 0' }}>
@@ -893,8 +894,11 @@ const UploadMode = () => {
                 </div>
               )}
               {frontPreview && !isValidatingFront && (
-                <div className="image-preview">
-                  <img src={frontPreview} alt="Front view" />
+                <div className="image-preview" style={{ position: 'relative' }}>
+                  <ZoomableImage src={frontPreview} alt="Front view" style={{ height: 300, borderRadius: 12 }} />
+                  <p style={{ color: '#a0aec0', fontSize: 11, textAlign: 'center', marginTop: 4 }}>
+                    🔍 Scroll to zoom • Double-click to reset • ⛶ for fullscreen
+                  </p>
                 </div>
               )}
               {/* Front Image Error Display */}
@@ -937,8 +941,11 @@ const UploadMode = () => {
                   </div>
                 )}
                 {sidePreview && !isValidatingSide && (
-                  <div className="image-preview">
-                    <img src={sidePreview} alt="Side view" />
+                  <div className="image-preview" style={{ position: 'relative' }}>
+                    <ZoomableImage src={sidePreview} alt="Side view" style={{ height: 300, borderRadius: 12 }} />
+                    <p style={{ color: '#a0aec0', fontSize: 11, textAlign: 'center', marginTop: 4 }}>
+                      🔍 Scroll to zoom • Double-click to reset • ⛶ for fullscreen
+                    </p>
                   </div>
                 )}
                 {/* Side Image Error Display */}
@@ -1165,13 +1172,19 @@ const UploadMode = () => {
                 {results?.results?.merged?.front_visualization && (
                   <div className="vis-item">
                     <h4>Front View - Marked Landmarks</h4>
-                    <img src={results.results.merged.front_visualization} alt="Front view landmarks" />
+                    <ZoomableImage src={results.results.merged.front_visualization} alt="Front view landmarks" style={{ height: 250, borderRadius: 12, border: '1px solid #2d3561' }} />
+                    <p style={{ color: '#a0aec0', fontSize: 11, textAlign: 'center', marginTop: 4 }}>
+                      🔍 Scroll to zoom • Double-click to reset • ⛶ for fullscreen
+                    </p>
                   </div>
                 )}
                 {results.results.merged.front_mask && (
                   <div className="vis-item">
                     <h4>Front View - Segmentation Mask</h4>
-                    <img src={results.results.merged.front_mask} alt="Front mask" />
+                    <ZoomableImage src={results.results.merged.front_mask} alt="Front mask" style={{ height: 250, borderRadius: 12, border: '1px solid #2d3561' }} />
+                    <p style={{ color: '#a0aec0', fontSize: 11, textAlign: 'center', marginTop: 4 }}>
+                      🔍 Scroll to zoom • Double-click to reset • ⛶ for fullscreen
+                    </p>
                   </div>
                 )}
 
@@ -1179,13 +1192,19 @@ const UploadMode = () => {
                 {results?.results?.merged?.side_visualization && (
                   <div className="vis-item">
                     <h4>Side View - Marked Landmarks</h4>
-                    <img src={results.results.merged.side_visualization} alt="Side view landmarks" />
+                    <ZoomableImage src={results.results.merged.side_visualization} alt="Side view landmarks" style={{ height: 250, borderRadius: 12, border: '1px solid #2d3561' }} />
+                    <p style={{ color: '#a0aec0', fontSize: 11, textAlign: 'center', marginTop: 4 }}>
+                      🔍 Scroll to zoom • Double-click to reset • ⛶ for fullscreen
+                    </p>
                   </div>
                 )}
                 {results.results.merged.side_mask && (
                   <div className="vis-item">
                     <h4>Side View - Segmentation Mask</h4>
-                    <img src={results.results.merged.side_mask} alt="Side mask" />
+                    <ZoomableImage src={results.results.merged.side_mask} alt="Side mask" style={{ height: 250, borderRadius: 12, border: '1px solid #2d3561' }} />
+                    <p style={{ color: '#a0aec0', fontSize: 11, textAlign: 'center', marginTop: 4 }}>
+                      🔍 Scroll to zoom • Double-click to reset • ⛶ for fullscreen
+                    </p>
                   </div>
                 )}
 
@@ -1194,12 +1213,18 @@ const UploadMode = () => {
                   <>
                     <div className="vis-item">
                       <h4>Marked Landmarks</h4>
-                      <img src={results.results.merged.visualization} alt="Landmarks" />
+                      <ZoomableImage src={results.results.merged.visualization} alt="Landmarks" style={{ height: 250, borderRadius: 12, border: '1px solid #2d3561' }} />
+                      <p style={{ color: '#a0aec0', fontSize: 11, textAlign: 'center', marginTop: 4 }}>
+                        🔍 Scroll to zoom • Double-click to reset • ⛶ for fullscreen
+                      </p>
                     </div>
                     {results.results.merged.mask && (
                       <div className="vis-item">
                         <h4>Segmentation Mask</h4>
-                        <img src={results.results.merged.mask} alt="Segmentation mask" />
+                        <ZoomableImage src={results.results.merged.mask} alt="Segmentation mask" style={{ height: 250, borderRadius: 12, border: '1px solid #2d3561' }} />
+                        <p style={{ color: '#a0aec0', fontSize: 11, textAlign: 'center', marginTop: 4 }}>
+                          🔍 Scroll to zoom • Double-click to reset • ⛶ for fullscreen
+                        </p>
                       </div>
                     )}
                   </>

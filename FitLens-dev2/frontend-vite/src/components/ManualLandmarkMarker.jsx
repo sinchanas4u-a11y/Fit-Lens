@@ -30,6 +30,7 @@ const ManualLandmarkMarker = ({
 
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [viewerScale, setViewerScale] = useState(1);
 
   // Point registry for shared coordinates (shoulder = arm-start)
   const [pointRegistry, setPointRegistry] = useState({});
@@ -397,17 +398,53 @@ const ManualLandmarkMarker = ({
       <div className="marker-content">
         {/* Canvas for marking */}
         <div className="canvas-container">
-          <canvas
-            ref={canvasRef}
-            width={900}
-            height={700}
-            onClick={handleCanvasClick}
-            onMouseDown={handleCanvasMouseDown}
-            onMouseMove={handleCanvasMouseMove}
-            onMouseUp={handleCanvasMouseUp}
-            onMouseLeave={handleCanvasMouseUp}
-            style={{ cursor: draggingPoint ? 'grabbing' : currentLine ? 'crosshair' : 'pointer' }}
-          />
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
+            <span style={{ color: '#a0aec0', fontSize: 13 }}>
+              🔍 Zoom: {Math.round(viewerScale * 100)}%
+            </span>
+            <button
+              type="button"
+              onClick={() => setViewerScale(s => Math.min(s + 0.25, 3))}
+              style={{ padding: '4px 10px', background: '#2d3748', border: '1px solid #4a5568', color: '#fff', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>
+              ➕ Zoom In
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewerScale(s => Math.max(s - 0.25, 0.5))}
+              style={{ padding: '4px 10px', background: '#2d3748', border: '1px solid #4a5568', color: '#fff', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>
+              ➖ Zoom Out
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewerScale(1)}
+              style={{ padding: '4px 10px', background: '#2d3748', border: '1px solid #4a5568', color: '#fff', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>
+              Reset
+            </button>
+          </div>
+          <div style={{
+            overflow: 'auto',
+            maxHeight: '70vh',
+            border: '1px solid #2d3561',
+            borderRadius: 12,
+          }}>
+            <div style={{
+              transform: `scale(${viewerScale})`,
+              transformOrigin: 'top left',
+              width: `${100 / viewerScale}%`
+            }}>
+              <canvas
+                ref={canvasRef}
+                width={900}
+                height={700}
+                onClick={handleCanvasClick}
+                onMouseDown={handleCanvasMouseDown}
+                onMouseMove={handleCanvasMouseMove}
+                onMouseUp={handleCanvasMouseUp}
+                onMouseLeave={handleCanvasMouseUp}
+                style={{ cursor: draggingPoint ? 'grabbing' : currentLine ? 'crosshair' : 'pointer' }}
+              />
+            </div>
+          </div>
           <img
             ref={imageRef}
             src={currentImgData}

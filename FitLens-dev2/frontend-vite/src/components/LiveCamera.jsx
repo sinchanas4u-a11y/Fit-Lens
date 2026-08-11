@@ -107,6 +107,19 @@ const LiveCamera = () => {
     const [cameraErrorMsg, setCameraErrorMsg] = useState(null);
     const [countdown, setCountdown] = useState(3);
     const [isAligned, setIsAligned] = useState(false);
+    const [facingMode, setFacingMode] = useState('user'); // 'user'=front, 'environment'=rear
+
+    const flipCamera = useCallback(() => {
+        setFacingMode(prev => (prev === 'user' ? 'environment' : 'user'));
+        setIsAligned(false);
+        isAlignedRef.current = false;
+        if (countdownIntervalRef.current) {
+            clearInterval(countdownIntervalRef.current);
+            countdownIntervalRef.current = null;
+        }
+        countdownValueRef.current = 3;
+        setCountdown(3);
+    }, []);
 
     // Workflow state
     const VIEW_ORDER = ['front', 'side'];
@@ -807,6 +820,38 @@ const LiveCamera = () => {
                             <div className="alignment-hint-text">Align yourself in the frame</div>
                         )}
 
+                        {/* Camera flip button */}
+                        {cameraActive && (
+                            <button
+                                onClick={flipCamera}
+                                style={{
+                                    position: 'absolute',
+                                    top: 16, right: 16,
+                                    background: 'rgba(0,0,0,0.6)',
+                                    border: '2px solid #00d4aa',
+                                    borderRadius: '50%',
+                                    width: 48, height: 48,
+                                    color: '#00d4aa', fontSize: 22,
+                                    cursor: 'pointer', zIndex: 20,
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                }}
+                                title={facingMode === 'user' ? 'Switch to Rear Camera' : 'Switch to Front Camera'}>
+                                🔄
+                            </button>
+                        )}
+
+                        {/* Camera mode badge */}
+                        {cameraActive && (
+                            <div style={{
+                                position: 'absolute', top: 16, left: 16,
+                                background: 'rgba(0,0,0,0.6)',
+                                color: '#00d4aa', padding: '4px 10px',
+                                borderRadius: 20, fontSize: 12, fontWeight: 700, zIndex: 20
+                            }}>
+                                {facingMode === 'user' ? '📷 Front Camera' : '📷 Rear Camera'}
+                            </div>
+                        )}
+
                         {cameraActive && (
                             <Webcam
                                 ref={webcamRef}
@@ -817,7 +862,9 @@ const LiveCamera = () => {
                                 onUserMedia={handleUserMedia}
                                 onUserMediaError={handleUserMediaError}
                                 videoConstraints={{
-                                    facingMode: "user"
+                                    facingMode: facingMode,
+                                    width: { ideal: 1280 },
+                                    height: { ideal: 720 }
                                 }}
                                 style={{
                                     visibility: cameraStatus === 'ready' ? 'visible' : 'hidden'

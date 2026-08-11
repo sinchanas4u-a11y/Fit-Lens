@@ -69,6 +69,8 @@ const CameraScreen = ({ navigation }) => {
   const hasPermissionRef = useRef(false);
   const currentViewRef = useRef('front');
 
+  const [cameraPosition, setCameraPosition] = useState('front'); // 'front' | 'back'
+
   useEffect(() => { isConnectedRef.current = isConnected; }, [isConnected]);
   useEffect(() => { isCameraReadyRef.current = isCameraReady; }, [isCameraReady]);
   useEffect(() => { hasPermissionRef.current = hasPermission; }, [hasPermission]);
@@ -76,7 +78,14 @@ const CameraScreen = ({ navigation }) => {
 
   const backDevice = useCameraDevice('back');
   const frontDevice = useCameraDevice('front');
-  const device = frontDevice || backDevice;
+  const device = cameraPosition === 'front' ? (frontDevice || backDevice) : (backDevice || frontDevice);
+
+  const flipCamera = () => {
+    setCameraPosition(prev => (prev === 'front' ? 'back' : 'front'));
+    isAlignedRef.current = false;
+    setIsAligned(false);
+    stopCountdown();
+  };
 
   // Test backend connection on mount
   useEffect(() => {
@@ -312,9 +321,12 @@ const CameraScreen = ({ navigation }) => {
             setIsAligned(false);
             stopCountdown();
           }
-          const serverError = data?.error || (currentViewRef.current === 'front'
+          let serverError = data?.error || (currentViewRef.current === 'front'
             ? 'Stand facing camera in A-pose (head to toe)'
             : 'Turn 90° to your right for side view');
+          if (serverError.includes('full-body') || serverError.includes('Cropped')) {
+            serverError = 'Step back 6-8 ft so full body (head to toe) is visible';
+          }
           setAlignmentData(prev => ({
             ...prev,
             alignment: 'red',
@@ -803,6 +815,18 @@ const CameraScreen = ({ navigation }) => {
         </Text>
       </View>
 
+      {/* Flip Camera Button */}
+      <TouchableOpacity style={styles.flipBtn} onPress={flipCamera} activeOpacity={0.7}>
+        <Text style={styles.flipBtnText}>🔄</Text>
+      </TouchableOpacity>
+
+      {/* Camera Mode Badge */}
+      <View style={styles.cameraModeBadge}>
+        <Text style={styles.cameraModeText}>
+          {cameraPosition === 'front' ? '📷 Front Cam' : '📷 Rear Cam'}
+        </Text>
+      </View>
+
       {/* Back Button */}
       <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
         <Text style={styles.backBtnText}>←</Text>
@@ -824,6 +848,22 @@ const styles = StyleSheet.create({
   },
   connectionText: {
     color: '#fff', fontSize: 11, fontWeight: '600',
+  },
+  flipBtn: {
+    position: 'absolute', top: 16, right: 105,
+    backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 20,
+    width: 38, height: 38, justifyContent: 'center', alignItems: 'center',
+    zIndex: 40, borderWidth: 1.5, borderColor: '#00D4AA',
+  },
+  flipBtnText: { fontSize: 18 },
+  cameraModeBadge: {
+    position: 'absolute', top: 60, right: 16,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4,
+    zIndex: 40, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)'
+  },
+  cameraModeText: {
+    color: '#00D4AA', fontSize: 10, fontWeight: '700',
   },
   centerContainer: {
     flex: 1, backgroundColor: '#0A0E27',
