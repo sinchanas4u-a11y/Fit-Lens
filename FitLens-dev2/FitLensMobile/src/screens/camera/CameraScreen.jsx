@@ -162,10 +162,12 @@ const CameraScreen = ({ navigation }) => {
 
     console.log('[CameraScreen] Connecting to Socket.IO backend at:', Config.BASE_URL);
     const socket = io(Config.BASE_URL, {
-      transports: ['polling', 'websocket'], // Polling first for reliable HTTP handshake
-      reconnectionAttempts: 5,
-      reconnectionDelay: 3000,
-      timeout: 10000,
+      transports: ['websocket', 'polling'], // Prefer WebSocket in React Native for zero-latency
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
       forceNew: false,
       autoConnect: true,
     });
@@ -184,8 +186,9 @@ const CameraScreen = ({ navigation }) => {
         console.log('⚠️ Socket disconnected:', reason);
         setIsConnected(false);
         isProcessingFrameRef.current = false;
-        if (reason === 'io server disconnect' || reason === 'io client disconnect') {
-          handlersAttachedRef.current = false;
+        if (reason === 'io server disconnect') {
+          // Server closed connection intentionally, reconnect manually if needed
+          socket.connect();
         }
       });
 
@@ -422,11 +425,18 @@ const CameraScreen = ({ navigation }) => {
         qualityPrioritization: 'quality',
         flash: 'off',
       });
+
+      // CRITICAL — use file:// prefix:
       const uri = `file://${photo.path}`;
+      console.log(`[Capture] ${currentViewRef.current} photo URI:`, uri);
 
       if (currentViewRef.current === 'front') {
         // Store front image:
-        setCapturedImages(prev => ({ ...prev, front: uri }));
+        setCapturedImages(prev => {
+          const updated = { ...prev, front: uri };
+          console.log('[Capture] Updated capturedImages:', updated);
+          return updated;
+        });
 
         if (isTtsAvailable()) {
           try { Tts.speak('Front view captured! Now turn 90 degrees to your right.'); } catch {}
@@ -444,7 +454,11 @@ const CameraScreen = ({ navigation }) => {
 
       } else {
         // Store side image — DIFFERENT from front:
-        setCapturedImages(prev => ({ ...prev, side: uri }));
+        setCapturedImages(prev => {
+          const updated = { ...prev, side: uri };
+          console.log('[Capture] Updated capturedImages:', updated);
+          return updated;
+        });
 
         if (isTtsAvailable()) {
           try { Tts.speak('Side view captured! Processing measurements.'); } catch {}
@@ -464,6 +478,7 @@ const CameraScreen = ({ navigation }) => {
       isAlignedRef.current = false;
       setIsAligned(false);
       stopCountdown();
+      startAlignmentChecking();
     }
   };
 
@@ -494,19 +509,39 @@ const CameraScreen = ({ navigation }) => {
       speak: false,
     });
     speakInstruction(`Retaking ${viewToRetake} view. Align yourself in frame.`);
+    setTimeout(() => startAlignmentChecking(), 500);
   };
 
-  const handleAutomaticMode = () => {
+  const handleAutomaticMode = async () => {
     if (!capturedImages.front || !capturedImages.side) {
-      Alert.alert('Missing Photo', 'Please ensure both Front and Side photos are captured.');
+      Alert.alert('Missing Photos', 'Both front and side photos required');
       return;
     }
 
-    navigation.replace('Processing', {
-      frontImageUri: capturedImages.front,
-      sideImageUri: capturedImages.side,
-      userHeightCm: parseFloat(userHeight) || 165,
-    });
+    try {
+      // Convert file URIs to base64:
+      const frontBase64Raw = await RNFS.readFile(
+        capturedImages.front.replace('file://', ''), 'base64');
+      const sideBase64Raw = await RNFS.readFile(
+        capturedImages.side.replace('file://', ''), 'base64');
+
+      const frontBase64 = `data:image/jpeg;base64,${frontBase64Raw}`;
+      const sideBase64 = `data:image/jpeg;base64,${sideBase64Raw}`;
+
+      console.log('[Process] Front base64 length:', frontBase64.length);
+      console.log('[Process] Side base64 length:', sideBase64.length);
+
+      navigation.navigate('Processing', {
+        frontImageUri: capturedImages.front,
+        sideImageUri: capturedImages.side,
+        frontBase64,
+        sideBase64,
+        userHeightCm: parseFloat(userHeight) || 165,
+      });
+    } catch (err) {
+      console.log('[Process] Conversion error:', err.message);
+      Alert.alert('Error', 'Failed to prepare images: ' + err.message);
+    }
   };
 
   const handleManualMarkingMode = () => {
@@ -627,13 +662,32 @@ const CameraScreen = ({ navigation }) => {
             <Text style={styles.cardLabel}>✓ Front View</Text>
             {capturedImages.front ? (
               <TouchableOpacity activeOpacity={0.8} onPress={() => { setZoomImageUri(capturedImages.front); setZoomTitle('Front View Photo'); }}>
-                <Image source={{ uri: capturedImages.front }} style={styles.cardImage} />
+                <Image
+                  source={{ uri: capturedImages.front }}
+                  style={styles.cardImage}
+                  resizeMode="cover"
+                  onLoad={() => console.log('[Image] Front loaded')}
+                  onError={(e) => console.log('[Image] Front error:', e.nativeEvent.error)}
+                />
               </TouchableOpacity>
             ) : (
-              <View style={styles.missingImage}><Text style={styles.missingText}>No Image</Text></View>
+              <View style={styles.missingImage}>
+                <Text style={styles.missingText}>No image</Text>
+              </View>
             )}
-            <TouchableOpacity style={styles.retakeBtn} onPress={() => handleRetakeView('front')}>
-              <Text style={styles.retakeBtnText}>🔄 Retake Front</Text>
+            <TouchableOpacity
+              style={styles.retakeBtn}
+              onPress={() => {
+                setCapturedImages(prev => ({ ...prev, front: null }));
+                setIsReviewing(false);
+                setCurrentView('front');
+                currentViewRef.current = 'front';
+                setIsAligned(false);
+                isAlignedRef.current = false;
+                setCountdown(null);
+                setTimeout(() => startAlignmentChecking(), 500);
+              }}>
+              <Text style={styles.retakeBtnText}>↺ Retake Front</Text>
             </TouchableOpacity>
           </View>
 
@@ -642,13 +696,32 @@ const CameraScreen = ({ navigation }) => {
             <Text style={styles.cardLabel}>✓ Side View</Text>
             {capturedImages.side ? (
               <TouchableOpacity activeOpacity={0.8} onPress={() => { setZoomImageUri(capturedImages.side); setZoomTitle('Side View Photo'); }}>
-                <Image source={{ uri: capturedImages.side }} style={styles.cardImage} />
+                <Image
+                  source={{ uri: capturedImages.side }}
+                  style={styles.cardImage}
+                  resizeMode="cover"
+                  onLoad={() => console.log('[Image] Side loaded')}
+                  onError={(e) => console.log('[Image] Side error:', e.nativeEvent.error)}
+                />
               </TouchableOpacity>
             ) : (
-              <View style={styles.missingImage}><Text style={styles.missingText}>No Image</Text></View>
+              <View style={styles.missingImage}>
+                <Text style={styles.missingText}>No image</Text>
+              </View>
             )}
-            <TouchableOpacity style={styles.retakeBtn} onPress={() => handleRetakeView('side')}>
-              <Text style={styles.retakeBtnText}>🔄 Retake Side</Text>
+            <TouchableOpacity
+              style={styles.retakeBtn}
+              onPress={() => {
+                setCapturedImages(prev => ({ ...prev, side: null }));
+                setIsReviewing(false);
+                setCurrentView('side');
+                currentViewRef.current = 'side';
+                setIsAligned(false);
+                isAlignedRef.current = false;
+                setCountdown(null);
+                setTimeout(() => startAlignmentChecking(), 500);
+              }}>
+              <Text style={styles.retakeBtnText}>↺ Retake Side</Text>
             </TouchableOpacity>
           </View>
         </View>

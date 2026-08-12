@@ -12,6 +12,50 @@ import ZoomableImageModal from '../../components/common/ZoomableImageModal';
 
 const { width } = Dimensions.get('window');
 
+// Fix base64 image decoding:
+const decodeBase64Image = (b64String) => {
+  if (!b64String) return null;
+  // Remove data URL prefix if present:
+  const clean = b64String.includes(',')
+    ? b64String
+    : `data:image/png;base64,${b64String}`;
+  return clean;
+};
+
+// Fix Image component to handle base64 correctly in React Native:
+const Base64Image = ({ b64, label, style }) => {
+  const [imgError, setImgError] = useState(false);
+  const [imgLoaded, setImgLoaded] = useState(false);
+  const src = decodeBase64Image(b64);
+
+  console.log(`[Image] ${label} b64 length:`, b64?.length || 0);
+  console.log(`[Image] ${label} src preview:`, src?.substring(0, 50));
+
+  if (!src || imgError) {
+    return (
+      <View style={[styles.noImage, style]}>
+        <Text style={{ color: '#a0aec0', fontSize: 11 }}>Not available</Text>
+      </View>
+    );
+  }
+
+  return (
+    <Image
+      source={{ uri: src }}
+      style={[styles.analysisImage, style]}
+      resizeMode="contain"
+      onLoad={() => {
+        setImgLoaded(true);
+        console.log(`[Image] ${label} loaded successfully`);
+      }}
+      onError={(e) => {
+        console.log(`[Image] ${label} error:`, e.nativeEvent.error);
+        setImgError(true);
+      }}
+    />
+  );
+};
+
 const ResultsScreen = ({ route, navigation }) => {
   const { data } = route.params;
   const [plotlyJs, setPlotlyJs] = useState('');
@@ -27,10 +71,24 @@ const ResultsScreen = ({ route, navigation }) => {
   const mergedMeasurements = data?.results?.merged?.measurements || frontMeasurements;
   const meshData = data?.mesh_data;
   const calibration = data?.calibration;
-  const frontMask = data?.results?.front?.mask;
-  const frontViz = data?.results?.front?.visualization;
-  const sideMask = data?.results?.side?.mask;
-  const sideViz = data?.results?.side?.visualization;
+
+  const frontMask = data?.results?.front?.mask
+    ?? data?.results?.merged?.front_mask
+    ?? null;
+  const frontViz = data?.results?.front?.visualization
+    ?? data?.results?.merged?.front_visualization
+    ?? null;
+  const sideMask = data?.results?.side?.mask
+    ?? data?.results?.merged?.side_mask
+    ?? null;
+  const sideViz = data?.results?.side?.visualization
+    ?? data?.results?.merged?.side_visualization
+    ?? null;
+
+  console.log('[Results] Response keys:', Object.keys(data || {}));
+  console.log('[Results] results keys:', Object.keys(data?.results || {}));
+  console.log('[Results] front keys:', Object.keys(data?.results?.front || {}));
+  console.log('[Results] frontMask length:', frontMask?.length || 0);
 
   useEffect(() => {
     loadPlotly();
@@ -324,11 +382,10 @@ const ResultsScreen = ({ route, navigation }) => {
                 <TouchableOpacity
                   activeOpacity={0.8}
                   onPress={() => {
-                    setActiveZoomImage(decodeImage(frontMask));
+                    setActiveZoomImage(decodeBase64Image(frontMask));
                     setActiveZoomTitle('Front View — YOLOv8 Mask');
                   }}>
-                  <Image source={decodeImage(frontMask)}
-                    style={styles.analysisImage} resizeMode="contain" />
+                  <Base64Image b64={frontMask} label="Front Mask" style={{ height: 160 }} />
                 </TouchableOpacity>
               ) : (
                 <View style={styles.noImage}>
@@ -342,11 +399,10 @@ const ResultsScreen = ({ route, navigation }) => {
                 <TouchableOpacity
                   activeOpacity={0.8}
                   onPress={() => {
-                    setActiveZoomImage(decodeImage(frontViz));
+                    setActiveZoomImage(decodeBase64Image(frontViz));
                     setActiveZoomTitle('Front View — Pose Keypoints');
                   }}>
-                  <Image source={decodeImage(frontViz)}
-                    style={styles.analysisImage} resizeMode="contain" />
+                  <Base64Image b64={frontViz} label="Front Viz" style={{ height: 160 }} />
                 </TouchableOpacity>
               ) : (
                 <View style={styles.noImage}>
@@ -365,11 +421,10 @@ const ResultsScreen = ({ route, navigation }) => {
                 <TouchableOpacity
                   activeOpacity={0.8}
                   onPress={() => {
-                    setActiveZoomImage(decodeImage(sideMask));
+                    setActiveZoomImage(decodeBase64Image(sideMask));
                     setActiveZoomTitle('Side View — YOLOv8 Mask');
                   }}>
-                  <Image source={decodeImage(sideMask)}
-                    style={styles.analysisImage} resizeMode="contain" />
+                  <Base64Image b64={sideMask} label="Side Mask" style={{ height: 160 }} />
                 </TouchableOpacity>
               ) : (
                 <View style={styles.noImage}>
@@ -383,11 +438,10 @@ const ResultsScreen = ({ route, navigation }) => {
                 <TouchableOpacity
                   activeOpacity={0.8}
                   onPress={() => {
-                    setActiveZoomImage(decodeImage(sideViz));
+                    setActiveZoomImage(decodeBase64Image(sideViz));
                     setActiveZoomTitle('Side View — Pose Keypoints');
                   }}>
-                  <Image source={decodeImage(sideViz)}
-                    style={styles.analysisImage} resizeMode="contain" />
+                  <Base64Image b64={sideViz} label="Side Viz" style={{ height: 160 }} />
                 </TouchableOpacity>
               ) : (
                 <View style={styles.noImage}>

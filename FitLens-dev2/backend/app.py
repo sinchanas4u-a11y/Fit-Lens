@@ -163,7 +163,6 @@ socketio = SocketIO(
     engineio_logger=False,
     ping_timeout=60,
     ping_interval=25,
-    transports=['polling', 'websocket'],
     max_http_buffer_size=10 * 1024 * 1024
 )
 

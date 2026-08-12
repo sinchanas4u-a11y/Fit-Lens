@@ -1,346 +1,420 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, Modal, TouchableOpacity,
-  Image, Dimensions, PanResponder, Alert, ScrollView
+  View, Text, Image, TouchableOpacity, PanResponder,
+  StyleSheet, Dimensions, Modal, ScrollView, Alert
 } from 'react-native';
-import Svg, { Line, Text as SvgText, G } from 'react-native-svg';
 import { Colors } from '../../constants/colors';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-
-const LANDMARK_TYPES = [
-  { id: 'shoulder', label: 'Shoulder Width', color: '#FF6B6B', desc: 'Mark left & right shoulder edges' },
-  { id: 'chest', label: 'Chest Width', color: '#4ECDC4', desc: 'Mark left & right chest edges' },
-  { id: 'waist', label: 'Waist Width', color: '#45B7D1', desc: 'Mark left & right waist edges' },
-  { id: 'hip', label: 'Hip Width', color: '#FFA07A', desc: 'Mark left & right hip edges' },
-  { id: 'torso', label: 'Torso Length', color: '#9B59B6', desc: 'Mark shoulder to hip' },
-  { id: 'arm', label: 'Arm Length', color: '#98D8C8', desc: 'Mark shoulder to wrist' },
-  { id: 'leg', label: 'Leg Length', color: '#F7DC6F', desc: 'Mark hip to ankle' },
-  { id: 'custom', label: 'Custom', color: '#BB8FCE', desc: 'Mark any two points' },
-];
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const IMAGE_DISPLAY_WIDTH = SCREEN_WIDTH - 32;
+const IMAGE_DISPLAY_HEIGHT = SCREEN_HEIGHT * 0.55;
 
 const ManualLandmarkModal = ({
-  visible,
-  imageUri,
-  imageType = 'front',
-  onComplete,
-  onCancel,
+  visible, imageUri, view, imageType, scaleFactor,
+  onComplete, onCancel
 }) => {
-  const [selectedType, setSelectedType] = useState('shoulder');
-  const [pointsMap, setPointsMap] = useState({}); // { [typeId]: [{x, y}, {x, y}] }
-  const [draggingPoint, setDraggingPoint] = useState(null); // { typeId, pointIndex }
-  const [imgLayout, setImgLayout] = useState({ width: SCREEN_WIDTH - 32, height: 420 });
-  const [naturalSize, setNaturalSize] = useState({ width: 1080, height: 1440 });
+  const activeView = view || imageType || 'front';
+  const [scale, setScale] = useState(1);
+  const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
+  const [points, setPoints] = useState({});
+  const [selectedMeasurement, setSelectedMeasurement] = useState('shoulder_width');
+  const [isDraggingPoint, setIsDraggingPoint] = useState(null);
+  const [isZooming, setIsZooming] = useState(false);
 
-  useEffect(() => {
-    if (imageUri) {
-      Image.getSize(
-        imageUri,
-        (w, h) => setNaturalSize({ width: w, height: h }),
-        (err) => console.log('Image.getSize error:', err)
-      );
-    }
-  }, [imageUri]);
-
-  // Reset points state when modal opens or image changes
+  // Reset points and selected measurement when modal opens or view changes
   useEffect(() => {
     if (visible) {
-      setPointsMap({});
-      setSelectedType('shoulder');
-      setDraggingPoint(null);
+      setPoints({});
+      setSelectedMeasurement(activeView === 'front' ? 'shoulder_width' : 'chest_depth');
+      scaleRef.current = 1;
+      panRef.current = { x: 0, y: 0 };
+      setScale(1);
+      setPanOffset({ x: 0, y: 0 });
     }
-  }, [visible, imageUri]);
+  }, [visible, activeView]);
 
-  // Total complete marked lines (2 points placed)
-  const totalMarked = Object.values(pointsMap).filter(
-    (pts) => pts && pts.length === 2
-  ).length;
+  // Refs for gesture tracking:
+  const scaleRef = useRef(1);
+  const panRef = useRef({ x: 0, y: 0 });
+  const lastPinchDist = useRef(null);
+  const lastPanPos = useRef(null);
+  const touchCountRef = useRef(0);
 
-  // Handle tap on image to place points (Uses functional state updater to eliminate stale closures)
-  const handleImageTap = (evt) => {
-    if (draggingPoint) return;
+  const measurements = activeView === 'front'
+    ? ['shoulder_width', 'chest_width', 'waist_width', 'hip_width']
+    : ['chest_depth', 'waist_depth', 'hip_depth', 'stomach_depth'];
+
+  const labels = {
+    shoulder_width: 'Shoulder', chest_width: 'Chest',
+    waist_width: 'Waist', hip_width: 'Hip',
+    chest_depth: 'Chest D', waist_depth: 'Waist D',
+    hip_depth: 'Hip D', stomach_depth: 'Stomach D',
+  };
+
+  // Convert screen coordinates to image coordinates (accounting for zoom/pan):
+  const screenToImage = (screenX, screenY) => {
+    return {
+      x: (screenX - panRef.current.x) / scaleRef.current,
+      y: (screenY - panRef.current.y) / scaleRef.current,
+    };
+  };
+
+  // Convert image coordinates back to screen coordinates:
+  const imageToScreen = (imgX, imgY) => {
+    return {
+      x: imgX * scaleRef.current + panRef.current.x,
+      y: imgY * scaleRef.current + panRef.current.y,
+    };
+  };
+
+  // Main gesture handler for the image container:
+  const containerPanResponder = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onStartShouldSetPanResponderCapture: () => false,
+    onMoveShouldSetPanResponderCapture: (evt) => {
+      // Capture multi-touch for pinch zoom:
+      return evt.nativeEvent.touches.length >= 2;
+    },
+
+    onPanResponderGrant: (evt) => {
+      touchCountRef.current = evt.nativeEvent.touches.length;
+      lastPinchDist.current = null;
+      lastPanPos.current = null;
+    },
+
+    onPanResponderMove: (evt, gesture) => {
+      const touches = evt.nativeEvent.touches;
+      touchCountRef.current = touches.length;
+
+      if (touches.length === 2) {
+        // PINCH TO ZOOM:
+        setIsZooming(true);
+        const dx = touches[0].pageX - touches[1].pageX;
+        const dy = touches[0].pageY - touches[1].pageY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (lastPinchDist.current) {
+          const delta = dist / lastPinchDist.current;
+          const newScale = Math.min(Math.max(scaleRef.current * delta, 1), 4);
+          scaleRef.current = newScale;
+          setScale(newScale);
+        }
+        lastPinchDist.current = dist;
+
+      } else if (touches.length === 1 && scaleRef.current > 1) {
+        // PAN when zoomed in (single finger):
+        const touch = touches[0];
+        if (lastPanPos.current) {
+          const dx = touch.pageX - lastPanPos.current.x;
+          const dy = touch.pageY - lastPanPos.current.y;
+          const newX = panRef.current.x + dx;
+          const newY = panRef.current.y + dy;
+
+          // Clamp pan to prevent going out of bounds:
+          const maxPanX = (scaleRef.current - 1) * IMAGE_DISPLAY_WIDTH / 2;
+          const maxPanY = (scaleRef.current - 1) * IMAGE_DISPLAY_HEIGHT / 2;
+          panRef.current = {
+            x: Math.max(-maxPanX, Math.min(maxPanX, newX)),
+            y: Math.max(-maxPanY, Math.min(maxPanY, newY)),
+          };
+          setPanOffset({ ...panRef.current });
+        }
+        lastPanPos.current = { x: touch.pageX, y: touch.pageY };
+      }
+    },
+
+    onPanResponderRelease: () => {
+      lastPinchDist.current = null;
+      lastPanPos.current = null;
+      setTimeout(() => setIsZooming(false), 100);
+    },
+  })).current;
+
+  // Handle tap on image to place landmark points:
+  const handleImageTap = useCallback((evt) => {
+    if (isZooming || touchCountRef.current > 1) return;
+
     const { locationX, locationY } = evt.nativeEvent;
 
-    setPointsMap((prev) => {
-      const current = prev[selectedType] || [];
-      if (current.length === 0) {
-        // Place first point
-        return { ...prev, [selectedType]: [{ x: locationX, y: locationY }] };
-      } else if (current.length === 1) {
-        // Place second point — line complete
-        return { ...prev, [selectedType]: [current[0], { x: locationX, y: locationY }] };
+    // Convert tap position to image coordinates:
+    const imgCoords = screenToImage(locationX, locationY);
+
+    setPoints(prev => {
+      const current = prev[selectedMeasurement] || [];
+      if (current.length < 2) {
+        return { ...prev, [selectedMeasurement]: [...current, imgCoords] };
       } else {
-        // Both points exist — reset and start fresh with first point
-        return { ...prev, [selectedType]: [{ x: locationX, y: locationY }] };
+        // Reset and start fresh for this measurement:
+        return { ...prev, [selectedMeasurement]: [imgCoords] };
       }
     });
-  };
+  }, [selectedMeasurement, isZooming]);
 
-  // Create PanResponder for a specific handle point
-  const createPointPanResponder = useCallback(
-    (typeId, pointIndex) => {
-      return PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onStartShouldSetPanResponderCapture: () => true,
-        onMoveShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponderCapture: () => true,
+  // Create PanResponder for individual draggable points:
+  const createPointResponder = useCallback((measurement, index) => {
+    return PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
 
-        onPanResponderGrant: (evt) => {
-          evt.stopPropagation?.();
-          setDraggingPoint({ typeId, pointIndex });
-        },
+      onPanResponderGrant: () => {
+        setIsDraggingPoint({ measurement, index });
+      },
 
-        onPanResponderMove: (evt, gestureState) => {
-          setPointsMap((prev) => {
-            const current = [...(prev[typeId] || [])];
-            if (!current[pointIndex]) return prev;
+      onPanResponderMove: (evt, gesture) => {
+        setPoints(prev => {
+          const pts = [...(prev[measurement] || [])];
+          if (!pts[index]) return prev;
 
-            const newX = Math.max(
-              0,
-              Math.min(imgLayout.width, current[pointIndex].x + gestureState.dx)
-            );
-            const newY = Math.max(
-              0,
-              Math.min(imgLayout.height, current[pointIndex].y + gestureState.dy)
-            );
+          // Move in image coordinates:
+          const dxImg = gesture.dx / scaleRef.current;
+          const dyImg = gesture.dy / scaleRef.current;
 
-            const updated = [...current];
-            updated[pointIndex] = { x: newX, y: newY };
-            return { ...prev, [typeId]: updated };
-          });
-        },
+          pts[index] = {
+            x: Math.max(0, Math.min(IMAGE_DISPLAY_WIDTH, pts[index].x + dxImg)),
+            y: Math.max(0, Math.min(IMAGE_DISPLAY_HEIGHT, pts[index].y + dyImg)),
+          };
+          return { ...prev, [measurement]: pts };
+        });
+      },
 
-        onPanResponderRelease: () => {
-          setDraggingPoint(null);
-        },
-
-        onPanResponderTerminate: () => {
-          setDraggingPoint(null);
-        },
-      });
-    },
-    [imgLayout]
-  );
-
-  const handleClearCurrent = () => {
-    setPointsMap((prev) => {
-      const copy = { ...prev };
-      delete copy[selectedType];
-      return copy;
+      onPanResponderRelease: () => {
+        setIsDraggingPoint(null);
+      },
     });
+  }, []);
+
+  // Calculate measurement from two points:
+  const calcMeasurement = (pts) => {
+    if (!pts || pts.length < 2) return null;
+    const dx = pts[1].x - pts[0].x;
+    const dy = pts[1].y - pts[0].y;
+    const px = Math.sqrt(dx * dx + dy * dy);
+    return (px * (scaleFactor || 0.19)).toFixed(1);
   };
 
-  const handleResetAll = () => {
-    setPointsMap({});
-    setDraggingPoint(null);
+  // Render measurement line between two points:
+  const renderLine = (measurement, pts) => {
+    if (!pts || pts.length < 2) return null;
+    const p1 = imageToScreen(pts[0].x, pts[0].y);
+    const p2 = imageToScreen(pts[1].x, pts[1].y);
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const length = Math.sqrt(dx * dx + dy * dy);
+    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+    const isSelected = selectedMeasurement === measurement;
+    const cm = calcMeasurement(pts);
+
+    return (
+      <View key={`line-${measurement}`}
+        style={{
+          position: 'absolute', left: p1.x, top: p1.y,
+          width: length, height: 2,
+          backgroundColor: isSelected ? '#00D4AA' : '#A0AEC0',
+          transform: [{ rotate: `${angle}deg` }],
+          transformOrigin: 'left center',
+        }}
+        pointerEvents="none">
+        {/* Measurement label at midpoint */}
+        <View style={{
+          position: 'absolute',
+          left: length / 2 - 25, top: -18,
+          backgroundColor: 'rgba(0,0,0,0.8)',
+          borderRadius: 6, paddingHorizontal: 5, paddingVertical: 2,
+        }}>
+          <Text style={{ color: '#00D4AA', fontSize: 9, fontWeight: '700' }}>
+            {labels[measurement]}: {cm}cm
+          </Text>
+        </View>
+      </View>
+    );
+  };
+
+  // Render draggable landmark point:
+  const renderPoint = (measurement, pt, index) => {
+    const screenPos = imageToScreen(pt.x, pt.y);
+    const pointResponder = createPointResponder(measurement, index);
+    const isSelected = selectedMeasurement === measurement;
+    const isDragging = isDraggingPoint?.measurement === measurement
+      && isDraggingPoint?.index === index;
+    const pointSize = 28 / scaleRef.current; // Scale point with zoom
+
+    return (
+      <View
+        key={`point-${measurement}-${index}`}
+        {...pointResponder.panHandlers}
+        style={{
+          position: 'absolute',
+          left: screenPos.x - 14,
+          top: screenPos.y - 14,
+          width: 28, height: 28, borderRadius: 14,
+          backgroundColor: isDragging ? '#FFD700'
+            : isSelected ? '#00D4AA' : '#A0AEC0',
+          borderWidth: 2, borderColor: '#FFFFFF',
+          justifyContent: 'center', alignItems: 'center',
+          elevation: isDragging ? 20 : 10,
+          zIndex: isDragging ? 999 : 10,
+        }}>
+        <Text style={{ color: '#fff', fontSize: 10, fontWeight: '900' }}>
+          {index === 0 ? 'L' : 'R'}
+        </Text>
+      </View>
+    );
   };
 
   const handleDone = () => {
-    if (totalMarked === 0) {
-      Alert.alert('No Points Marked', 'Please mark at least one measurement line before proceeding.');
-      return;
-    }
-
-    const scaleX = naturalSize.width / (imgLayout.width || 1);
-    const scaleY = naturalSize.height / (imgLayout.height || 1);
-
-    const formattedLandmarks = [];
-    Object.entries(pointsMap).forEach(([typeId, pts]) => {
-      if (pts && pts.length === 2) {
-        const activeType = LANDMARK_TYPES.find((t) => t.id === typeId);
-        formattedLandmarks.push({
-          type: typeId,
-          label: activeType?.label || typeId,
-          points: pts.map((p) => {
-            const imgX = p.x * scaleX;
-            const imgY = p.y * scaleY;
-            return {
-              x: imgX,
-              y: imgY,
-              x_norm: imgX / (naturalSize.width || 1),
-              y_norm: imgY / (naturalSize.height || 1),
-            };
-          }),
-        });
+    const result = {};
+    Object.entries(points).forEach(([key, pts]) => {
+      if (pts?.length === 2) {
+        const dx = pts[1].x - pts[0].x;
+        const dy = pts[1].y - pts[0].y;
+        const px = Math.sqrt(dx * dx + dy * dy);
+        result[key] = {
+          value_cm: parseFloat((px * (scaleFactor || 0.19)).toFixed(1)),
+          value_px: parseFloat(px.toFixed(2)),
+          source: 'Manual Marking',
+        };
       }
     });
 
-    onComplete({
-      imageType,
-      imageWidth: naturalSize.width,
-      imageHeight: naturalSize.height,
-      landmarks: formattedLandmarks,
-    });
+    if (Object.keys(result).length === 0) {
+      Alert.alert('No Measurements', 'Mark at least one measurement.');
+      return;
+    }
+    onComplete(result);
   };
 
-  const activeTypeObj = LANDMARK_TYPES.find((t) => t.id === selectedType);
-  const currentPoints = pointsMap[selectedType] || [];
+  const resetZoom = () => {
+    scaleRef.current = 1;
+    panRef.current = { x: 0, y: 0 };
+    setScale(1);
+    setPanOffset({ x: 0, y: 0 });
+  };
+
+  const totalMarked = Object.values(points)
+    .filter(pts => pts?.length === 2).length;
 
   return (
-    <Modal visible={visible} animationType="slide" transparent={false}>
+    <Modal visible={visible} animationType="slide" statusBarTranslucent>
       <View style={styles.container}>
+
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={onCancel} style={styles.cancelBtn}>
+          <TouchableOpacity onPress={onCancel}>
             <Text style={styles.cancelText}>Cancel</Text>
           </TouchableOpacity>
           <Text style={styles.title}>
-            Manual Marking ({imageType.toUpperCase()})
+            Mark ({activeView.toUpperCase()})
           </Text>
           <TouchableOpacity onPress={handleDone} style={styles.doneBtn}>
-            <Text style={styles.doneText}>Done ✓</Text>
+            <Text style={styles.doneBtnText}>Done ✓</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Instructions */}
-        <View style={styles.hintBox}>
-          <Text style={styles.hintText}>
-            Select a measurement below, tap 2 points on the image to draw a line, then drag handles to fine-tune.
+        {/* Zoom indicator + reset */}
+        <View style={styles.zoomBar}>
+          <Text style={styles.zoomText}>
+            🔍 {Math.round(scale * 100)}%
+          </Text>
+          {scale > 1 && (
+            <TouchableOpacity onPress={resetZoom} style={styles.resetZoomBtn}>
+              <Text style={styles.resetZoomText}>Reset Zoom</Text>
+            </TouchableOpacity>
+          )}
+          <Text style={styles.zoomHint}>
+            {scale === 1
+              ? 'Pinch to zoom • Tap to place points'
+              : 'Drag 1 finger to pan • Tap to place points'}
           </Text>
         </View>
 
-        {/* Type Selector Pills */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pillContainer}>
-          {LANDMARK_TYPES.map((type) => {
-            const isSelected = selectedType === type.id;
-            const isDone = pointsMap[type.id]?.length === 2;
-            return (
-              <TouchableOpacity
-                key={type.id}
-                onPress={() => setSelectedType(type.id)}
-                style={[
-                  styles.pill,
-                  { borderColor: type.color },
-                  isSelected && { backgroundColor: type.color + '33' },
-                  isDone && { borderColor: '#48BB78' },
-                ]}>
-                <Text style={[styles.pillText, { color: isSelected ? type.color : Colors.textSecondary }]}>
-                  {isDone ? '✓ ' : ''}{type.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
+        {/* Measurement selector */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}
+          style={styles.selectorScroll}
+          contentContainerStyle={styles.selectorContent}>
+          {measurements.map(m => (
+            <TouchableOpacity
+              key={m}
+              onPress={() => setSelectedMeasurement(m)}
+              style={[styles.selectorBtn,
+                selectedMeasurement === m && styles.selectorBtnActive,
+                points[m]?.length === 2 && styles.selectorBtnDone]}>
+              <Text style={[styles.selectorText,
+                selectedMeasurement === m && { color: '#00D4AA' }]}>
+                {labels[m]}
+                {points[m]?.length === 2 ? ' ✓' : ''}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </ScrollView>
 
-        {/* Active Type Status */}
-        <View style={styles.statusRow}>
-          <Text style={[styles.statusText, { color: activeTypeObj?.color }]}>
-            Current: {activeTypeObj?.label} —{' '}
-            {currentPoints.length === 0
-              ? 'Tap 1st point'
-              : currentPoints.length === 1
-              ? 'Tap 2nd point'
-              : 'Done! Drag handles to adjust'}
+        {/* Status */}
+        <View style={styles.statusBar}>
+          <Text style={styles.statusText}>
+            {labels[selectedMeasurement]}:{' '}
+            {!points[selectedMeasurement]?.length
+              ? 'Tap left point'
+              : points[selectedMeasurement]?.length === 1
+              ? 'Tap right point'
+              : `✓ ${calcMeasurement(points[selectedMeasurement])}cm — Drag to adjust`}
           </Text>
-          {currentPoints.length > 0 && (
-            <TouchableOpacity onPress={handleClearCurrent}>
+          {points[selectedMeasurement]?.length > 0 && (
+            <TouchableOpacity onPress={() =>
+              setPoints(prev => ({ ...prev, [selectedMeasurement]: [] }))}>
               <Text style={styles.clearText}>Clear</Text>
             </TouchableOpacity>
           )}
         </View>
 
-        {/* Main Image Viewport Area — NO ScrollView wrapping this */}
+        {/* Image container with zoom + landmarks */}
         <View
-          style={styles.imageViewport}
-          onLayout={(e) => {
-            const { width, height } = e.nativeEvent.layout;
-            setImgLayout({ width, height });
-          }}>
-          {/* Base Layer: TouchableOpacity for tap detection */}
+          style={styles.imageContainer}
+          {...containerPanResponder.panHandlers}>
+
+          {/* Tappable area for placing points */}
           <TouchableOpacity
             activeOpacity={1}
             onPress={handleImageTap}
             style={StyleSheet.absoluteFill}>
-            {imageUri ? (
-              <Image source={{ uri: imageUri }} style={styles.image} resizeMode="contain" />
-            ) : (
-              <View style={styles.noImgBox}><Text style={{ color: '#fff' }}>No Image</Text></View>
-            )}
+            <Image
+              source={{ uri: imageUri }}
+              style={{
+                width: IMAGE_DISPLAY_WIDTH,
+                height: IMAGE_DISPLAY_HEIGHT,
+                transform: [
+                  { scale },
+                  { translateX: panOffset.x / scale },
+                  { translateY: panOffset.y / scale },
+                ],
+              }}
+              resizeMode="contain"
+            />
           </TouchableOpacity>
 
-          {/* Lines Layer: Non-interactive rendering of lines & distance labels */}
+          {/* Lines — non-interactive layer */}
           <View style={StyleSheet.absoluteFill} pointerEvents="none">
-            <Svg style={StyleSheet.absoluteFill}>
-              {Object.entries(pointsMap).map(([typeId, pts]) => {
-                if (!pts || pts.length < 2) return null;
-                const typeObj = LANDMARK_TYPES.find((t) => t.id === typeId);
-                const color = typeObj?.color || '#00D4AA';
-
-                const [p1, p2] = pts;
-                const distPx = Math.round(Math.hypot(p2.x - p1.x, p2.y - p1.y));
-                const midX = (p1.x + p2.x) / 2;
-                const midY = (p1.y + p2.y) / 2;
-
-                return (
-                  <G key={`line-${typeId}`}>
-                    <Line
-                      x1={p1.x} y1={p1.y}
-                      x2={p2.x} y2={p2.y}
-                      stroke={color}
-                      strokeWidth="3"
-                    />
-                    <SvgText
-                      x={midX} y={midY - 8}
-                      fill={color}
-                      fontSize="12"
-                      fontWeight="bold"
-                      textAnchor="middle">
-                      {typeObj?.label}: {distPx}px
-                    </SvgText>
-                  </G>
-                );
-              })}
-            </Svg>
+            {Object.entries(points).map(([m, pts]) =>
+              renderLine(m, pts)
+            )}
           </View>
 
-          {/* Points Layer: Interactive handle circles (pointerEvents="box-none" so parent touches pass to handles) */}
+          {/* Points — interactive layer (rendered LAST to capture touches) */}
           <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
-            {Object.entries(pointsMap).map(([typeId, pts]) => {
-              if (!pts) return null;
-              const typeObj = LANDMARK_TYPES.find((t) => t.id === typeId);
-              const color = typeObj?.color || '#00D4AA';
-              const isSelected = selectedType === typeId;
-
-              return pts.map((pt, index) => {
-                const panResponder = createPointPanResponder(typeId, index);
-                const isDragging =
-                  draggingPoint?.typeId === typeId && draggingPoint?.pointIndex === index;
-
-                return (
-                  <View
-                    key={`point-${typeId}-${index}`}
-                    {...panResponder.panHandlers}
-                    style={[
-                      styles.landmarkHandle,
-                      {
-                        left: pt.x - 16,
-                        top: pt.y - 16,
-                        backgroundColor: isDragging
-                          ? '#FFD700'
-                          : isSelected
-                          ? color
-                          : 'rgba(160,174,192,0.8)',
-                        transform: [{ scale: isDragging ? 1.4 : 1.0 }],
-                        zIndex: isDragging ? 999 : 10,
-                      },
-                    ]}>
-                    <Text style={styles.handleText}>
-                      {index === 0 ? '1' : '2'}
-                    </Text>
-                  </View>
-                );
-              });
-            })}
+            {Object.entries(points).map(([m, pts]) =>
+              pts?.map((pt, i) => renderPoint(m, pt, i))
+            )}
           </View>
         </View>
 
-        {/* Footer Actions */}
-        <View style={styles.footer}>
-          <TouchableOpacity onPress={handleResetAll} style={styles.resetBtn}>
-            <Text style={styles.resetBtnText}>↺ Reset All Points</Text>
+        {/* Bottom bar */}
+        <View style={styles.bottomBar}>
+          <TouchableOpacity onPress={() => setPoints({})}>
+            <Text style={styles.resetText}>↺ Reset All</Text>
           </TouchableOpacity>
-          <Text style={styles.countText}>
-            Marked: {totalMarked} / {LANDMARK_TYPES.length}
+          <Text style={styles.markedCount}>
+            Marked: {totalMarked}/{measurements.length}
           </Text>
         </View>
       </View>
@@ -349,63 +423,65 @@ const ManualLandmarkModal = ({
 };
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0A0E27', paddingTop: 40 },
+  container: { flex: 1, backgroundColor: '#0A0E27' },
   header: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between', padding: 16, paddingTop: 52,
+    backgroundColor: '#1A1F3A',
+    borderBottomWidth: 1, borderBottomColor: '#2D3561',
+  },
+  cancelText: { color: '#FC8181', fontWeight: '700', fontSize: 15 },
+  title: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  doneBtn: {
+    backgroundColor: '#00D4AA', borderRadius: 8,
+    paddingHorizontal: 14, paddingVertical: 7,
+  },
+  doneBtnText: { color: '#fff', fontWeight: '700' },
+  zoomBar: {
+    flexDirection: 'row', alignItems: 'center',
+    padding: 8, paddingHorizontal: 16,
+    backgroundColor: '#1E2340', gap: 10,
+  },
+  zoomText: { color: '#00D4AA', fontWeight: '700', fontSize: 13 },
+  resetZoomBtn: {
+    backgroundColor: '#2D3561', borderRadius: 6,
+    paddingHorizontal: 8, paddingVertical: 4,
+  },
+  resetZoomText: { color: '#00D4AA', fontSize: 11 },
+  zoomHint: { color: '#A0AEC0', fontSize: 11, flex: 1, textAlign: 'right' },
+  selectorScroll: { maxHeight: 48 },
+  selectorContent: { padding: 8, gap: 6 },
+  selectorBtn: {
+    paddingHorizontal: 12, paddingVertical: 8,
+    borderRadius: 20, borderWidth: 1.5,
+    borderColor: '#2D3561', backgroundColor: '#1E2340',
+  },
+  selectorBtnActive: { borderColor: '#00D4AA', backgroundColor: '#00D4AA20' },
+  selectorBtnDone: { borderColor: '#48BB78' },
+  selectorText: { color: '#A0AEC0', fontSize: 12, fontWeight: '600' },
+  statusBar: {
     flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12,
-    borderBottomWidth: 1, borderBottomColor: '#1A1F3A',
+    alignItems: 'center', paddingHorizontal: 16, paddingVertical: 6,
+    backgroundColor: '#1A1F3A',
   },
-  cancelBtn: { padding: 8 },
-  cancelText: { color: '#FC8181', fontSize: 16, fontWeight: '600' },
-  title: { color: '#FFF', fontSize: 16, fontWeight: '700' },
-  doneBtn: { backgroundColor: '#00D4AA', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8 },
-  doneText: { color: '#0A0E27', fontSize: 15, fontWeight: '700' },
-  hintBox: { backgroundColor: '#1A1F3A', padding: 10, marginHorizontal: 16, marginTop: 8, borderRadius: 8 },
-  hintText: { color: '#A0AEC0', fontSize: 12, textAlign: 'center' },
-  pillContainer: { maxHeight: 50, paddingHorizontal: 12, marginVertical: 8 },
-  pill: {
-    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20,
-    borderWidth: 1.5, marginRight: 8, justifyContent: 'center',
+  statusText: { color: '#FC8181', fontSize: 12, fontWeight: '600', flex: 1 },
+  clearText: { color: '#00D4AA', fontWeight: '700', fontSize: 13 },
+  imageContainer: {
+    flex: 1, margin: 8,
+    borderRadius: 12, overflow: 'hidden',
+    borderWidth: 1, borderColor: '#2D3561',
+    backgroundColor: '#0A0E27',
+    width: IMAGE_DISPLAY_WIDTH,
+    height: IMAGE_DISPLAY_HEIGHT,
   },
-  pillText: { fontSize: 13, fontWeight: '700' },
-  statusRow: {
+  bottomBar: {
     flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', paddingHorizontal: 16, marginBottom: 8,
+    alignItems: 'center', padding: 16,
+    backgroundColor: '#1A1F3A',
+    borderTopWidth: 1, borderTopColor: '#2D3561',
   },
-  statusText: { fontSize: 12, fontWeight: '600' },
-  clearText: { color: '#FC8181', fontSize: 12, textDecorationLine: 'underline' },
-  imageViewport: {
-    flex: 1, marginHorizontal: 16, borderRadius: 12,
-    overflow: 'hidden', backgroundColor: '#000', position: 'relative',
-  },
-  image: { width: '100%', height: '100%' },
-  noImgBox: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  landmarkHandle: {
-    position: 'absolute',
-    width: 32, height: 32,
-    borderRadius: 16,
-    borderWidth: 3,
-    borderColor: '#FFFFFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.8,
-    shadowRadius: 4,
-  },
-  handleText: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '900',
-  },
-  footer: {
-    flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', padding: 16, borderTopWidth: 1, borderTopColor: '#1A1F3A',
-  },
-  resetBtn: { padding: 8 },
-  resetBtnText: { color: '#00D4AA', fontSize: 14, fontWeight: '700' },
-  countText: { color: '#A0AEC0', fontSize: 14 },
+  resetText: { color: '#00D4AA', fontWeight: '700' },
+  markedCount: { color: '#A0AEC0', fontSize: 14 },
 });
 
 export default ManualLandmarkModal;
