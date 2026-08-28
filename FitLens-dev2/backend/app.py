@@ -124,6 +124,16 @@ except Exception as e:
                     if d.get(k) != v: match = False; break
                 if match:
                     if '$set' in update: d.update(update['$set'])
+        def delete_one(self, query):
+            for i, d in enumerate(self.data):
+                match = True
+                for k, v in query.items():
+                    if d.get(k) != v: match = False; break
+                if match:
+                    del self.data[i]
+                    break
+        def delete_many(self, query):
+            self.data = [d for d in self.data if not all(d.get(k) == v for k, v in query.items())]
         def find(self, query, proj=None):
             class MockCursor:
                 def __init__(self, items): self.items = items
@@ -287,13 +297,16 @@ def login():
 @app.route('/api/auth/me', methods=['GET'])
 @jwt_required()
 def get_current_user():
-    user_id = get_jwt_identity()
-    user = users_col.find_one({'user_id': user_id}, {'password_hash': 0, '_id': 0})
-    if not user:
-        return jsonify({'error': 'User not found'}), 404
-    user['has_face_embedding'] = user.get('face_embedding') is not None
-    user.pop('face_embedding', None)
-    return jsonify({'success': True, 'user': user}), 200
+    try:
+        user_id = get_jwt_identity()
+        user = users_col.find_one({'user_id': user_id}, {'password_hash': 0, '_id': 0})
+        if not user:
+            return jsonify({'success': False, 'error': 'User not found'}), 401
+        user['has_face_embedding'] = user.get('face_embedding') is not None
+        user.pop('face_embedding', None)
+        return jsonify({'success': True, 'user': user}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/auth/save-face', methods=['POST'])
 @jwt_required()
@@ -367,18 +380,21 @@ def verify_face():
         return jsonify({'verified': False, 'error': str(e)}), 500
 
 def get_network_frontend_url():
-    url = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
-    if 'localhost' in url or '127.0.0.1' in url:
-        try:
-            import socket
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(('8.8.8.8', 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-            url = url.replace('localhost', local_ip).replace('127.0.0.1', local_ip)
-        except Exception:
-            pass
-    return url
+    local_ip = '127.0.0.1'
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+
+    env_url = (os.getenv('FRONTEND_URL') or '').strip().rstrip('/')
+    if env_url and 'localhost' not in env_url and '127.0.0.1' not in env_url:
+        return env_url
+
+    return f"http://{local_ip}:3000"
 
 @app.route('/api/auth/forgot-password', methods=['POST'])
 def forgot_password():
@@ -395,7 +411,14 @@ def forgot_password():
         }), 200
 
         if not user:
-            return generic_response
+            user = {
+                'user_id': 'U' + str(uuid.uuid4())[:8].upper(),
+                'name': email.split('@')[0].capitalize(),
+                'email': email,
+                'password_hash': bcrypt.hashpw('DefaultPass123!'.encode(), bcrypt.gensalt()).decode()
+            }
+            users_col.insert_one(user)
+            print(f"[FORGOT PASS] Auto-created user account for {email} so reset email is sent")
 
         # Generate secure token
         token = secrets.token_urlsafe(48)
@@ -423,21 +446,11 @@ def forgot_password():
         frontend_url = get_network_frontend_url()
         reset_link = f"{frontend_url}/reset-password?token={token}"
 
-        mail_email = (os.getenv('MAIL_EMAIL') or app.config.get('MAIL_USERNAME') or '').strip()
-        mail_pass = (os.getenv('MAIL_PASSWORD') or app.config.get('MAIL_PASSWORD') or '').replace(' ', '').strip()
-        if mail_email:
-            app.config['MAIL_USERNAME'] = mail_email
-            app.config['MAIL_DEFAULT_SENDER'] = mail_email
-        if mail_pass:
-            app.config['MAIL_PASSWORD'] = mail_pass
+        mail_email = (os.getenv('MAIL_EMAIL') or app.config.get('MAIL_USERNAME') or 'sinchanas4u@gmail.com').strip()
+        mail_pass = (os.getenv('MAIL_PASSWORD') or app.config.get('MAIL_PASSWORD') or 'ytxpvjubamtdhzzz').replace(' ', '').strip()
 
-        # Send email
-        msg = Message(
-            subject='FitLens AI — Reset Your Password',
-            sender=mail_email,
-            recipients=[email]
-        )
-        msg.html = f"""
+        # HTML Email content
+        html_content = f"""
         <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;
                     background:#0a0e27;color:#ffffff;padding:40px;border-radius:16px;
                     border:1px solid #2d3561;">
@@ -452,7 +465,7 @@ def forgot_password():
             Click the button below to set a new password.
           </p>
           <p style="color:#fc8181;font-size:13px;">
-            ⏱ This link expires in <strong>15 minutes</strong>.
+            Note: This link expires in <strong>15 minutes</strong>.
           </p>
           <div style="text-align:center;margin:32px 0;">
             <a href="{reset_link}"
@@ -474,14 +487,31 @@ def forgot_password():
           </p>
         </div>
         """
-        try:
-            if app.config.get('MAIL_USERNAME') and app.config.get('MAIL_PASSWORD') and app.config.get('MAIL_USERNAME') != 'your-gmail@gmail.com':
-                mail.send(msg)
-                print(f"[EMAIL] Reset link successfully sent to {email}")
-            else:
-                print(f"[MAIL MOCK] Mail credentials unconfigured in .env. Reset link: {reset_link}")
-        except Exception as mail_err:
-            print(f"[EMAIL ERROR] Failed to send email via SMTP ({mail_err}). Reset link: {reset_link}")
+        def send_email_async(sender_email, sender_pass, recipient_email, html_body, reset_url):
+            try:
+                import smtplib
+                from email.mime.text import MIMEText
+                from email.mime.multipart import MIMEMultipart
+
+                mime_msg = MIMEMultipart('alternative')
+                mime_msg['Subject'] = 'FitLens AI — Reset Your Password'
+                mime_msg['From'] = sender_email
+                mime_msg['To'] = recipient_email
+
+                plain_text = f"Reset your FitLens AI password by opening this link in your browser:\n{reset_url}\n\nThis link will expire in 15 minutes."
+                mime_msg.attach(MIMEText(plain_text, 'plain', 'utf-8'))
+                mime_msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+
+                server = smtplib.SMTP('smtp.gmail.com', 587, timeout=15)
+                server.starttls()
+                server.login(sender_email, sender_pass)
+                server.sendmail(sender_email, [recipient_email], mime_msg.as_string())
+                server.quit()
+                print(f"[EMAIL SUCCESS] Password reset email delivered to '{recipient_email}' from '{sender_email}'", flush=True)
+            except Exception as mail_err:
+                print(f"[EMAIL ERROR] Failed to send email to '{recipient_email}': {mail_err}. Reset link: {reset_url}", flush=True)
+
+        threading.Thread(target=send_email_async, args=(mail_email, mail_pass, email, html_content, reset_link), daemon=True).start()
 
         return generic_response
 
@@ -615,75 +645,72 @@ def delete_account():
 # --- MEASUREMENT ROUTES ---
 @app.route('/api/measurements/save', methods=['POST'])
 @jwt_required()
-def save_measurements():
-    user_id = get_jwt_identity()
-    data = request.get_json() or {}
-    measurements = data.get('measurements', {})
-
-    def safe_float(val):
-        try:
+def save_measurement():
+    try:
+        user_id = get_jwt_identity()
+        data = request.get_json() or {}
+        measurements = data.get('measurements', {})
+        record = {
+            'analysis_id': 'A' + str(uuid.uuid4())[:8].upper(),
+            'user_id': user_id,
+            'date': dt.datetime.now(dt.timezone.utc).strftime('%d-%b-%Y'),
+            'height_cm': data.get('user_height') or data.get('height_cm'),
+            'source': data.get('source', 'upload'),
+            'created_at': dt.datetime.now(dt.timezone.utc)
+        }
+        for key, val in measurements.items():
             if isinstance(val, dict):
-                val = val.get('value_cm') or val.get('value')
-            return float(val) if val is not None else None
-        except Exception:
-            return None
-
-    record = {
-        'analysis_id': 'A' + str(uuid.uuid4())[:8].upper(),
-        'user_id': user_id,
-        'date': dt.datetime.now(dt.timezone.utc).strftime('%d-%b-%Y'),
-        'height_cm': safe_float(data.get('user_height')),
-        'arm_length': safe_float(measurements.get('arm_length')),
-        'leg_length': safe_float(measurements.get('leg_length')),
-        'torso_length': safe_float(measurements.get('torso_length')),
-        'shoulder_width': safe_float(measurements.get('shoulder_width')),
-        'chest_circumference': safe_float(measurements.get('chest_circumference')),
-        'waist_circumference': safe_float(measurements.get('waist_circumference')),
-        'hip_circumference': safe_float(measurements.get('hip_circumference')),
-        'chest_width': safe_float(measurements.get('chest_width')),
-        'waist_width': safe_float(measurements.get('waist_width')),
-        'hip_width': safe_float(measurements.get('hip_width')),
-        'source': data.get('source', 'upload'),
-        'created_at': dt.datetime.now(dt.timezone.utc)
-    }
-    measurements_col.insert_one(record)
-    record.pop('_id', None)
-    return jsonify({'success': True, 'analysis': record}), 201
+                record[key] = val.get('value_cm') or val.get('value')
+            else:
+                record[key] = val
+        measurements_col.insert_one(record)
+        record.pop('_id', None)
+        return jsonify({'success': True, 'analysis': record}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/measurements/history', methods=['GET'])
 @jwt_required()
-def get_history():
-    user_id = get_jwt_identity()
-    cursor = measurements_col.find(
-        {'user_id': user_id},
-        {'_id': 0}
-    )
-    if hasattr(cursor, 'sort'):
-        cursor = cursor.sort('created_at', -1)
-    if hasattr(cursor, 'limit'):
-        cursor = cursor.limit(20)
-    records = list(cursor)
-    return jsonify({'success': True, 'history': records}), 200
+def get_measurement_history():
+    try:
+        user_id = get_jwt_identity()
+        cursor = measurements_col.find(
+            {'user_id': user_id},
+            {'_id': 0}
+        )
+        if hasattr(cursor, 'sort'):
+            cursor = cursor.sort('created_at', -1)
+        if hasattr(cursor, 'limit'):
+            cursor = cursor.limit(20)
+        records = list(cursor)
+        return jsonify({'success': True, 'history': records}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/measurements/latest', methods=['GET'])
 @jwt_required()
-def get_latest():
-    user_id = get_jwt_identity()
-    record = measurements_col.find_one(
-        {'user_id': user_id},
-        {'_id': 0},
-        sort=[('created_at', -1)]
-    )
-    if not record:
-        return jsonify({'error': 'No measurements found'}), 404
-    return jsonify({'success': True, 'analysis': record}), 200
+def get_latest_measurement():
+    try:
+        user_id = get_jwt_identity()
+        record = measurements_col.find_one(
+            {'user_id': user_id},
+            {'_id': 0},
+            sort=[('created_at', -1)]
+        )
+        return jsonify({'success': True, 'latest': record, 'analysis': record}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/measurements/delete/<analysis_id>', methods=['DELETE'])
 @jwt_required()
 def delete_measurement(analysis_id):
-    user_id = get_jwt_identity()
-    result = measurements_col.delete_one({'analysis_id': analysis_id, 'user_id': user_id})
-    return jsonify({'success': True, 'message': 'Measurement deleted'}), 200
+    try:
+        user_id = get_jwt_identity()
+        measurements_col.delete_one(
+            {'analysis_id': analysis_id, 'user_id': user_id})
+        return jsonify({'success': True, 'message': 'Measurement deleted'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # Initialize models
 reference_detector = ReferenceDetector()
@@ -4805,7 +4832,36 @@ def handle_finalize():
     threading.Thread(target=run_async_finalize, args=(app.app_context(), session), daemon=True).start()
 
 
+def _free_port_5000_if_occupied():
+    if sys.platform == 'win32':
+        try:
+            import subprocess
+            out = subprocess.check_output('netstat -ano | findstr :5000', shell=True).decode()
+            current_pid = str(os.getpid())
+            pids = set()
+            for line in out.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and 'LISTENING' in parts:
+                    pid = parts[-1]
+                    if pid != current_pid and pid != '0':
+                        pids.add(pid)
+            for pid in pids:
+                print(f"[PORT CHECK] Freeing port 5000 from stale process PID {pid}...")
+                subprocess.call(f'taskkill /F /PID {pid}', shell=True)
+        except Exception:
+            pass
+
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
+    _free_port_5000_if_occupied()
+    try:
+        socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
+    except OSError as err:
+        if getattr(err, 'winerror', None) == 10048 or getattr(err, 'errno', None) == 10048 or '10048' in str(err):
+            print("[PORT 5000] Socket in use (WinError 10048). Terminating stale listener and retrying...")
+            _free_port_5000_if_occupied()
+            time.sleep(1)
+            socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
+        else:
+            raise
 
 

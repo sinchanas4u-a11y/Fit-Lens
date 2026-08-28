@@ -25,8 +25,16 @@ export const getCurrentUser = async () => {
     const res = await fetch(`${API}/api/auth/me`, {
       headers: authHeaders()
     });
+    if (!res.ok) {
+      removeToken();
+      return null;
+    }
     const data = await res.json();
-    return data.success ? data.user : null;
+    if (!data.success) {
+      removeToken();
+      return null;
+    }
+    return data.user;
   } catch (e) {
     return null;
   }

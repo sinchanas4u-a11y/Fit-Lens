@@ -21,6 +21,13 @@ const ManualLandmarkModal = ({
   const [isDraggingPoint, setIsDraggingPoint] = useState(null);
   const [isZooming, setIsZooming] = useState(false);
 
+  // Store image container layout:
+  const containerLayout = useRef({ x: 0, y: 0, width: IMAGE_DISPLAY_WIDTH, height: IMAGE_DISPLAY_HEIGHT });
+
+  // Store image natural dimensions vs displayed dimensions:
+  const imageNaturalSize = useRef({ width: 0, height: 0 });
+  const imageDisplayedSize = useRef({ width: IMAGE_DISPLAY_WIDTH, height: IMAGE_DISPLAY_HEIGHT });
+
   // Reset points and selected measurement when modal opens or view changes
   useEffect(() => {
     if (visible) {
@@ -51,19 +58,111 @@ const ManualLandmarkModal = ({
     hip_depth: 'Hip D', stomach_depth: 'Stomach D',
   };
 
-  // Convert screen coordinates to image coordinates (accounting for zoom/pan):
-  const screenToImage = (screenX, screenY) => {
+  // Calculate displayed image size accounting for resizeMode="contain":
+  const calcDisplayedImageSize = (containerW, containerH, imgW, imgH) => {
+    if (!containerW || !containerH || !imgW || !imgH) {
+      return { width: containerW || IMAGE_DISPLAY_WIDTH, height: containerH || IMAGE_DISPLAY_HEIGHT };
+    }
+    const containerRatio = containerW / containerH;
+    const imageRatio = imgW / imgH;
+    let displayW, displayH;
+    if (imageRatio > containerRatio) {
+      displayW = containerW;
+      displayH = containerW / imageRatio;
+    } else {
+      displayH = containerH;
+      displayW = containerH * imageRatio;
+    }
+    return { width: displayW, height: displayH };
+  };
+
+  // Get image natural size on load:
+  const handleImageLoad = (e) => {
+    if (!e?.nativeEvent?.source) return;
+    const { width, height } = e.nativeEvent.source;
+    imageNaturalSize.current = { width, height };
+    const container = containerLayout.current;
+    if (container.width > 0 && container.height > 0) {
+      imageDisplayedSize.current = calcDisplayedImageSize(
+        container.width, container.height,
+        width, height
+      );
+    }
+    console.log('[Image] Natural size:', width, height, 'Displayed:', imageDisplayedSize.current);
+  };
+
+  // Get container layout:
+  const handleContainerLayout = (e) => {
+    const { x, y, width, height } = e.nativeEvent.layout;
+    containerLayout.current = { x, y, width, height };
+    if (imageNaturalSize.current.width > 0) {
+      imageDisplayedSize.current = calcDisplayedImageSize(
+        width, height,
+        imageNaturalSize.current.width,
+        imageNaturalSize.current.height
+      );
+    }
+    console.log('[Container] Layout:', { x, y, width, height });
+  };
+
+  // CORRECT coordinate transformation from screen tap to image space:
+  const screenToImageCoords = (tapX, tapY) => {
+    const container = containerLayout.current;
+    const displayed = imageDisplayedSize.current;
+    const currentScale = scaleRef.current;
+    const currentPan = panRef.current;
+
+    // The image is centered in container with contain mode:
+    const imageOffsetX = (container.width - displayed.width) / 2;
+    const imageOffsetY = (container.height - displayed.height) / 2;
+
+    // The transform applies scale from CENTER of container:
+    const centerX = container.width / 2;
+    const centerY = container.height / 2;
+
+    // Reverse the pan offset:
+    const unpannedX = tapX - currentPan.x;
+    const unpannedY = tapY - currentPan.y;
+
+    // Reverse the scale (scale is from center):
+    const unscaledX = centerX + (unpannedX - centerX) / currentScale;
+    const unscaledY = centerY + (unpannedY - centerY) / currentScale;
+
+    // Convert to image coordinate (remove image offset within container):
+    const imgX = unscaledX - imageOffsetX;
+    const imgY = unscaledY - imageOffsetY;
+
+    // Normalize to displayed image bounds:
     return {
-      x: (screenX - panRef.current.x) / scaleRef.current,
-      y: (screenY - panRef.current.y) / scaleRef.current,
+      x: Math.max(0, Math.min(displayed.width, imgX)),
+      y: Math.max(0, Math.min(displayed.height, imgY)),
     };
   };
 
-  // Convert image coordinates back to screen coordinates:
-  const imageToScreen = (imgX, imgY) => {
+  // Reverse transformation for rendering points and lines:
+  const imageCoordsToScreen = (imgX, imgY) => {
+    const container = containerLayout.current;
+    const displayed = imageDisplayedSize.current;
+    const currentScale = scaleRef.current;
+    const currentPan = panRef.current;
+
+    const imageOffsetX = (container.width - displayed.width) / 2;
+    const imageOffsetY = (container.height - displayed.height) / 2;
+    const centerX = container.width / 2;
+    const centerY = container.height / 2;
+
+    // Add image offset:
+    const containerX = imgX + imageOffsetX;
+    const containerY = imgY + imageOffsetY;
+
+    // Apply scale from center:
+    const scaledX = centerX + (containerX - centerX) * currentScale;
+    const scaledY = centerY + (containerY - centerY) * currentScale;
+
+    // Apply pan:
     return {
-      x: imgX * scaleRef.current + panRef.current.x,
-      y: imgY * scaleRef.current + panRef.current.y,
+      x: scaledX + currentPan.x,
+      y: scaledY + currentPan.y,
     };
   };
 
@@ -136,9 +235,11 @@ const ManualLandmarkModal = ({
     if (isZooming || touchCountRef.current > 1) return;
 
     const { locationX, locationY } = evt.nativeEvent;
+    console.log('[Tap] Raw tap location:', locationX, locationY);
 
-    // Convert tap position to image coordinates:
-    const imgCoords = screenToImage(locationX, locationY);
+    // Convert tap position using exact center-scale and pan transformation:
+    const imgCoords = screenToImageCoords(locationX, locationY);
+    console.log('[Tap] Image coords:', imgCoords);
 
     setPoints(prev => {
       const current = prev[selectedMeasurement] || [];
@@ -164,17 +265,17 @@ const ManualLandmarkModal = ({
       },
 
       onPanResponderMove: (evt, gesture) => {
+        // Convert drag delta from screen space to image space:
+        const dxImage = gesture.dx / scaleRef.current;
+        const dyImage = gesture.dy / scaleRef.current;
+
         setPoints(prev => {
           const pts = [...(prev[measurement] || [])];
           if (!pts[index]) return prev;
-
-          // Move in image coordinates:
-          const dxImg = gesture.dx / scaleRef.current;
-          const dyImg = gesture.dy / scaleRef.current;
-
+          const displayed = imageDisplayedSize.current;
           pts[index] = {
-            x: Math.max(0, Math.min(IMAGE_DISPLAY_WIDTH, pts[index].x + dxImg)),
-            y: Math.max(0, Math.min(IMAGE_DISPLAY_HEIGHT, pts[index].y + dyImg)),
+            x: Math.max(0, Math.min(displayed.width, pts[index].x + dxImage)),
+            y: Math.max(0, Math.min(displayed.height, pts[index].y + dyImage)),
           };
           return { ...prev, [measurement]: pts };
         });
@@ -198,8 +299,8 @@ const ManualLandmarkModal = ({
   // Render measurement line between two points:
   const renderLine = (measurement, pts) => {
     if (!pts || pts.length < 2) return null;
-    const p1 = imageToScreen(pts[0].x, pts[0].y);
-    const p2 = imageToScreen(pts[1].x, pts[1].y);
+    const p1 = imageCoordsToScreen(pts[0].x, pts[0].y);
+    const p2 = imageCoordsToScreen(pts[1].x, pts[1].y);
     const dx = p2.x - p1.x;
     const dy = p2.y - p1.y;
     const length = Math.sqrt(dx * dx + dy * dy);
@@ -210,8 +311,9 @@ const ManualLandmarkModal = ({
     return (
       <View key={`line-${measurement}`}
         style={{
-          position: 'absolute', left: p1.x, top: p1.y,
-          width: length, height: 2,
+          position: 'absolute',
+          left: p1.x, top: p1.y - 1,
+          width: length, height: 3,
           backgroundColor: isSelected ? '#00D4AA' : '#A0AEC0',
           transform: [{ rotate: `${angle}deg` }],
           transformOrigin: 'left center',
@@ -220,9 +322,10 @@ const ManualLandmarkModal = ({
         {/* Measurement label at midpoint */}
         <View style={{
           position: 'absolute',
-          left: length / 2 - 25, top: -18,
-          backgroundColor: 'rgba(0,0,0,0.8)',
-          borderRadius: 6, paddingHorizontal: 5, paddingVertical: 2,
+          left: length / 2 - 28, top: -20,
+          backgroundColor: 'rgba(0,0,0,0.85)',
+          borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2,
+          borderWidth: 1, borderColor: '#00D4AA',
         }}>
           <Text style={{ color: '#00D4AA', fontSize: 9, fontWeight: '700' }}>
             {labels[measurement]}: {cm}cm
@@ -234,12 +337,11 @@ const ManualLandmarkModal = ({
 
   // Render draggable landmark point:
   const renderPoint = (measurement, pt, index) => {
-    const screenPos = imageToScreen(pt.x, pt.y);
+    const screenPos = imageCoordsToScreen(pt.x, pt.y);
     const pointResponder = createPointResponder(measurement, index);
     const isSelected = selectedMeasurement === measurement;
     const isDragging = isDraggingPoint?.measurement === measurement
       && isDraggingPoint?.index === index;
-    const pointSize = 28 / scaleRef.current; // Scale point with zoom
 
     return (
       <View
@@ -371,6 +473,7 @@ const ManualLandmarkModal = ({
         {/* Image container with zoom + landmarks */}
         <View
           style={styles.imageContainer}
+          onLayout={handleContainerLayout}
           {...containerPanResponder.panHandlers}>
 
           {/* Tappable area for placing points */}
@@ -381,8 +484,8 @@ const ManualLandmarkModal = ({
             <Image
               source={{ uri: imageUri }}
               style={{
-                width: IMAGE_DISPLAY_WIDTH,
-                height: IMAGE_DISPLAY_HEIGHT,
+                width: '100%',
+                height: '100%',
                 transform: [
                   { scale },
                   { translateX: panOffset.x / scale },
@@ -390,6 +493,7 @@ const ManualLandmarkModal = ({
                 ],
               }}
               resizeMode="contain"
+              onLoad={handleImageLoad}
             />
           </TouchableOpacity>
 

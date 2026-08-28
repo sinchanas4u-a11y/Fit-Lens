@@ -35,6 +35,7 @@ const CameraScreen = ({ navigation }) => {
 
   // Captured Images State
   const [capturedImages, setCapturedImages] = useState({ front: null, side: null });
+  const [previewImages, setPreviewImages] = useState({ front: null, side: null });
   const [isReviewing, setIsReviewing] = useState(false);
   const [userHeight, setUserHeight] = useState('165');
   const [processingManual, setProcessingManual] = useState(false);
@@ -411,6 +412,24 @@ const CameraScreen = ({ navigation }) => {
     }
   }, [currentView, isCameraReady, hasPermission, isReviewing, startAlignmentChecking]);
 
+  // Convert captured image to base64 for reliable RN display fallback
+  const convertToBase64Preview = async (cleanPath, view) => {
+    try {
+      const pathOnly = cleanPath.replace(/^file:\/\//, '');
+      const exists = await RNFS.exists(pathOnly);
+      console.log(`[Preview] ${view} file exists at ${pathOnly}:`, exists);
+      if (!exists) return null;
+      const base64 = await RNFS.readFile(pathOnly, 'base64');
+      const dataUri = `data:image/jpeg;base64,${base64}`;
+      setPreviewImages(prev => ({ ...prev, [view]: dataUri }));
+      console.log(`[Preview] ${view} base64 ready, length:`, dataUri.length);
+      return dataUri;
+    } catch (err) {
+      console.log(`[Preview] ${view} base64 failed:`, err.message);
+      return null;
+    }
+  };
+
   // Store front and side captures separately:
   const executeCapturePhoto = async () => {
     if (isCapturingPhotoRef.current || !cameraRef.current) return;
@@ -426,23 +445,17 @@ const CameraScreen = ({ navigation }) => {
         flash: 'off',
       });
 
-      // CRITICAL — use file:// prefix:
-      const uri = `file://${photo.path}`;
-      console.log(`[Capture] ${currentViewRef.current} photo URI:`, uri);
+      console.log('[Capture] Raw photo path:', photo.path);
+
+      const cleanPath = photo.path.replace(/^file:\/\//, '');
+      const fileUri = `file://${cleanPath}`;
+      console.log('[Capture] Final URI:', fileUri);
 
       if (currentViewRef.current === 'front') {
-        // Store front image:
-        setCapturedImages(prev => {
-          const updated = { ...prev, front: uri };
-          console.log('[Capture] Updated capturedImages:', updated);
-          return updated;
-        });
+        setCapturedImages(prev => ({ ...prev, front: fileUri }));
+        await convertToBase64Preview(cleanPath, 'front');
+        speakInstruction('Front view captured! Now turn 90 degrees to your right.');
 
-        if (isTtsAvailable()) {
-          try { Tts.speak('Front view captured! Now turn 90 degrees to your right.'); } catch {}
-        }
-
-        // Switch to side view after 2 seconds:
         setTimeout(() => {
           isCapturingPhotoRef.current = false;
           isAlignedRef.current = false;
@@ -453,18 +466,10 @@ const CameraScreen = ({ navigation }) => {
         }, 2000);
 
       } else {
-        // Store side image — DIFFERENT from front:
-        setCapturedImages(prev => {
-          const updated = { ...prev, side: uri };
-          console.log('[Capture] Updated capturedImages:', updated);
-          return updated;
-        });
+        setCapturedImages(prev => ({ ...prev, side: fileUri }));
+        await convertToBase64Preview(cleanPath, 'side');
+        speakInstruction('Side view captured! Processing measurements.');
 
-        if (isTtsAvailable()) {
-          try { Tts.speak('Side view captured! Processing measurements.'); } catch {}
-        }
-
-        // Show review screen:
         setTimeout(() => {
           isCapturingPhotoRef.current = false;
           stopCountdown();
@@ -660,14 +665,21 @@ const CameraScreen = ({ navigation }) => {
           {/* Front View Card */}
           <View style={styles.reviewCard}>
             <Text style={styles.cardLabel}>✓ Front View</Text>
-            {capturedImages.front ? (
-              <TouchableOpacity activeOpacity={0.8} onPress={() => { setZoomImageUri(capturedImages.front); setZoomTitle('Front View Photo'); }}>
+            {previewImages.front || capturedImages.front ? (
+              <TouchableOpacity
+                activeOpacity={0.8}
+                style={styles.cardImageContainer}
+                onPress={() => { setZoomImageUri(previewImages.front || capturedImages.front); setZoomTitle('Front View Photo'); }}>
                 <Image
-                  source={{ uri: capturedImages.front }}
+                  source={{ uri: previewImages.front || capturedImages.front }}
                   style={styles.cardImage}
                   resizeMode="cover"
-                  onLoad={() => console.log('[Image] Front loaded')}
-                  onError={(e) => console.log('[Image] Front error:', e.nativeEvent.error)}
+                  onLoadStart={() => console.log('[Image] Front load start')}
+                  onLoad={() => console.log('[Image] Front loaded successfully')}
+                  onError={(e) => {
+                    console.log('[Image] Front FAILED:', e.nativeEvent.error);
+                    console.log('[Image] URI was:', (previewImages.front || capturedImages.front)?.substring(0, 60));
+                  }}
                 />
               </TouchableOpacity>
             ) : (
@@ -679,6 +691,7 @@ const CameraScreen = ({ navigation }) => {
               style={styles.retakeBtn}
               onPress={() => {
                 setCapturedImages(prev => ({ ...prev, front: null }));
+                setPreviewImages(prev => ({ ...prev, front: null }));
                 setIsReviewing(false);
                 setCurrentView('front');
                 currentViewRef.current = 'front';
@@ -694,14 +707,21 @@ const CameraScreen = ({ navigation }) => {
           {/* Side View Card */}
           <View style={styles.reviewCard}>
             <Text style={styles.cardLabel}>✓ Side View</Text>
-            {capturedImages.side ? (
-              <TouchableOpacity activeOpacity={0.8} onPress={() => { setZoomImageUri(capturedImages.side); setZoomTitle('Side View Photo'); }}>
+            {previewImages.side || capturedImages.side ? (
+              <TouchableOpacity
+                activeOpacity={0.8}
+                style={styles.cardImageContainer}
+                onPress={() => { setZoomImageUri(previewImages.side || capturedImages.side); setZoomTitle('Side View Photo'); }}>
                 <Image
-                  source={{ uri: capturedImages.side }}
+                  source={{ uri: previewImages.side || capturedImages.side }}
                   style={styles.cardImage}
                   resizeMode="cover"
-                  onLoad={() => console.log('[Image] Side loaded')}
-                  onError={(e) => console.log('[Image] Side error:', e.nativeEvent.error)}
+                  onLoadStart={() => console.log('[Image] Side load start')}
+                  onLoad={() => console.log('[Image] Side loaded successfully')}
+                  onError={(e) => {
+                    console.log('[Image] Side FAILED:', e.nativeEvent.error);
+                    console.log('[Image] URI was:', (previewImages.side || capturedImages.side)?.substring(0, 60));
+                  }}
                 />
               </TouchableOpacity>
             ) : (
@@ -713,6 +733,7 @@ const CameraScreen = ({ navigation }) => {
               style={styles.retakeBtn}
               onPress={() => {
                 setCapturedImages(prev => ({ ...prev, side: null }));
+                setPreviewImages(prev => ({ ...prev, side: null }));
                 setIsReviewing(false);
                 setCurrentView('side');
                 currentViewRef.current = 'side';
@@ -990,7 +1011,8 @@ const styles = StyleSheet.create({
   reviewGrid: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 24 },
   reviewCard: { width: '48%', backgroundColor: '#1A1F3A', borderRadius: 12, padding: 10, alignItems: 'center' },
   cardLabel: { color: '#00D4AA', fontSize: 14, fontWeight: '700', marginBottom: 8 },
-  cardImage: { width: '100%', height: 180, borderRadius: 8, resizeMode: 'cover' },
+  cardImageContainer: { width: '100%', height: 180, borderRadius: 8, overflow: 'hidden' },
+  cardImage: { width: '100%', height: '100%', borderRadius: 8 },
   missingImage: { width: '100%', height: 180, borderRadius: 8, backgroundColor: '#2D3748', justifyContent: 'center', alignItems: 'center' },
   missingText: { color: '#A0AEC0', fontSize: 12 },
   retakeBtn: { marginTop: 10, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 6 },

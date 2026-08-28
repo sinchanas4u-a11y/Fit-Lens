@@ -8,7 +8,9 @@ import Header from '../../components/common/Header';
 import { Colors } from '../../constants/colors';
 
 const ResetPasswordScreen = ({ route, navigation }) => {
-  const token = route?.params?.token || '';
+  const routeToken = route?.params?.token || '';
+  const [tokenInput, setTokenInput] = useState('');
+  const token = routeToken || tokenInput.trim();
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
