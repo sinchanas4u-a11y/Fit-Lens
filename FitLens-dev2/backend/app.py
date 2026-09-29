@@ -380,6 +380,28 @@ def verify_face():
         return jsonify({'verified': False, 'error': str(e)}), 500
 
 def get_network_frontend_url():
+    # 1. If called within an HTTP request context, prioritize the client's actual Origin or Referer
+    try:
+        from flask import has_request_context
+        if has_request_context():
+            origin = request.headers.get('Origin')
+            if origin and origin.strip():
+                return origin.strip().rstrip('/')
+            referer = request.headers.get('Referer')
+            if referer and referer.strip():
+                from urllib.parse import urlparse
+                p = urlparse(referer.strip())
+                if p.scheme and p.netloc:
+                    return f"{p.scheme}://{p.netloc}".rstrip('/')
+    except Exception:
+        pass
+
+    # 2. Check configured environment variable
+    env_url = (os.getenv('FRONTEND_URL') or '').strip().rstrip('/')
+    if env_url:
+        return env_url
+
+    # 3. Dynamic fallback to machine's active local IP
     local_ip = '127.0.0.1'
     try:
         import socket
@@ -389,10 +411,6 @@ def get_network_frontend_url():
         s.close()
     except Exception:
         pass
-
-    env_url = (os.getenv('FRONTEND_URL') or '').strip().rstrip('/')
-    if env_url and 'localhost' not in env_url and '127.0.0.1' not in env_url:
-        return env_url
 
     return f"http://{local_ip}:3000"
 

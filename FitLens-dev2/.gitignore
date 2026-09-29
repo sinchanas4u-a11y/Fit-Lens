@@ -201,6 +201,11 @@ FitLens-dev2/models/*.pkl
 
 # Backend measurements and results
 backend/measurement_results/
+backend/measurement_images/
+backend/debug_frame.jpg
+data/images/
+data/
+temp_test.jpg
 results/
 *.jsonl
 *.xml
