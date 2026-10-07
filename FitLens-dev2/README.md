@@ -279,9 +279,30 @@ The FitLens AI system has been validated against manual tape measurements in rea
 
 ---
 
-## 🛡️ Authentication and Authorization
+## 🛡️ Authentication, JWT Security & Secret Management
 
-The current version runs locally and does not implement a login system, prioritizing speed of use during evaluation. Production deployment would require an OAuth2 or JWT-based auth layer — noted as a planned enhancement, not an oversight.
+FitLens utilizes cryptographic JSON Web Tokens (JWT) for user and profile session authentication across HTTP REST endpoints and live Socket.IO camera streams.
+
+### 🔑 JWT_SECRET_KEY Configuration & Validation
+
+The application requires `JWT_SECRET_KEY` to be configured via environment variables or a local `.env` file.
+
+1. **Strict Startup Validation**:
+   - `JWT_SECRET_KEY` must exist in all environments (development, staging, testing, and production).
+   - `JWT_SECRET_KEY` must be at least **32 bytes (256 bits)** when UTF-8 encoded, conforming to RFC 7518 Section 3.2 for HMAC-SHA256 signatures.
+   - If missing or shorter than 32 bytes, the backend fails fast at startup with a `RuntimeError`. The backend never uses insecure hard-coded fallback secrets.
+
+2. **Cryptographic Secret Generation Command**:
+   To generate a secure 48-byte URL-safe secret token (64 characters / bytes), run:
+   ```powershell
+   .\venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(48))"
+   ```
+
+3. **Key Rotation & Invalidation Policy**:
+   - **Token Invalidation**: Changing or rotating `JWT_SECRET_KEY` immediately invalidates all previously issued JWT tokens, as signatures will no longer verify.
+   - **Re-Authentication Required**: All users and mobile app sessions must log in again following a key rotation.
+   - **Secret Protection**: Never commit, log, print, or expose `JWT_SECRET_KEY` or `.env` files in source control, log streams, or issue trackers.
+   - **Environment Separation**: Maintain distinct, isolated keys for development, testing, and production.
 
 ---
 

@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { measurementApi } from '../api/measurementApi';
 import { useMeasurementStore } from '../store/measurementStore';
+import { useProfileStore } from '../store/profileStore';
 
 export const useMeasurements = () => {
   const [loading, setLoading] = useState(false);
+  const activeProfile = useProfileStore((state) => state.activeProfile);
   const {
     currentResults,
     history,
@@ -16,7 +18,7 @@ export const useMeasurements = () => {
   const fetchHistory = async () => {
     setLoading(true);
     try {
-      const res = await measurementApi.getHistory();
+      const res = await measurementApi.getHistory(activeProfile?.id);
       if (res.data.history) {
         setHistory(res.data.history);
       }
@@ -28,9 +30,11 @@ export const useMeasurements = () => {
 
   const fetchLatest = async () => {
     try {
-      const res = await measurementApi.getLatest();
+      const res = await measurementApi.getLatest(activeProfile?.id);
       if (res.data.latest) {
         setLatest(res.data.latest);
+      } else {
+        setLatest(null);
       }
     } catch (e) {}
   };

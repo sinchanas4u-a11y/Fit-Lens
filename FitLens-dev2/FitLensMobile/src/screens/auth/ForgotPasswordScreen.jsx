@@ -42,13 +42,19 @@ const ForgotPasswordScreen = ({ navigation }) => {
           {sent ? (
             <View style={styles.sentBox}>
               <Text style={styles.sentText}>
-                If an account exists for this email address, we've sent a password reset link. Please check your inbox.
+                If an account exists for this email address, we've sent a password reset link and code to your inbox.
               </Text>
               <Button
-                title="Back to Login"
-                onPress={() => navigation.navigate('Login')}
+                title="Enter Reset Code in App"
+                onPress={() => navigation.navigate('ResetPassword', { email })}
                 style={{ marginTop: 20 }}
               />
+              <TouchableOpacity
+                onPress={() => navigation.navigate('Login')}
+                style={{ marginTop: 16 }}
+              >
+                <Text style={{ color: Colors.textSecondary, fontSize: 14 }}>Back to Login</Text>
+              </TouchableOpacity>
             </View>
           ) : (
             <>
@@ -65,6 +71,15 @@ const ForgotPasswordScreen = ({ navigation }) => {
                 onPress={handleSend}
                 loading={loading}
               />
+
+              <TouchableOpacity
+                onPress={() => navigation.navigate('ResetPassword')}
+                style={{ marginTop: 18 }}
+              >
+                <Text style={{ color: Colors.accent, fontSize: 13, textAlign: 'center' }}>
+                  Already have a reset code? Tap here
+                </Text>
+              </TouchableOpacity>
             </>
           )}
         </View>

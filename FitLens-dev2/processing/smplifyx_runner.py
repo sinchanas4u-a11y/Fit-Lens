@@ -5,12 +5,14 @@ import subprocess
 import time
 
 
-BASE_DIR = r"C:\Users\sinch\Desktop\FitLens-dev3\FitLens-dev2"
-SMPLIFYX_DIR = r"C:\Users\sinch\Desktop\FitLens-dev3\FitLens-dev2\smplify-x"
-DATA_DIR = r"C:\Users\sinch\Desktop\FitLens-dev3\FitLens-dev2\data"
-OUTPUT_DIR = r"C:\Users\sinch\Desktop\FitLens-dev3\FitLens-dev2\output"
-CONFIG_PATH = r"C:\Users\sinch\Desktop\FitLens-dev3\FitLens-dev2\smplify-x\configs\fit_smplx.yaml"
-VENV_PYTHON = os.path.join(BASE_DIR, ".venv", "Scripts", "python.exe")
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SMPLIFYX_DIR = os.path.join(BASE_DIR, "smplify-x")
+DATA_DIR = os.path.join(BASE_DIR, "data")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+CONFIG_PATH = os.path.join(SMPLIFYX_DIR, "configs", "fit_smplx.yaml")
+VENV_PYTHON = os.path.join(BASE_DIR, "venv", "Scripts", "python.exe")
+if not os.path.exists(VENV_PYTHON):
+    VENV_PYTHON = os.path.join(BASE_DIR, ".venv", "Scripts", "python.exe")
 
 
 def _python_executable() -> str:
@@ -60,7 +62,11 @@ def _ensure_keypoints(timeout_seconds: int) -> None:
     )
 
 
-from make_keypoints import generate_keypoints_for_smplifyx
+try:
+    from make_keypoints import generate_keypoints_for_smplifyx
+except Exception as e:
+    print(f"Warning: make_keypoints import failed: {e}")
+    generate_keypoints_for_smplifyx = None
 
 def run_smplifyx(
     front_image_path: str,
@@ -75,11 +81,14 @@ def run_smplifyx(
         print("Generating keypoints...")
         kp_dir = os.path.join(DATA_DIR, 'keypoints')
 
-        kp_ok = generate_keypoints_for_smplifyx(
-            front_image_path = os.path.join(DATA_DIR, 'images', 'front.jpg'),
-            side_image_path  = os.path.join(DATA_DIR, 'images', 'side.jpg') if side_image_path else None,
-            keypoints_dir    = kp_dir
-        )
+        if generate_keypoints_for_smplifyx is not None:
+            kp_ok = generate_keypoints_for_smplifyx(
+                front_image_path = os.path.join(DATA_DIR, 'images', 'front.jpg'),
+                side_image_path  = os.path.join(DATA_DIR, 'images', 'side.jpg') if side_image_path else None,
+                keypoints_dir    = kp_dir
+            )
+        else:
+            kp_ok = False
 
         if not kp_ok:
             print("Keypoint generation failed")

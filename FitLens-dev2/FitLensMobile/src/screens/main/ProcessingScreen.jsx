@@ -6,21 +6,29 @@ import RNFS from 'react-native-fs';
 import axiosInstance from '../../api/axiosInstance';
 import { useMeasurementStore } from '../../store/measurementStore';
 import { useAuthStore } from '../../store/authStore';
+import { useProfileStore } from '../../store/profileStore';
 import { Colors } from '../../constants/colors';
 
 const ProcessingScreen = ({ route, navigation }) => {
-  const { frontImageUri, sideImageUri, userHeightCm, frontB64, sideB64, heightCm } = route.params;
+  const { frontImageUri, sideImageUri, userHeightCm, frontB64, sideB64, heightCm, profileId } = route.params;
   const targetHeight = userHeightCm || parseFloat(heightCm) || 165;
   const [progress, setProgress] = useState(0.1);
   const [stepText, setStepText] = useState('Converting images...');
-  const { setCurrentResults } = useMeasurementStore();
+  const { setCurrentResults, setProcessing } = useMeasurementStore();
   const logout = useAuthStore((state) => state.logout);
+  const activeProfile = useProfileStore((state) => state.activeProfile);
+  const targetProfileId = profileId || activeProfile?.id;
 
   useEffect(() => {
     processImages();
   }, []);
 
   const verifyFaceMatch = async (frontBase64) => {
+    // If scanning a non-owner member profile (e.g. spouse, child), skip owner face check
+    if (activeProfile && !activeProfile.is_owner) {
+      return true;
+    }
+
     try {
       const res = await axiosInstance.post('/api/auth/verify-face', {
         front_image: frontBase64,
@@ -46,6 +54,7 @@ const ProcessingScreen = ({ route, navigation }) => {
 
   const processWithoutSaving = async (frontBase64) => {
     try {
+      setProcessing(true);
       let sideBase64 = sideB64;
       if (!sideBase64 && sideImageUri) {
         const sideRaw = await RNFS.readFile(sideImageUri.replace('file://', ''), 'base64');
@@ -59,6 +68,7 @@ const ProcessingScreen = ({ route, navigation }) => {
         front_image: frontBase64,
         side_image: sideBase64,
         user_height: targetHeight,
+        profile_id: targetProfileId,
       }, { timeout: 300000 });
 
       if (res.data?.success) {
@@ -73,11 +83,14 @@ const ProcessingScreen = ({ route, navigation }) => {
         err.response?.data?.error || err.message || 'Failed to generate measurements',
         [{ text: 'Go Back', onPress: () => navigation.goBack() }]
       );
+    } finally {
+      setProcessing(false);
     }
   };
 
   const processImages = async () => {
     try {
+      setProcessing(true);
       setStepText('Converting images...');
       setProgress(0.2);
 
@@ -110,6 +123,7 @@ const ProcessingScreen = ({ route, navigation }) => {
         front_image: frontBase64,
         side_image: sideBase64,
         user_height: targetHeight,
+        profile_id: targetProfileId,
       }, {
         timeout: 300000, // 5 minutes for processing
       });
@@ -126,6 +140,7 @@ const ProcessingScreen = ({ route, navigation }) => {
             measurements,
             user_height: targetHeight,
             source: 'upload',
+            profile_id: targetProfileId,
           });
         } catch (saveErr) {
           console.log('Save error (non-critical):', saveErr);
@@ -144,6 +159,8 @@ const ProcessingScreen = ({ route, navigation }) => {
         err.response?.data?.error || err.message || 'Failed to generate measurements',
         [{ text: 'Go Back', onPress: () => navigation.goBack() }]
       );
+    } finally {
+      setProcessing(false);
     }
   };
 

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { login, register, saveToken, forgotPassword } from '../services/authService';
+import ClaimInviteModal from './ClaimInviteModal';
 
 export default function LoginScreen({ onLoginSuccess }) {
   const [isRegister, setIsRegister] = useState(false);
@@ -15,6 +16,10 @@ export default function LoginScreen({ onLoginSuccess }) {
   const [forgotSent, setForgotSent] = useState(false);
   const [forgotLoading, setForgotLoading] = useState(false);
   const [resetLink, setResetLink] = useState('');
+
+  // Claim invite state
+  const [showClaimInvite, setShowClaimInvite] = useState(false);
+  const [memberEmail, setMemberEmail] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -39,7 +44,11 @@ export default function LoginScreen({ onLoginSuccess }) {
         if (res.user) {
           localStorage.setItem('fitlens_user', JSON.stringify(res.user));
         }
-        onLoginSuccess(res.user);
+        const cleanedMemberEmail = memberEmail.trim().toLowerCase();
+        if (cleanedMemberEmail) {
+          localStorage.setItem('fitlens_member_email', cleanedMemberEmail);
+        }
+        onLoginSuccess(res.user, cleanedMemberEmail);
       } else {
         setError(res.error || 'Authentication failed');
       }
@@ -222,6 +231,34 @@ export default function LoginScreen({ onLoginSuccess }) {
             />
           </div>
 
+          {!isRegister && (
+            <div>
+              <label style={{ display: 'block', fontSize: '13px', color: '#a0aec0', marginBottom: '6px' }}>
+                Invited Member Email <span style={{ fontSize: '11px', color: '#718096' }}>(Optional)</span>
+              </label>
+              <input
+                type="email"
+                value={memberEmail}
+                onChange={(e) => setMemberEmail(e.target.value)}
+                placeholder="e.g. sinchanas3u@gmail.com"
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  backgroundColor: '#0a0e27',
+                  border: '1px dashed #2D3561',
+                  borderRadius: '10px',
+                  color: '#ffffff',
+                  fontSize: '14px',
+                  outline: 'none',
+                  boxSizing: 'border-box'
+                }}
+              />
+              <span style={{ fontSize: '11px', color: '#718096', marginTop: '4px', display: 'block' }}>
+                If logging into this family account as an invited member, enter your email to automatically unlock your profile.
+              </span>
+            </div>
+          )}
+
           <button
             type="submit"
             disabled={loading}
@@ -260,6 +297,22 @@ export default function LoginScreen({ onLoginSuccess }) {
           >
             {isRegister ? 'Already have an account? Sign In' : "Don't have an account? Register"}
           </button>
+
+          <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: '1px solid #2D3561' }}>
+            <button
+              type="button"
+              onClick={() => setShowClaimInvite(true)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: '#a0aec0',
+                fontSize: '13px',
+                cursor: 'pointer'
+              }}
+            >
+              🎟️ Have an invitation code? <span style={{ color: '#00D4AA', textDecoration: 'underline' }}>Join Account</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -376,6 +429,13 @@ export default function LoginScreen({ onLoginSuccess }) {
             )}
           </div>
         </div>
+      )}
+
+      {/* Claim Invite Modal */}
+      {showClaimInvite && (
+        <ClaimInviteModal
+          onClose={() => setShowClaimInvite(false)}
+        />
       )}
     </div>
   );

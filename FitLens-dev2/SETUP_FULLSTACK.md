@@ -234,10 +234,16 @@ CORS(app, origins=['https://yourdomain.com'])
 socketio.run(app, ssl_context='adhoc')
 ```
 
-3. **Authentication**: Add user authentication
-```python
-from flask_jwt_extended import JWTManager
+3. **Authentication & JWT Security**:
+```bash
+# Generate a secure 32+ byte cryptographic secret
+.\venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(48))"
+# Set in .env or environment:
+JWT_SECRET_KEY=your_generated_secret_key_at_least_32_bytes
 ```
+- Changing `JWT_SECRET_KEY` invalidates existing user tokens; users must log in again.
+- Never commit secrets to Git.
+
 
 4. **Rate Limiting**: Prevent abuse
 ```python

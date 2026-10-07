@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Webcam from 'react-webcam';
 import io from 'socket.io-client';
 import axios from 'axios';
+import { getProfileSessionToken, getToken } from '../services/authService';
 import ManualLandmarkMarker from './ManualLandmarkMarker';
 import './LiveCamera.css';
 
@@ -72,7 +73,7 @@ const SilhouetteOverlay = ({ view, alignment, isAligned }) => (
     </div>
 );
 
-const LiveCamera = () => {
+const LiveCamera = ({ user, activeProfile }) => {
     const emptyLandmarksRef = useRef([]);
     const webcamRef = useRef(null);
     const [socket, setSocket] = useState(null);
@@ -93,9 +94,15 @@ const LiveCamera = () => {
     const [processing, setProcessing] = useState(false);
     const [results, setResults] = useState(null);
     const [isEditingMarkings, setIsEditingMarkings] = useState(false);
-    const [userHeight, setUserHeight] = useState('');
+    const [userHeight, setUserHeight] = useState(activeProfile?.default_height_cm ? String(activeProfile.default_height_cm) : '');
     const [heightUnit, setHeightUnit] = useState('cm');
     const [sessionStarted, setSessionStarted] = useState(false);
+
+    useEffect(() => {
+        if (activeProfile?.default_height_cm) {
+            setUserHeight(String(activeProfile.default_height_cm));
+        }
+    }, [activeProfile?.id, activeProfile?.default_height_cm]);
 
     // Selection & workflow state
     const [awaitingSelection, setAwaitingSelection] = useState(false);
@@ -408,16 +415,18 @@ const LiveCamera = () => {
         if (webcamRef.current && socketRef.current && !isCapturingRef.current && !isProcessingFrameRef.current) {
             const imageSrc = webcamRef.current.getScreenshot();
             if (imageSrc) {
+                const activePid = activeProfile?.profile_id || activeProfile?.id;
                 isProcessingFrameRef.current = true; // Block sending next frame until backend responds
                 socketRef.current.emit('process_frame', {
                     image: imageSrc,
                     view: currentViewRef.current,
                     user_height: parseFloat(userHeightRef.current),
-                    height_unit: heightUnitRef.current
+                    height_unit: heightUnitRef.current,
+                    profile_id: activePid ? String(activePid) : undefined
                 });
             }
         }
-    }, []);
+    }, [activeProfile?.id, activeProfile?.profile_id]);
 
     // Frame processing loop (5 FPS)
     useEffect(() => {
@@ -458,6 +467,15 @@ const LiveCamera = () => {
         clearAllTimers();
         if (socket) {
             socket.emit('reset_session');
+            const token = getProfileSessionToken() || getToken();
+            const activePid = activeProfile?.profile_id || activeProfile?.id;
+            socket.emit('start_measurement_session', {
+                token: token,
+                profile_session_token: token,
+                profile_id: activePid ? String(activePid) : undefined,
+                user_height: parseFloat(userHeightRef.current),
+                height_unit: heightUnitRef.current
+            });
         }
         setCurrentView('front');
         setCaptureStep('front');
@@ -574,7 +592,8 @@ const LiveCamera = () => {
                         front_image: frontCaptureUrl || capturedImages['front'],
                         side_image: sideCaptureUrl || capturedImages['side'],
                         user_height: parseFloat(userHeight),
-                        height_unit: heightUnit
+                        height_unit: heightUnit,
+                        profile_id: activeProfile?.id || null
                     });
                     if (resp.data && resp.data.results) {
                         setResults(resp.data);
@@ -598,7 +617,8 @@ const LiveCamera = () => {
             image: imgUrl,
             type: 'auto',
             user_height: parseFloat(userHeight),
-            height_unit: heightUnit
+            height_unit: heightUnit,
+            profile_id: activeProfile?.id || null
         });
     };
 

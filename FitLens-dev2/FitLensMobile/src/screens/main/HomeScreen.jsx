@@ -3,6 +3,7 @@ import { View, Text, ScrollView, TouchableOpacity, StyleSheet, StatusBar, Image 
 import LinearGradient from 'react-native-linear-gradient';
 import { useAuthStore } from '../../store/authStore';
 import { useMeasurementStore } from '../../store/measurementStore';
+import { useProfileStore } from '../../store/profileStore';
 import { measurementApi } from '../../api/measurementApi';
 import { Colors } from '../../constants/colors';
 
@@ -11,17 +12,34 @@ const brandLogo = require('../../assets/logo.png');
 const HomeScreen = ({ navigation }) => {
   const { user } = useAuthStore();
   const { latestMeasurement, setLatest } = useMeasurementStore();
+  const { activeProfile, fetchProfiles } = useProfileStore();
 
   useEffect(() => {
-    fetchLatest();
+    if (!activeProfile) {
+      fetchProfiles();
+    }
   }, []);
+
+  useEffect(() => {
+    if (activeProfile?.id) {
+      fetchLatest();
+    }
+  }, [activeProfile?.id]);
 
   const fetchLatest = async () => {
     try {
-      const res = await measurementApi.getLatest();
-      if (res.data.latest) setLatest(res.data.latest);
-    } catch {}
+      const res = await measurementApi.getLatest(activeProfile?.id);
+      if (res.data?.latest) {
+        setLatest(res.data.latest);
+      } else {
+        setLatest(null);
+      }
+    } catch {
+      setLatest(null);
+    }
   };
+
+  const isOwner = Boolean(activeProfile?.is_owner || activeProfile?.profile_type === 'owner');
 
   return (
     <LinearGradient colors={['#0A0E27', '#1A1F3A', '#0D1B2A']} style={styles.container}>
@@ -40,6 +58,30 @@ const HomeScreen = ({ navigation }) => {
           <TouchableOpacity onPress={() => navigation.navigate('Settings')}>
             <Text style={{ fontSize: 28 }}>⚙️</Text>
           </TouchableOpacity>
+        </View>
+
+        {/* Active Profile Chip */}
+        <View style={styles.profileChipCard}>
+          <View style={styles.profileAvatar}>
+            <Text style={styles.profileAvatarText}>
+              {(activeProfile?.name || 'U').charAt(0).toUpperCase()}
+            </Text>
+          </View>
+          <View style={{ flex: 1, marginLeft: 12 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={styles.profileChipName}>{activeProfile?.name || 'Active Profile'}</Text>
+              <View style={styles.profileChipTag}>
+                <Text style={styles.profileChipTagText}>
+                  {activeProfile?.is_owner
+                    ? 'Owner'
+                    : (activeProfile?.relationship || 'Member')}
+                </Text>
+              </View>
+            </View>
+            <Text style={styles.profileChipSub}>
+              Height: {activeProfile?.default_height_cm || 170} cm
+            </Text>
+          </View>
         </View>
 
         {/* Hero Card */}
@@ -133,6 +175,63 @@ const styles = StyleSheet.create({
   },
   welcome: { color: Colors.textSecondary, fontSize: 14 },
   name: { color: Colors.textPrimary, fontSize: 24, fontWeight: '700' },
+  profileChipCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1E294A',
+    borderRadius: 14,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: Colors.accent,
+    marginBottom: 20,
+  },
+  profileAvatar: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: Colors.accent,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  profileAvatarText: {
+    color: Colors.primary,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  profileChipName: {
+    color: Colors.textPrimary,
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  profileChipTag: {
+    backgroundColor: 'rgba(0, 212, 170, 0.2)',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 6,
+  },
+  profileChipTagText: {
+    color: Colors.accent,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  profileChipSub: {
+    color: Colors.textSecondary,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  switchPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    backgroundColor: Colors.secondary,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  switchPillText: {
+    color: Colors.accent,
+    fontSize: 12,
+    fontWeight: '700',
+  },
   heroCard: {
     backgroundColor: Colors.cardBg,
     borderRadius: 20,

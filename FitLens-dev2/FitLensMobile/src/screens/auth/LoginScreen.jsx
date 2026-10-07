@@ -85,6 +85,15 @@ const LoginScreen = ({ navigation }) => {
               <Text style={{ color: Colors.accent }}>Register</Text>
             </Text>
           </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={() => navigation.navigate('JoinAccount')}
+            style={styles.joinInvite}>
+            <Text style={styles.joinInviteText}>
+              🎟️ Have an invite code?{' '}
+              <Text style={{ color: Colors.accentBlue, fontWeight: '700' }}>Join Account</Text>
+            </Text>
+          </TouchableOpacity>
         </View>
       </ScrollView>
     </LinearGradient>
@@ -107,6 +116,14 @@ const styles = StyleSheet.create({
   forgotText: { color: Colors.accent, fontSize: 13 },
   register: { marginTop: 16, alignItems: 'center' },
   registerText: { color: Colors.textSecondary, fontSize: 14 },
+  joinInvite: {
+    marginTop: 18,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+    alignItems: 'center',
+  },
+  joinInviteText: { color: Colors.textSecondary, fontSize: 13 },
 });
 
 export default LoginScreen;

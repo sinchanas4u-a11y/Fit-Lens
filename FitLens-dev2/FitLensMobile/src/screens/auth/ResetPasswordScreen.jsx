@@ -16,6 +16,10 @@ const ResetPasswordScreen = ({ route, navigation }) => {
   const [loading, setLoading] = useState(false);
 
   const handleReset = async () => {
+    if (!token) {
+      Alert.alert('Error', 'Please enter or paste the reset code sent to your email');
+      return;
+    }
     if (!newPassword || newPassword.length < 8) {
       Alert.alert('Error', 'Password must be at least 8 characters');
       return;
@@ -47,7 +51,22 @@ const ResetPasswordScreen = ({ route, navigation }) => {
         <View style={styles.card}>
           <Text style={styles.icon}>🔑</Text>
           <Text style={styles.title}>Create New Password</Text>
-          <Text style={styles.subtitle}>Enter your new password below to reset your account credentials.</Text>
+          <Text style={styles.subtitle}>
+            {routeToken
+              ? 'Enter your new password below to reset your account credentials.'
+              : 'Enter the reset code sent to your email and create a new password.'}
+          </Text>
+
+          {!routeToken && (
+            <Input
+              label="Reset Code / Token"
+              placeholder="Paste code from email"
+              value={tokenInput}
+              onChangeText={setTokenInput}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+          )}
 
           <Input
             label="New Password"

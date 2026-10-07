@@ -19,8 +19,11 @@ import { Config } from '../../constants/config';
 import ManualLandmarkModal from '../../components/measurement/ManualLandmarkModal';
 import ZoomableImageModal from '../../components/common/ZoomableImageModal';
 import { measurementApi } from '../../api/measurementApi';
+import { useProfileStore } from '../../store/profileStore';
+import { useAuthStore } from '../../store/authStore';
 
 const CameraScreen = ({ navigation }) => {
+  const activeProfile = useProfileStore((state) => state.activeProfile);
   const [hasPermission, setHasPermission] = useState(false);
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
@@ -37,8 +40,24 @@ const CameraScreen = ({ navigation }) => {
   const [capturedImages, setCapturedImages] = useState({ front: null, side: null });
   const [previewImages, setPreviewImages] = useState({ front: null, side: null });
   const [isReviewing, setIsReviewing] = useState(false);
-  const [userHeight, setUserHeight] = useState('165');
+  const [userHeight, setUserHeight] = useState(activeProfile?.default_height_cm ? String(activeProfile.default_height_cm) : '170');
   const [processingManual, setProcessingManual] = useState(false);
+
+  // Guard: ensure profile is selected
+  useEffect(() => {
+    if (!useProfileStore.getState().activeProfile) {
+      Alert.alert(
+        'Profile Required',
+        'Select a FitLens profile before starting measurement.',
+        [
+          {
+            text: 'Select Profile',
+            onPress: () => navigation.navigate('ProfileSelection'),
+          },
+        ]
+      );
+    }
+  }, []);
 
   // Zoom modal state
   const [zoomImageUri, setZoomImageUri] = useState(null);
@@ -181,6 +200,29 @@ const CameraScreen = ({ navigation }) => {
         console.log('✅ Socket connected:', socket.id);
         setIsConnected(true);
         isProcessingFrameRef.current = false;
+
+        const token = useAuthStore.getState().token;
+        const profile = useProfileStore.getState().activeProfile;
+        if (profile) {
+          socket.emit('start_measurement_session', {
+            token,
+            profile_id: profile.id,
+            height_cm: parseFloat(userHeight) || profile.default_height_cm || 170.0,
+          });
+        }
+      });
+
+      socket.on('session_started', (sess) => {
+        console.log('✅ Measurement session started for profile:', sess.profile_name, sess.profile_id);
+      });
+
+      socket.on('error', (err) => {
+        console.log('❌ Socket server error:', err);
+        if (err?.error?.includes('Select a FitLens profile')) {
+          Alert.alert('Profile Required', err.error, [
+            { text: 'Select Profile', onPress: () => navigation.navigate('ProfileSelection') },
+          ]);
+        }
       });
 
       socket.on('disconnect', (reason) => {
@@ -541,7 +583,8 @@ const CameraScreen = ({ navigation }) => {
         sideImageUri: capturedImages.side,
         frontBase64,
         sideBase64,
-        userHeightCm: parseFloat(userHeight) || 165,
+        userHeightCm: parseFloat(userHeight) || activeProfile?.default_height_cm || 165,
+        profileId: activeProfile?.id,
       });
     } catch (err) {
       console.log('[Process] Conversion error:', err.message);
@@ -604,11 +647,12 @@ const CameraScreen = ({ navigation }) => {
         : null;
 
       const requestPayload = {
-        user_height: parseFloat(userHeight) || 165,
+        user_height: parseFloat(userHeight) || activeProfile?.default_height_cm || 165,
         front_landmarks: finalLandmarks.front || null,
         side_landmarks: finalLandmarks.side || null,
         front_image: frontB64,
         side_image: sideB64,
+        profile_id: activeProfile?.id,
       };
 
       const res = await measurementApi.processManual(requestPayload);

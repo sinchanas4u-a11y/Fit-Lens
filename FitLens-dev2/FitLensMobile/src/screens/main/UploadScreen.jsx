@@ -11,13 +11,17 @@ import { cameraService } from '../../services/cameraService';
 import { Config } from '../../constants/config';
 import { Colors } from '../../constants/colors';
 import { useAuthStore } from '../../store/authStore';
+import { useProfileStore } from '../../store/profileStore';
 import { uriToBase64 } from '../../utils/base64Utils';
 import { measurementApi } from '../../api/measurementApi';
 
 const UploadScreen = ({ navigation }) => {
+  const activeProfile = useProfileStore((state) => state.activeProfile);
   const [frontPhoto, setFrontPhoto] = useState(null);
   const [sidePhoto, setSidePhoto] = useState(null);
-  const [userHeight, setUserHeight] = useState('165');
+  const [userHeight, setUserHeight] = useState(
+    activeProfile?.default_height_cm ? String(activeProfile.default_height_cm) : '170'
+  );
   const [validating, setValidating] = useState(false);
   const [processingManual, setProcessingManual] = useState(false);
 
@@ -110,7 +114,8 @@ const UploadScreen = ({ navigation }) => {
     navigation.navigate('Processing', {
       frontImageUri: frontPhoto.uri,
       sideImageUri: sidePhoto.uri,
-      userHeightCm: parseFloat(userHeight) || 165,
+      userHeightCm: parseFloat(userHeight) || activeProfile?.default_height_cm || 165,
+      profileId: activeProfile?.id,
     });
   };
 
@@ -169,11 +174,12 @@ const UploadScreen = ({ navigation }) => {
       const sideB64 = sidePhoto?.uri ? await uriToBase64(sidePhoto.uri) : null;
 
       const requestPayload = {
-        user_height: parseFloat(userHeight) || 165,
+        user_height: parseFloat(userHeight) || activeProfile?.default_height_cm || 165,
         front_landmarks: finalLandmarks.front || null,
         side_landmarks: finalLandmarks.side || null,
         front_image: frontB64,
         side_image: sideB64,
+        profile_id: activeProfile?.id,
       };
 
       const res = await measurementApi.processManual(requestPayload);

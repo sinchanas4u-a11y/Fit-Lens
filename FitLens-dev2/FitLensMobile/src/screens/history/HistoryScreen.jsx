@@ -5,14 +5,16 @@ import Header from '../../components/common/Header';
 import MeasurementCard from '../../components/measurement/MeasurementCard';
 import Loader from '../../components/common/Loader';
 import { useMeasurements } from '../../hooks/useMeasurements';
+import { useProfileStore } from '../../store/profileStore';
 import { Colors } from '../../constants/colors';
 
 const HistoryScreen = ({ navigation }) => {
   const { history, loading, fetchHistory, deleteScan } = useMeasurements();
+  const activeProfile = useProfileStore((state) => state.activeProfile);
 
   useEffect(() => {
     fetchHistory();
-  }, []);
+  }, [activeProfile?.id]);
 
   const handleDelete = (analysisId) => {
     Alert.alert('Confirm Delete', 'Are you sure you want to delete this scan from history?', [
@@ -33,7 +35,9 @@ const HistoryScreen = ({ navigation }) => {
 
   return (
     <LinearGradient colors={['#0A0E27', '#1A1F3A', '#0D1B2A']} style={styles.container}>
-      <Header title="Scan History" />
+      <Header
+        title={activeProfile?.name ? `${activeProfile.name}'s Scans` : 'Scan History'}
+      />
 
       {loading && history.length === 0 ? (
         <Loader message="Loading your scan history..." />

@@ -1,4 +1,10 @@
-import mediapipe as mp
+try:
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = True
+except Exception as e:
+    print(f"Error importing MediaPipe in make_keypoints: {e}")
+    mp = None
+    MEDIAPIPE_AVAILABLE = False
 import cv2
 import json
 import numpy as np
@@ -49,6 +55,10 @@ def mediapipe_to_openpose(
 
   h, w = image.shape[:2]
   rgb   = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+  if not MEDIAPIPE_AVAILABLE or mp is None:
+    print("[WARN] MediaPipe is not available. Skipping OpenPose keypoints.")
+    return False
 
   # Run MediaPipe
   mp_pose = mp.solutions.pose

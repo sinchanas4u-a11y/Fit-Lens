@@ -843,45 +843,43 @@ class MeshCircumferenceExtractor:
     @classmethod
     def from_latest_mesh(
         cls,
-        generated_meshes_dir: str,
-        user_height_cm:       float
+        measurement_dir: str,
+        user_height_cm:  float
     ):
         """
-        Load most recent generated mesh.
-        Searches backend/generated_meshes/
-        for most recently created .obj file.
+        Load generated mesh from an isolated measurement folder:
+        accounts/{account_user_id}/profiles/{profile_id}/measurements/{analysis_id}/
+        
+        Active processing MUST NOT rely on shared or global generated_meshes directories.
         """
-        # Search for all .obj files
+        if not measurement_dir or not os.path.exists(measurement_dir):
+            raise FileNotFoundError(
+                f"Measurement directory not found: {measurement_dir}"
+            )
+
+        # 1. Primary isolated candidate: body_mesh.obj or body_mesh.glb
+        for candidate_name in ['body_mesh.obj', 'body_mesh.glb', '000.obj']:
+            candidate_path = os.path.join(measurement_dir, candidate_name)
+            if os.path.isfile(candidate_path):
+                print(f"Using isolated profile mesh: {candidate_path}")
+                return cls(candidate_path, user_height_cm)
+
+        # 2. Search within the isolated measurement directory
         pattern = os.path.join(
-            generated_meshes_dir,
+            measurement_dir,
             '**', '*.obj'
         )
-        files = glob.glob(
-            pattern, recursive=True
-        )
-
-        # Also check SMPLify-X output
-        smplifyx_pattern = os.path.join(
-            os.path.dirname(
-                os.path.dirname(
-                    generated_meshes_dir
-                )
-            ),
-            'output', 'meshes',
-            'front', '000.obj'
-        )
-        if os.path.exists(smplifyx_pattern):
-            files.append(smplifyx_pattern)
+        files = glob.glob(pattern, recursive=True)
 
         if not files:
             raise FileNotFoundError(
-                "No mesh files found"
+                f"No mesh files found in measurement directory: {measurement_dir}"
             )
 
-        # Use most recently modified
+        # Use most recently modified within this isolated directory
         latest = max(
             files, key=os.path.getmtime
         )
-        print(f"Using mesh: {latest}")
+        print(f"Using isolated mesh: {latest}")
 
         return cls(latest, user_height_cm)

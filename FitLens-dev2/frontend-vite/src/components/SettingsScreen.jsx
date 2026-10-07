@@ -1,10 +1,55 @@
 import React, { useState, useEffect } from 'react';
 import { updateProfile, changePassword, deleteAccount, deleteMeasurement, authHeaders } from '../services/authService';
+import { profileService } from '../services/profileService';
+import { QRCodeSVG } from 'qrcode.react';
 
-export default function SettingsScreen({ user, onUserUpdated, onLogout, onClose }) {
-  const [activeTab, setActiveTab] = useState('profile');
+export default function SettingsScreen({
+  user,
+  onUserUpdated,
+  onLogout,
+  onClose,
+  initialTab = 'profile',
+  activeProfile: propActiveProfile,
+  onActiveProfileChanged
+}) {
+  const [activeTab, setActiveTab] = useState(initialTab || 'profile');
   const [msg, setMsg] = useState(null);
   const [error, setError] = useState(null);
+
+  // Multi-Profile State
+  const [profiles, setProfiles] = useState([]);
+  const [slotUsage, setSlotUsage] = useState({ active_count: 1, pending_count: 0, max_slots: 4 });
+  const [currentActiveProfile, setCurrentActiveProfile] = useState(propActiveProfile || profileService.getActiveProfile());
+  const [profilesLoading, setProfilesLoading] = useState(false);
+
+  // Edit Profile State
+  const [editingProfile, setEditingProfile] = useState(null);
+  const [editName, setEditName] = useState('');
+  const [editHeight, setEditHeight] = useState('170');
+  const [editLoading, setEditLoading] = useState(false);
+
+  // Add Profile State
+  const [showAddSection, setShowAddSection] = useState(false);
+  const [addName, setAddName] = useState('');
+  const [addRelationship, setAddRelationship] = useState('Spouse');
+  const [addHeight, setAddHeight] = useState('170');
+  const [addLoading, setAddLoading] = useState(false);
+
+  // Invite Adult State
+  const [showInviteSection, setShowInviteSection] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRelationship, setInviteRelationship] = useState('Spouse');
+  const [inviteLoading, setInviteLoading] = useState(false);
+  const [inviteResult, setInviteResult] = useState(null);
+  const [pendingInvite, setPendingInvite] = useState(null);
+  const [copiedType, setCopiedType] = useState(null);
+
+  const handleCopy = (text, type) => {
+    if (!text) return;
+    navigator.clipboard.writeText(text);
+    setCopiedType(type);
+    setTimeout(() => setCopiedType(null), 2500);
+  };
 
   // Profile State
   const [name, setName] = useState(user?.name || '');
@@ -26,10 +71,327 @@ export default function SettingsScreen({ user, onUserUpdated, onLogout, onClose 
   const [deleteLoading, setDeleteLoading] = useState(false);
 
   useEffect(() => {
+    fetchProfilesList();
+  }, []);
+
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
+
+  useEffect(() => {
+    if (propActiveProfile) {
+      setCurrentActiveProfile(propActiveProfile);
+    }
+  }, [propActiveProfile]);
+
+  useEffect(() => {
     if (activeTab === 'history') {
       fetchHistory();
+    } else if (activeTab === 'profiles') {
+      fetchProfilesList();
     }
   }, [activeTab]);
+
+  const fetchProfilesList = async () => {
+    setProfilesLoading(true);
+    try {
+      const data = await profileService.listProfiles();
+      if (data.success) {
+        const fetched = data.profiles || [];
+        setProfiles(fetched);
+        setSlotUsage({
+          active_count: data.active_profiles_count ?? fetched.length,
+          pending_count: data.pending_invites_count ?? 0,
+          max_slots: data.max_allowed_slots ?? 4
+        });
+        const current = currentActiveProfile || propActiveProfile;
+        if (current) {
+          const fresh = fetched.find(p => p.id === current.id);
+          if (fresh) setCurrentActiveProfile(fresh);
+        } else if (fetched.length > 0) {
+          setCurrentActiveProfile(fetched[0]);
+          profileService.saveActiveProfile(fetched[0]);
+          if (onActiveProfileChanged) onActiveProfileChanged(fetched[0]);
+        }
+      }
+
+      // Also fetch pending invites if owner
+      try {
+        const invRes = await profileService.listInvites();
+        if (invRes.success) {
+          const pending = (invRes.invites || []).find(i => i.status === 'pending');
+          setPendingInvite(pending || null);
+        }
+      } catch (invErr) {
+        // Silently catch invite list errors
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setProfilesLoading(false);
+    }
+  };
+
+  const isCallerOwner = () => {
+    return Boolean(
+      currentActiveProfile?.is_owner ||
+      currentActiveProfile?.profile_type === 'owner' ||
+      (user && currentActiveProfile && user.name === currentActiveProfile.name && !currentActiveProfile.relationship)
+    );
+  };
+
+  const handleSwitchProfile = (p) => {
+    clearAlerts();
+    if (!isCallerOwner()) {
+      setError('Only the account owner has permission to switch profiles. Member accounts cannot switch to the owner or other profiles.');
+      return;
+    }
+    setCurrentActiveProfile(p);
+    profileService.saveActiveProfile(p);
+    if (onActiveProfileChanged) onActiveProfileChanged(p);
+    setMsg(`Active profile switched to "${p.name}". Measurements are now recorded for ${p.name}.`);
+  };
+
+  const handleStartEdit = (p) => {
+    clearAlerts();
+    if (!isCallerOwner() && p.id !== currentActiveProfile?.id) {
+      setError('You only have permission to edit your own profile.');
+      return;
+    }
+    setEditingProfile(p);
+    setEditName(p.name || '');
+    setEditHeight(p.default_height_cm ? String(p.default_height_cm) : '170');
+  };
+
+  const handleSaveEdit = async (e) => {
+    e.preventDefault();
+    clearAlerts();
+    if (!editingProfile) return;
+
+    if (!isCallerOwner() && editingProfile.id !== currentActiveProfile?.id) {
+      setError('You only have permission to edit your own profile.');
+      return;
+    }
+
+    const trimmed = editName.trim();
+    if (!trimmed || trimmed.length < 1 || trimmed.length > 50) {
+      setError('Name must be between 1 and 50 characters.');
+      return;
+    }
+
+    const h = parseFloat(editHeight);
+    if (isNaN(h) || h < 100 || h > 250) {
+      setError('Height must be between 100 and 250 cm.');
+      return;
+    }
+
+    setEditLoading(true);
+    try {
+      const res = await profileService.updateProfile(editingProfile.id, {
+        name: trimmed,
+        default_height_cm: h
+      });
+
+      if (res.success) {
+        setMsg(`Profile "${trimmed}" updated successfully.`);
+        setEditingProfile(null);
+        await fetchProfilesList();
+      } else {
+        setError(res.error || 'Failed to update profile.');
+      }
+    } catch (err) {
+      setError(err.message || 'Error updating profile.');
+    } finally {
+      setEditLoading(false);
+    }
+  };
+
+  const handleArchiveProfile = async (p) => {
+    clearAlerts();
+    if (!isCallerOwner()) {
+      setError('Only the account owner has permission to archive profiles.');
+      return;
+    }
+    if (p.is_owner) {
+      setError('Account owner profile cannot be archived.');
+      return;
+    }
+
+    if (!window.confirm(`Archive profile "${p.name}"? This profile will be archived and will free up 1 slot for new members. Measurement history is preserved.`)) {
+      return;
+    }
+
+    try {
+      const res = await profileService.archiveProfile(p.id);
+      if (res.success) {
+        setMsg(`Profile "${p.name}" has been archived.`);
+        await fetchProfilesList();
+      } else {
+        setError(res.error || 'Failed to archive profile.');
+      }
+    } catch (err) {
+      setError(err.message || 'Error archiving profile.');
+    }
+  };
+
+  const handleDeleteProfile = async (p) => {
+    clearAlerts();
+    if (!isCallerOwner()) {
+      setError('Only the account owner has permission to delete profiles.');
+      return;
+    }
+    if (p.is_owner) {
+      setError('Account owner profile cannot be deleted.');
+      return;
+    }
+
+    if (!window.confirm(`Permanently delete profile "${p.name}"?\n\n⚠️ WARNING: This will permanently delete this profile and all associated measurements, 3D meshes, and photos. This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      const res = await profileService.deleteProfile(p.id);
+      if (res.success) {
+        setMsg(`Profile "${p.name}" has been permanently deleted.`);
+        if (currentActiveProfile?.id === p.id) {
+          const owner = profiles.find(x => x.is_owner || x.profile_type === 'owner');
+          if (owner) {
+            handleSwitchProfile(owner);
+          }
+        }
+        await fetchProfilesList();
+      } else {
+        setError(res.error || 'Failed to delete profile.');
+      }
+    } catch (err) {
+      setError(err.message || 'Error deleting profile.');
+    }
+  };
+
+  const handleCreateNewProfile = async (e) => {
+    e.preventDefault();
+    clearAlerts();
+    if (!isCallerOwner()) {
+      setError('Only the account owner has permission to create new profiles.');
+      return;
+    }
+
+    const trimmed = addName.trim();
+    if (!trimmed || trimmed.length < 1 || trimmed.length > 50) {
+      setError('Name must be between 1 and 50 characters.');
+      return;
+    }
+
+    const h = parseFloat(addHeight);
+    if (isNaN(h) || h < 100 || h > 250) {
+      setError('Height must be between 100 and 250 cm.');
+      return;
+    }
+
+    setAddLoading(true);
+    try {
+      const res = await profileService.createProfile({
+        name: trimmed,
+        relationship: addRelationship,
+        default_height_cm: h,
+        profile_type: addRelationship.toLowerCase() === 'child' ? 'child' : 'adult'
+      });
+
+      if (res.success && res.profile) {
+        setMsg(`Profile "${trimmed}" created successfully!`);
+        setAddName('');
+        setShowAddSection(false);
+        await fetchProfilesList();
+      } else {
+        setError(res.error || 'Failed to create profile.');
+      }
+    } catch (err) {
+      setError(err.message || 'Error creating profile.');
+    } finally {
+      setAddLoading(false);
+    }
+  };
+
+  const handleSendInvitation = async (e) => {
+    e.preventDefault();
+    clearAlerts();
+    setInviteResult(null);
+    if (!isCallerOwner()) {
+      setError('Only the account owner has permission to invite members.');
+      return;
+    }
+
+    const email = inviteEmail.trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      setError('Please provide a valid email address.');
+      return;
+    }
+
+    setInviteLoading(true);
+    try {
+      const res = await profileService.createInvite({
+        target_email: email,
+        relationship: inviteRelationship
+      });
+
+      // Debug safely: log ONLY boolean state, never raw tokens or URLs
+      console.log('[Web Invite] Newly created invite - claim_url present:', Boolean(res?.claim_url));
+
+      if (res.success) {
+        setInviteResult(res);
+        setPendingInvite(null);
+        setMsg(`Invitation created for ${email}. Email sent and QR / invite link ready.`);
+        setInviteEmail('');
+        await fetchProfilesList();
+      } else {
+        setError(res.error || 'Failed to send invitation.');
+      }
+    } catch (err) {
+      setError(err.message || 'Error sending invitation.');
+    } finally {
+      setInviteLoading(false);
+    }
+  };
+
+  const handleRevokeInvite = async (inviteId) => {
+    clearAlerts();
+    if (!isCallerOwner()) {
+      setError('Only the account owner has permission to revoke invitations.');
+      return;
+    }
+    try {
+      const res = await profileService.revokeInvite(inviteId);
+      if (res.success) {
+        setMsg('Invitation revoked successfully. You can now generate a new invitation.');
+        setInviteResult(null);
+        setPendingInvite(null);
+        await fetchProfilesList();
+      } else {
+        setError(res.error || 'Failed to revoke invitation.');
+      }
+    } catch (err) {
+      setError(err.message || 'Error revoking invitation.');
+    }
+  };
+
+  const handleShareInvite = async () => {
+    if (!inviteResult?.claim_url) return;
+    if (typeof navigator !== 'undefined' && navigator.share) {
+      try {
+        await navigator.share({
+          title: 'FitLens Profile Invitation',
+          text: `You're invited to join my FitLens account! Use invite code ${inviteResult.invite_code} or claim your profile with this link:`,
+          url: inviteResult.claim_url
+        });
+      } catch (err) {
+        // User cancelled or share dismissed
+      }
+    } else {
+      handleCopy(inviteResult.claim_url, 'claim_url');
+    }
+  };
 
   const fetchHistory = async () => {
     setHistoryLoading(true);
@@ -202,6 +564,7 @@ export default function SettingsScreen({ user, onUserUpdated, onLogout, onClose 
       }}>
         {[
           { key: 'profile', label: '👤 Profile' },
+          { key: 'profiles', label: isCallerOwner() ? '👥 Manage Profiles' : '👥 Family Profiles' },
           { key: 'security', label: '🔒 Security' },
           { key: 'history', label: '📊 Scan History' },
           { key: 'account', label: '⚠️ Account' },
@@ -327,7 +690,924 @@ export default function SettingsScreen({ user, onUserUpdated, onLogout, onClose 
           </div>
         )}
 
-        {/* Tab 2: Security */}
+        {/* Tab 2: Switch Profile & Family Management */}
+        {activeTab === 'profiles' && (() => {
+          const ownerProfile = profiles.find(p => p.is_owner || p.profile_type === 'owner');
+          const isCurrentOwner = Boolean(
+            currentActiveProfile?.is_owner ||
+            currentActiveProfile?.profile_type === 'owner' ||
+            (user && currentActiveProfile && user.name === currentActiveProfile.name && !currentActiveProfile.relationship)
+          );
+
+          return (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
+                <div>
+                  <h3 style={{ margin: 0, color: '#ffffff', fontSize: '20px', fontWeight: '800' }}>
+                    {isCurrentOwner ? '👥 Manage Family Profiles' : '👥 Family Profiles'}
+                  </h3>
+                  <p style={{ margin: '4px 0 0', color: '#a0aec0', fontSize: '13px' }}>
+                    {isCurrentOwner
+                      ? 'Manage family profiles, invite members, and add up to 4 profiles per account.'
+                      : 'View family profiles and edit your profile details.'}
+                  </p>
+                </div>
+
+                {/* Slot Counter Badge */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  backgroundColor: '#0a0e27',
+                  border: '1px solid #2D3561',
+                  borderRadius: '12px',
+                  padding: '8px 14px'
+                }}>
+                  <span style={{ fontSize: '13px', color: '#a0aec0' }}>Slots:</span>
+                  <strong style={{ color: (slotUsage.active_count || profiles.length) >= (slotUsage.max_slots || 4) ? '#fc8181' : '#00D4AA', fontSize: '14px' }}>
+                    {slotUsage.active_count || profiles.length} / {slotUsage.max_slots || 4} Active
+                  </strong>
+                  <span style={{
+                    fontSize: '11px',
+                    padding: '2px 8px',
+                    borderRadius: '10px',
+                    backgroundColor: (slotUsage.active_count || profiles.length) >= (slotUsage.max_slots || 4) ? 'rgba(252, 129, 129, 0.2)' : 'rgba(0, 212, 170, 0.2)',
+                    color: (slotUsage.active_count || profiles.length) >= (slotUsage.max_slots || 4) ? '#fc8181' : '#00D4AA',
+                    fontWeight: '700'
+                  }}>
+                    {(slotUsage.active_count || profiles.length) >= (slotUsage.max_slots || 4) ? 'Full' : `${(slotUsage.max_slots || 4) - (slotUsage.active_count || profiles.length)} available`}
+                  </span>
+                </div>
+              </div>
+
+              {/* Member Profile Notice Banner */}
+              {!isCurrentOwner && (
+                <div style={{
+                  backgroundColor: 'rgba(255, 179, 0, 0.1)',
+                  border: '1px solid rgba(255, 179, 0, 0.35)',
+                  borderRadius: '12px',
+                  padding: '14px 18px',
+                  marginBottom: '20px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px'
+                }}>
+                  <span style={{ fontSize: '22px' }}>🔒</span>
+                  <div style={{ fontSize: '13px', color: '#ffe082', lineHeight: '1.5' }}>
+                    <strong>Member Account View ({currentActiveProfile?.name}):</strong> You only have access to your own profile. You cannot switch between profiles. Only the account owner has access to manage family profiles and invite members.
+                  </div>
+                </div>
+              )}
+
+              {/* Currently Active Profile Card */}
+              {currentActiveProfile && (
+                <div style={{
+                  backgroundColor: 'rgba(0, 212, 170, 0.08)',
+                  border: '1px solid #00D4AA',
+                  borderRadius: '16px',
+                  padding: '16px 20px',
+                  marginBottom: '24px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  flexWrap: 'wrap',
+                  gap: '12px',
+                  boxShadow: '0 4px 16px rgba(0, 212, 170, 0.15)'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                    <div style={{
+                      width: '46px',
+                      height: '46px',
+                      borderRadius: '50%',
+                      background: 'linear-gradient(135deg, #00D4AA, #0080FF)',
+                      color: '#0a0e27',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontWeight: '800',
+                      fontSize: '18px'
+                    }}>
+                      {(currentActiveProfile.name || 'U').charAt(0).toUpperCase()}
+                    </div>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <h4 style={{ margin: 0, color: '#ffffff', fontSize: '16px', fontWeight: '700' }}>
+                          {currentActiveProfile.name}
+                        </h4>
+                        <span style={{
+                          fontSize: '10px',
+                          backgroundColor: '#00D4AA',
+                          color: '#0a0e27',
+                          padding: '2px 8px',
+                          borderRadius: '10px',
+                          fontWeight: '800',
+                          textTransform: 'uppercase'
+                        }}>
+                          ✓ Currently Active
+                        </span>
+                        <span style={{
+                          fontSize: '11px',
+                          backgroundColor: '#2D3561',
+                          color: '#a0aec0',
+                          padding: '2px 8px',
+                          borderRadius: '10px',
+                          fontWeight: '600'
+                        }}>
+                          {currentActiveProfile.is_owner ? 'Account Owner' : (currentActiveProfile.relationship || 'Member')}
+                        </span>
+                      </div>
+                      <p style={{ margin: '4px 0 0', color: '#a0aec0', fontSize: '13px' }}>
+                        Default Height: <strong style={{ color: '#ffffff' }}>{currentActiveProfile.default_height_cm || 170} cm</strong> • Measurements taken are saved under this profile.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleStartEdit(currentActiveProfile)}
+                    style={{
+                      backgroundColor: '#1E2340',
+                      border: '1px solid #2D3561',
+                      color: '#00D4AA',
+                      padding: '8px 14px',
+                      borderRadius: '8px',
+                      cursor: 'pointer',
+                      fontWeight: '600',
+                      fontSize: '13px'
+                    }}
+                  >
+                    ✏️ Edit Profile
+                  </button>
+                </div>
+              )}
+
+              {/* List of Profiles */}
+              <div style={{ marginBottom: '24px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <h4 style={{ margin: 0, color: '#cbd5e0', fontSize: '15px', fontWeight: '700' }}>
+                    All Profiles ({profiles.length})
+                  </h4>
+                  <button
+                    onClick={fetchProfilesList}
+                    style={{
+                      padding: '6px 12px',
+                      backgroundColor: '#0a0e27',
+                      border: '1px solid #2D3561',
+                      borderRadius: '8px',
+                      color: '#00D4AA',
+                      cursor: 'pointer',
+                      fontWeight: '600',
+                      fontSize: '12px'
+                    }}
+                  >
+                    🔄 Refresh
+                  </button>
+                </div>
+
+                {profilesLoading ? (
+                  <p style={{ color: '#a0aec0' }}>Loading profiles...</p>
+                ) : profiles.length === 0 ? (
+                  <p style={{ color: '#a0aec0' }}>No profiles found.</p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    {profiles.map(p => {
+                      const isActive = currentActiveProfile?.id === p.id;
+                      return (
+                        <div
+                          key={p.id}
+                          style={{
+                            backgroundColor: '#0a0e27',
+                            border: `1px solid ${isActive ? '#00D4AA' : '#2D3561'}`,
+                            borderRadius: '14px',
+                            padding: '16px 20px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '14px',
+                            transition: 'all 0.2s ease'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1, minWidth: 0 }}>
+                            <div style={{
+                              width: '40px',
+                              height: '40px',
+                              borderRadius: '50%',
+                              backgroundColor: isActive ? '#00D4AA' : '#2D3561',
+                              color: isActive ? '#0a0e27' : '#ffffff',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontWeight: '800',
+                              fontSize: '16px',
+                              flexShrink: 0
+                            }}>
+                              {(p.name || 'U').charAt(0).toUpperCase()}
+                            </div>
+
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                <strong style={{ color: '#ffffff', fontSize: '15px' }}>{p.name}</strong>
+                                <span style={{
+                                  fontSize: '11px',
+                                  backgroundColor: p.is_owner ? 'rgba(0, 212, 170, 0.2)' : 'rgba(160, 174, 192, 0.15)',
+                                  color: p.is_owner ? '#00D4AA' : '#a0aec0',
+                                  padding: '2px 8px',
+                                  borderRadius: '10px',
+                                  fontWeight: '700'
+                                }}>
+                                  {p.is_owner ? 'Owner' : (p.relationship || 'Member')}
+                                </span>
+                                {isActive && (
+                                  <span style={{
+                                    fontSize: '11px',
+                                    color: '#00D4AA',
+                                    fontWeight: '700'
+                                  }}>
+                                    ✓ Active
+                                  </span>
+                                )}
+                              </div>
+                              <div style={{ color: '#a0aec0', fontSize: '12px', marginTop: '3px' }}>
+                                Default Height: <strong style={{ color: '#ffffff' }}>{p.default_height_cm || 170} cm</strong>
+                                {p.email && (
+                                  <span style={{ color: '#00D4AA' }}> • ✉️ {p.email}</span>
+                                )}
+                                {p.latest_measurement_date && (
+                                  <span> • Last scan: {p.latest_measurement_date}</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Profile Action Buttons */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                            {isActive ? (
+                              <span style={{
+                                padding: '6px 12px',
+                                backgroundColor: 'rgba(0, 212, 170, 0.15)',
+                                border: '1px solid #00D4AA',
+                                color: '#00D4AA',
+                                borderRadius: '8px',
+                                fontSize: '12px',
+                                fontWeight: '700'
+                              }}>
+                                Current
+                              </span>
+                            ) : (
+                              <span style={{
+                                padding: '6px 12px',
+                                backgroundColor: '#161B36',
+                                border: '1px solid #2D3561',
+                                color: p.is_owner ? '#00D4AA' : '#a0aec0',
+                                borderRadius: '8px',
+                                fontSize: '11px',
+                                fontWeight: '700'
+                              }}>
+                                {p.is_owner ? '👑 Owner' : '👥 Member'}
+                              </span>
+                            )}
+
+                            {/* Edit button: Owner can edit all; Members can only edit their own profile */}
+                            {(isCurrentOwner || isActive) && (
+                              <button
+                                onClick={() => handleStartEdit(p)}
+                                style={{
+                                  backgroundColor: '#1E2340',
+                                  border: '1px solid #2D3561',
+                                  color: '#cbd5e0',
+                                  padding: '8px 12px',
+                                  borderRadius: '8px',
+                                  fontWeight: '600',
+                                  fontSize: '13px',
+                                  cursor: 'pointer'
+                                }}
+                                title={isActive ? "Edit My Profile" : "Edit Profile"}
+                              >
+                                ✏️ Edit
+                              </button>
+                            )}
+
+                            {/* Archive & Delete buttons: ONLY owner can archive or permanently delete non-owner profiles */}
+                            {isCurrentOwner && !p.is_owner && (
+                              <div style={{ display: 'flex', gap: '6px' }}>
+                                <button
+                                  onClick={() => handleArchiveProfile(p)}
+                                  style={{
+                                    backgroundColor: 'rgba(255, 179, 0, 0.12)',
+                                    border: '1px solid rgba(255, 179, 0, 0.4)',
+                                    color: '#ffe082',
+                                    padding: '8px 12px',
+                                    borderRadius: '8px',
+                                    fontWeight: '600',
+                                    fontSize: '13px',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.15s ease'
+                                  }}
+                                  title="Archive Profile (frees up 1 slot, preserves past measurements)"
+                                >
+                                  📦 Archive
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteProfile(p)}
+                                  style={{
+                                    backgroundColor: 'rgba(252, 129, 129, 0.12)',
+                                    border: '1px solid rgba(252, 129, 129, 0.4)',
+                                    color: '#fc8181',
+                                    padding: '8px 12px',
+                                    borderRadius: '8px',
+                                    fontWeight: '600',
+                                    fontSize: '13px',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.15s ease'
+                                  }}
+                                  title="Permanently Delete Profile and erase all its scan data"
+                                >
+                                  🗑️ Delete
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Action Buttons to Add or Invite - OWNER ONLY */}
+              {isCurrentOwner && (
+                <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginBottom: '24px' }}>
+                  {(slotUsage.active_count || profiles.length) < (slotUsage.max_slots || 4) ? (
+                    <>
+                      <button
+                        onClick={() => { setShowAddSection(!showAddSection); setShowInviteSection(false); }}
+                        style={{
+                          padding: '10px 18px',
+                          backgroundColor: showAddSection ? '#2D3561' : '#00D4AA',
+                          color: showAddSection ? '#ffffff' : '#0a0e27',
+                          border: 'none',
+                          borderRadius: '10px',
+                          fontWeight: '700',
+                          fontSize: '13px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px'
+                        }}
+                      >
+                        <span>{showAddSection ? '✕ Cancel' : '➕ Add Family Profile'}</span>
+                      </button>
+
+                      <button
+                        onClick={() => { setShowInviteSection(!showInviteSection); setShowAddSection(false); }}
+                        style={{
+                          padding: '10px 18px',
+                          backgroundColor: showInviteSection ? '#2D3561' : 'transparent',
+                          color: showInviteSection ? '#ffffff' : '#00D4AA',
+                          border: '1px solid #2D3561',
+                          borderRadius: '10px',
+                          fontWeight: '700',
+                          fontSize: '13px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px'
+                        }}
+                      >
+                        <span>{showInviteSection ? '✕ Cancel' : '✉️ Invite Adult Member'}</span>
+                      </button>
+                    </>
+                  ) : (
+                    <div style={{
+                      padding: '12px 18px',
+                      backgroundColor: 'rgba(252, 129, 129, 0.1)',
+                      border: '1px solid #fc8181',
+                      borderRadius: '10px',
+                      color: '#fc8181',
+                      fontSize: '13px',
+                      width: '100%'
+                    }}>
+                      ⚠️ Maximum profile slots reached (4/4). Archive an existing profile to add or invite new members.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Inline Add Profile Form - OWNER ONLY */}
+              {isCurrentOwner && showAddSection && (
+              <div style={{
+                backgroundColor: '#0a0e27',
+                border: '1px solid #00D4AA',
+                borderRadius: '16px',
+                padding: '24px',
+                marginBottom: '24px'
+              }}>
+                <h4 style={{ margin: '0 0 16px 0', color: '#00D4AA', fontSize: '16px', fontWeight: '700' }}>
+                  ➕ Add New Family Profile
+                </h4>
+                <form onSubmit={handleCreateNewProfile} style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '480px' }}>
+                  <div>
+                    <label style={{ display: 'block', color: '#a0aec0', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>
+                      FULL NAME
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Sarah, Alex, or Child"
+                      value={addName}
+                      onChange={(e) => setAddName(e.target.value)}
+                      required
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        backgroundColor: '#1E2340',
+                        border: '1px solid #2D3561',
+                        borderRadius: '10px',
+                        color: '#ffffff',
+                        fontSize: '14px',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', color: '#a0aec0', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>
+                      RELATIONSHIP
+                    </label>
+                    <select
+                      value={addRelationship}
+                      onChange={(e) => setAddRelationship(e.target.value)}
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        backgroundColor: '#1E2340',
+                        border: '1px solid #2D3561',
+                        borderRadius: '10px',
+                        color: '#ffffff',
+                        fontSize: '14px',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    >
+                      <option value="Spouse">Spouse</option>
+                      <option value="Child">Child</option>
+                      <option value="Parent">Parent</option>
+                      <option value="Sibling">Sibling</option>
+                      <option value="Friend">Friend</option>
+                      <option value="Family">Family Member</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', color: '#a0aec0', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>
+                      DEFAULT HEIGHT (CM)
+                    </label>
+                    <input
+                      type="number"
+                      placeholder="170"
+                      min="100"
+                      max="250"
+                      step="0.5"
+                      value={addHeight}
+                      onChange={(e) => setAddHeight(e.target.value)}
+                      required
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        backgroundColor: '#1E2340',
+                        border: '1px solid #2D3561',
+                        borderRadius: '10px',
+                        color: '#ffffff',
+                        fontSize: '14px',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
+                    <button
+                      type="submit"
+                      disabled={addLoading}
+                      style={{
+                        padding: '12px 24px',
+                        backgroundColor: '#00D4AA',
+                        border: 'none',
+                        borderRadius: '10px',
+                        color: '#0a0e27',
+                        fontWeight: '700',
+                        cursor: addLoading ? 'wait' : 'pointer'
+                      }}
+                    >
+                      {addLoading ? 'Creating Profile...' : 'Create & Select Profile'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddSection(false)}
+                      style={{
+                        padding: '12px 20px',
+                        backgroundColor: '#1E2340',
+                        border: '1px solid #2D3561',
+                        borderRadius: '10px',
+                        color: '#a0aec0',
+                        fontWeight: '600',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
+            {/* Inline Invite Adult Form - OWNER ONLY */}
+            {isCurrentOwner && showInviteSection && (
+              <div style={{
+                backgroundColor: '#0a0e27',
+                border: '1px solid #00D4AA',
+                borderRadius: '16px',
+                padding: '24px',
+                marginBottom: '24px'
+              }}>
+                <h4 style={{ margin: '0 0 16px 0', color: '#00D4AA', fontSize: '16px', fontWeight: '700' }}>
+                  ✉️ Invite Adult Member
+                </h4>
+                <p style={{ color: '#a0aec0', fontSize: '13px', margin: '0 0 16px 0' }}>
+                  An invitation will be generated. The invited person can link their account to join this family profile.
+                </p>
+                <form onSubmit={handleSendInvitation} style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '480px' }}>
+                  <div>
+                    <label style={{ display: 'block', color: '#a0aec0', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>
+                      INVITEE EMAIL ADDRESS
+                    </label>
+                    <input
+                      type="email"
+                      placeholder="e.g. spouse@example.com"
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.target.value)}
+                      required
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        backgroundColor: '#1E2340',
+                        border: '1px solid #2D3561',
+                        borderRadius: '10px',
+                        color: '#ffffff',
+                        fontSize: '14px',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', color: '#a0aec0', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>
+                      RELATIONSHIP
+                    </label>
+                    <select
+                      value={inviteRelationship}
+                      onChange={(e) => setInviteRelationship(e.target.value)}
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        backgroundColor: '#1E2340',
+                        border: '1px solid #2D3561',
+                        borderRadius: '10px',
+                        color: '#ffffff',
+                        fontSize: '14px',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    >
+                      <option value="Spouse">Spouse</option>
+                      <option value="Partner">Partner</option>
+                      <option value="Parent">Parent</option>
+                      <option value="Sibling">Sibling</option>
+                      <option value="Friend">Friend</option>
+                      <option value="Family">Family Member</option>
+                    </select>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
+                    <button
+                      type="submit"
+                      disabled={inviteLoading}
+                      style={{
+                        padding: '12px 24px',
+                        backgroundColor: '#00D4AA',
+                        border: 'none',
+                        borderRadius: '10px',
+                        color: '#0a0e27',
+                        fontWeight: '700',
+                        cursor: inviteLoading ? 'wait' : 'pointer'
+                      }}
+                    >
+                      {inviteLoading ? 'Sending...' : 'Send Invitation'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowInviteSection(false)}
+                      style={{
+                        padding: '12px 20px',
+                        backgroundColor: '#1E2340',
+                        border: '1px solid #2D3561',
+                        borderRadius: '10px',
+                        color: '#a0aec0',
+                        fontWeight: '600',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+
+                {/* 1. Newly created invite with raw claim_url: Display QR code, code box, links, and share action */}
+                {inviteResult && Boolean(inviteResult.claim_url) && (
+                  <div style={{
+                    marginTop: '20px',
+                    padding: '24px',
+                    backgroundColor: '#131838',
+                    border: '1px solid #00D4AA',
+                    borderRadius: '16px',
+                    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px', flexWrap: 'wrap', gap: '8px' }}>
+                      <strong style={{ color: '#00D4AA', fontSize: '16px' }}>
+                        🎉 Invitation Created Successfully!
+                      </strong>
+                      <span style={{ fontSize: '12px', color: '#fed7aa', backgroundColor: 'rgba(237, 137, 54, 0.2)', padding: '4px 10px', borderRadius: '12px', fontWeight: '700' }}>
+                        ⏱️ Expires in 15 mins
+                      </span>
+                    </div>
+
+                    {inviteResult.target_email && (
+                      <div style={{ marginBottom: '16px' }}>
+                        <p style={{ margin: '0 0 8px', color: '#cbd5e0', fontSize: '13px' }}>
+                          {inviteResult.email_sent ? '✉️ Invitation email sent to ' : 'Recipient: '}
+                          <strong style={{ color: '#ffffff' }}>{inviteResult.target_email}</strong>.
+                        </p>
+                        <div style={{
+                          padding: '10px 14px',
+                          backgroundColor: 'rgba(255, 179, 0, 0.12)',
+                          border: '1px solid rgba(255, 179, 0, 0.35)',
+                          borderRadius: '8px',
+                          fontSize: '12px',
+                          color: '#ffe082',
+                          lineHeight: '1.5'
+                        }}>
+                          📂 <strong>Check Spam / Junk Folder:</strong> Because this email is sent from a local development environment, Gmail often places it in the recipient's <strong>Spam</strong> or <strong>Promotions</strong> folder. Ask them to check <strong>Spam</strong> and click <em>"Report not spam"</em>, or scan the QR code / share the code below.
+                        </div>
+                      </div>
+                    )}
+
+                    {/* QR Code Container */}
+                    <div style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      backgroundColor: '#0a0e27',
+                      border: '1px solid #2D3561',
+                      borderRadius: '16px',
+                      padding: '20px',
+                      marginBottom: '18px',
+                      textAlign: 'center'
+                    }}>
+                      <div style={{
+                        padding: '16px',
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: '16px',
+                        boxShadow: '0 8px 24px rgba(0, 212, 170, 0.25)',
+                        display: 'inline-block'
+                      }}>
+                        <QRCodeSVG
+                          value={inviteResult.claim_url}
+                          size={180}
+                          level="H"
+                          includeMargin={true}
+                        />
+                      </div>
+                      <p style={{ color: '#cbd5e0', fontSize: '12px', fontWeight: '600', marginTop: '12px', marginBottom: '2px' }}>
+                        📷 Scan QR code to claim profile instantly
+                      </p>
+                      <span style={{ color: '#718096', fontSize: '11px' }}>
+                        Open phone camera on the same Wi-Fi network to claim profile
+                      </span>
+                    </div>
+
+                    {/* 15-Minute Code Box */}
+                    {inviteResult.invite_code && (
+                      <div style={{
+                        background: '#0a0e27',
+                        border: '1px dashed #2D3561',
+                        borderRadius: '12px',
+                        padding: '14px 18px',
+                        marginBottom: '16px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        flexWrap: 'wrap',
+                        gap: '10px'
+                      }}>
+                        <div>
+                          <div style={{ fontSize: '11px', color: '#a0aec0', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                            15-Minute Invite Code
+                          </div>
+                          <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#00D4AA', letterSpacing: '3px', fontFamily: 'monospace' }}>
+                            {inviteResult.invite_code}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleCopy(inviteResult.invite_code, 'code')}
+                          style={{
+                            padding: '10px 18px',
+                            backgroundColor: copiedType === 'code' ? '#00D4AA' : '#1E2340',
+                            border: '1px solid #2D3561',
+                            borderRadius: '8px',
+                            color: copiedType === 'code' ? '#0a0e27' : '#00D4AA',
+                            fontWeight: '700',
+                            fontSize: '13px',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s ease'
+                          }}
+                        >
+                          {copiedType === 'code' ? '✓ Copied!' : '📋 Copy Invite Code'}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Link Actions */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '16px' }}>
+                      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          onClick={() => handleCopy(inviteResult.claim_url, 'claim_url')}
+                          style={{
+                            flex: 1,
+                            minWidth: '160px',
+                            padding: '12px 18px',
+                            backgroundColor: copiedType === 'claim_url' ? '#00D4AA' : '#1E2340',
+                            border: '1px solid #00D4AA',
+                            borderRadius: '10px',
+                            color: copiedType === 'claim_url' ? '#0a0e27' : '#00D4AA',
+                            fontWeight: '700',
+                            fontSize: '13px',
+                            cursor: 'pointer',
+                            textAlign: 'center',
+                            transition: 'all 0.2s ease'
+                          }}
+                        >
+                          {copiedType === 'claim_url' ? '✓ Claim Link Copied!' : '🔗 Copy Claim Link'}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleShareInvite}
+                          style={{
+                            flex: 1,
+                            minWidth: '160px',
+                            padding: '12px 18px',
+                            backgroundColor: '#00D4AA',
+                            border: 'none',
+                            borderRadius: '10px',
+                            color: '#0a0e27',
+                            fontWeight: '700',
+                            fontSize: '13px',
+                            cursor: 'pointer',
+                            textAlign: 'center'
+                          }}
+                        >
+                          📤 Share / Copy Claim Link
+                        </button>
+                      </div>
+
+                      {inviteResult.mobile_invite_link && (
+                        <div>
+                          <div style={{ fontSize: '11px', color: '#00D4AA', marginBottom: '4px', fontWeight: '600' }}>
+                            📱 Mobile / Same Wi-Fi Link (For Phones):
+                          </div>
+                          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                            <input
+                              type="text"
+                              readOnly
+                              value={inviteResult.mobile_invite_link}
+                              style={{
+                                flex: 1,
+                                padding: '10px 12px',
+                                backgroundColor: '#0a0e27',
+                                border: '1px solid #2D3561',
+                                borderRadius: '8px',
+                                color: '#cbd5e0',
+                                fontSize: '12px',
+                                outline: 'none'
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleCopy(inviteResult.mobile_invite_link, 'mobile_link')}
+                              style={{
+                                padding: '10px 16px',
+                                backgroundColor: copiedType === 'mobile_link' ? '#2D3561' : '#00D4AA',
+                                border: 'none',
+                                borderRadius: '8px',
+                                color: copiedType === 'mobile_link' ? '#00D4AA' : '#0a0e27',
+                                fontWeight: '700',
+                                fontSize: '12px',
+                                cursor: 'pointer',
+                                whiteSpace: 'nowrap'
+                              }}
+                            >
+                              {copiedType === 'mobile_link' ? '✓ Copied!' : '📱 Copy'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid #1E2340', paddingTop: '14px' }}>
+                      <button
+                        type="button"
+                        onClick={() => handleRevokeInvite(inviteResult.invite_id)}
+                        style={{
+                          background: 'none',
+                          border: '1px solid #fc8181',
+                          borderRadius: '8px',
+                          color: '#fc8181',
+                          padding: '6px 14px',
+                          fontSize: '12px',
+                          fontWeight: '600',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        🗑️ Revoke Invite
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* 2. Pending invite after reload WITHOUT raw claim_url: Clear revoke/regenerate notice instead of blank QR */}
+                {!inviteResult?.claim_url && pendingInvite && pendingInvite.status === 'pending' && (
+                  <div style={{
+                    marginTop: '20px',
+                    padding: '24px',
+                    backgroundColor: '#131838',
+                    border: '1px solid #ED8936',
+                    borderRadius: '16px',
+                    textAlign: 'center'
+                  }}>
+                    <div style={{ fontSize: '32px', marginBottom: '8px' }}>⏱️</div>
+                    <h4 style={{ color: '#ED8936', margin: '0 0 8px 0', fontSize: '16px', fontWeight: '700' }}>
+                      Active Pending Invitation ({pendingInvite.relationship || 'Member'})
+                    </h4>
+                    <p style={{ color: '#cbd5e0', fontSize: '13px', lineHeight: '1.5', maxWidth: '480px', margin: '0 auto 14px auto' }}>
+                      An invitation is currently active and reserving 1 of your account's 4 profile slots.
+                    </p>
+
+                    <div style={{
+                      padding: '12px 16px',
+                      backgroundColor: 'rgba(237, 137, 54, 0.1)',
+                      border: '1px solid rgba(237, 137, 54, 0.3)',
+                      borderRadius: '10px',
+                      fontSize: '12px',
+                      color: '#fed7aa',
+                      lineHeight: '1.5',
+                      maxWidth: '480px',
+                      margin: '0 auto 16px auto',
+                      textAlign: 'left'
+                    }}>
+                      🔒 <strong>Security Policy:</strong> One-time QR codes and claim links are generated in memory and displayed only immediately upon creation. To protect your account security, raw tokens are never saved in plain text or restored after a page reload.
+                    </div>
+
+                    <p style={{ color: '#a0aec0', fontSize: '12px', margin: '0 0 16px 0' }}>
+                      If your invited member did not scan the QR code or needs a new invite, revoke this invite to immediately regenerate a new one.
+                    </p>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRevokeInvite(pendingInvite.invite_id)}
+                      style={{
+                        padding: '12px 24px',
+                        backgroundColor: 'rgba(252, 129, 129, 0.15)',
+                        border: '1px solid #fc8181',
+                        borderRadius: '10px',
+                        color: '#fc8181',
+                        fontWeight: '700',
+                        fontSize: '14px',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      🗑️ Revoke & Regenerate Invite
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+        {/* Tab 3: Security */}
         {activeTab === 'security' && (
           <div>
             <h3 style={{ marginTop: 0, color: '#ffffff' }}>Change Password</h3>
@@ -647,6 +1927,120 @@ export default function SettingsScreen({ user, onUserUpdated, onLogout, onClose 
                   }}
                 >
                   {deleteLoading ? 'Deleting...' : 'Confirm Delete'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Profile Modal */}
+      {editingProfile && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(10, 14, 39, 0.85)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+          backdropFilter: 'blur(6px)'
+        }}>
+          <div style={{
+            width: '100%',
+            maxWidth: '420px',
+            backgroundColor: '#1E2340',
+            border: '1px solid #00D4AA',
+            borderRadius: '20px',
+            padding: '28px',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.5)',
+            color: '#ffffff'
+          }}>
+            <h3 style={{ margin: '0 0 16px 0', color: '#ffffff', fontSize: '18px', fontWeight: '800' }}>
+              ✏️ Edit Profile: {editingProfile.name}
+            </h3>
+            <form onSubmit={handleSaveEdit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div>
+                <label style={{ display: 'block', color: '#a0aec0', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>
+                  PROFILE NAME
+                </label>
+                <input
+                  type="text"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  required
+                  style={{
+                    width: '100%',
+                    padding: '12px 14px',
+                    backgroundColor: '#0a0e27',
+                    border: '1px solid #2D3561',
+                    borderRadius: '10px',
+                    color: '#ffffff',
+                    fontSize: '14px',
+                    outline: 'none',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+
+              <div>
+                <label style={{ display: 'block', color: '#a0aec0', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>
+                  DEFAULT HEIGHT (CM)
+                </label>
+                <input
+                  type="number"
+                  min="100"
+                  max="250"
+                  step="0.5"
+                  value={editHeight}
+                  onChange={(e) => setEditHeight(e.target.value)}
+                  required
+                  style={{
+                    width: '100%',
+                    padding: '12px 14px',
+                    backgroundColor: '#0a0e27',
+                    border: '1px solid #2D3561',
+                    borderRadius: '10px',
+                    color: '#ffffff',
+                    fontSize: '14px',
+                    outline: 'none',
+                    boxSizing: 'border-box'
+                  }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => setEditingProfile(null)}
+                  style={{
+                    flex: 1,
+                    padding: '10px',
+                    backgroundColor: '#0a0e27',
+                    border: '1px solid #2D3561',
+                    borderRadius: '8px',
+                    color: '#a0aec0',
+                    fontWeight: '600',
+                    cursor: 'pointer'
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editLoading}
+                  style={{
+                    flex: 1,
+                    padding: '10px',
+                    backgroundColor: '#00D4AA',
+                    border: 'none',
+                    borderRadius: '8px',
+                    color: '#0a0e27',
+                    fontWeight: '700',
+                    cursor: editLoading ? 'wait' : 'pointer'
+                  }}
+                >
+                  {editLoading ? 'Saving...' : 'Save Changes'}
                 </button>
               </div>
             </form>

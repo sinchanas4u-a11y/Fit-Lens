@@ -3,12 +3,14 @@ import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert, Image } fr
 import LinearGradient from 'react-native-linear-gradient';
 import Header from '../../components/common/Header';
 import { useAuthStore } from '../../store/authStore';
+import { useProfileStore } from '../../store/profileStore';
 import { Colors } from '../../constants/colors';
 
 const brandLogo = require('../../assets/logo.png');
 
 const SettingsScreen = ({ navigation }) => {
   const { user, logout } = useAuthStore();
+  const { activeProfile, clearActiveProfile } = useProfileStore();
 
   const handleLogout = () => {
     Alert.alert('Logout', 'Are you sure you want to log out of FitLens?', [
@@ -16,13 +18,19 @@ const SettingsScreen = ({ navigation }) => {
       {
         text: 'Logout',
         style: 'destructive',
-        onPress: () => logout(),
+        onPress: async () => {
+          await clearActiveProfile();
+          await logout();
+        },
       },
     ]);
   };
 
+  const isOwner = Boolean(activeProfile?.is_owner || activeProfile?.profile_type === 'owner' || !activeProfile);
+
   const menuItems = [
-    { icon: '👤', title: 'Profile Information', sub: user?.email || '', nav: 'ProfileSettings' },
+    ...(isOwner ? [{ icon: '⚙️', title: 'Manage Profiles', sub: 'Add, edit, or archive family profiles', nav: 'ManageProfiles' }] : []),
+    { icon: '👤', title: 'Account Information', sub: user?.email || '', nav: 'ProfileSettings' },
     { icon: '🔒', title: 'Change Password', sub: 'Update security password', nav: 'ChangePassword' },
     { icon: '🗑️', title: 'Delete Account', sub: 'Permanently remove user data', nav: 'DeleteAccount', danger: true },
   ];

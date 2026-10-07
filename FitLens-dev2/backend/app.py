@@ -45,10 +45,15 @@ import json
 import traceback
 from dotenv import load_dotenv
 _base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_flask_env = os.getenv('FLASK_ENV', '').strip().lower()
+if _flask_env == 'testing':
+    _env_testing_path = os.path.join(_base_dir, '.env.testing')
+    if os.path.exists(_env_testing_path):
+        load_dotenv(dotenv_path=_env_testing_path, override=False)
 _env_path = os.path.join(_base_dir, '.env')
 if not os.path.exists(_env_path):
     _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
-load_dotenv(dotenv_path=_env_path, override=True)
+load_dotenv(dotenv_path=_env_path, override=False)
 
 from reference_detector import ReferenceDetector
 from temporal_stabilizer import TemporalStabilizer
@@ -69,71 +74,162 @@ parent_dir = os.path.dirname(
 if parent_dir not in sys.path:
   sys.path.insert(0, parent_dir)
 
-from processing.smplifyx_runner import (
-  run_smplifyx
-)
-from processing.smplifyx_reader import (
-  SMPLifyXReader
-)
+try:
+    from processing.smplifyx_runner import (
+      run_smplifyx
+    )
+    from processing.smplifyx_reader import (
+      SMPLifyXReader
+    )
+except Exception as e:
+    print(f"Warning: SMPLify-X runner/reader import: {e}")
+    run_smplifyx = None
+    SMPLifyXReader = None
 
 try:
     from face_verifier import FaceVerifier
 except Exception:
     FaceVerifier = None
 
-from dotenv import load_dotenv
 import uuid
 import datetime as dt
 import bcrypt
-from pymongo import MongoClient
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
-
-load_dotenv()
+import hashlib
+import secrets
+import shutil
+from bson import ObjectId
+from pymongo import MongoClient, ReturnDocument
+from pymongo.errors import DuplicateKeyError
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, decode_token, get_jwt
 
 # MongoDB connection with fallback
-mongo_uri = os.getenv('MONGODB_URI', 'mongodb://localhost:27017/fitlens')
+mongo_uri = os.getenv('MONGO_URI') or os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
+mongo_db_name = os.getenv('MONGO_DB_NAME')
+
 try:
     client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
     client.admin.command('ping')
-    try:
-        db = client.get_default_database()
-    except Exception:
-        db = client['fitlens']
-    print(f"Connected to MongoDB successfully: {mongo_uri}")
+    if mongo_db_name:
+        db = client[mongo_db_name]
+    else:
+        try:
+            db = client.get_default_database()
+            if not getattr(db, 'name', None):
+                db = client['fitlens']
+        except Exception:
+            db = client['fitlens']
+    print(f"Connected to MongoDB successfully: {mongo_uri} (database: {db.name})")
 except Exception as e:
-    print(f"Warning: Could not connect to MongoDB ({e}). Using in-memory fallback store.")
+    mock_db_name = mongo_db_name or 'fitlens'
+    print(f"Warning: Could not connect to MongoDB ({e}). Using in-memory fallback store ({mock_db_name}).")
     class MockCollection:
-        def __init__(self): self.data = []
+        def __init__(self):
+            self.data = []
+            self.indexes = []
+
+        def create_index(self, keys, **kwargs):
+            self.indexes.append({'keys': keys, 'kwargs': kwargs})
+
+        def _matches(self, doc, query):
+            for k, v in query.items():
+                if k == '$or':
+                    if not any(self._matches(doc, cond) for cond in v):
+                        return False
+                elif k == '$and':
+                    if not all(self._matches(doc, cond) for cond in v):
+                        return False
+                elif isinstance(v, dict):
+                    val = doc.get(k)
+                    if '$exists' in v:
+                        exists = k in doc and doc[k] is not None
+                        if exists != v['$exists']:
+                            return False
+                    if '$ne' in v and val == v['$ne']:
+                        return False
+                    if '$gt' in v and not (val is not None and val > v['$gt']):
+                        return False
+                    if '$gte' in v and not (val is not None and val >= v['$gte']):
+                        return False
+                    if '$lt' in v and not (val is not None and val < v['$lt']):
+                        return False
+                    if '$lte' in v and not (val is not None and val <= v['$lte']):
+                        return False
+                    if '$in' in v and val not in v['$in']:
+                        return False
+                elif doc.get(k) != v:
+                    return False
+            return True
+
         def find_one(self, query, proj=None, sort=None):
             for d in self.data:
-                match = True
-                for k, v in query.items():
-                    if d.get(k) != v: match = False; break
-                if match:
+                if self._matches(d, query):
                     res = dict(d)
                     if proj:
                         for pk, pv in proj.items():
                             if pv == 0: res.pop(pk, None)
                     return res
             return None
-        def insert_one(self, doc): self.data.append(doc)
-        def update_one(self, query, update):
-            for d in self.data:
-                match = True
-                for k, v in query.items():
-                    if d.get(k) != v: match = False; break
-                if match:
+
+        def count_documents(self, query):
+            return sum(1 for d in self.data if self._matches(d, query))
+
+        def find_one_and_update(self, query, update, return_document=False):
+            for i, d in enumerate(self.data):
+                if self._matches(d, query):
+                    orig = dict(d)
                     if '$set' in update: d.update(update['$set'])
+                    return dict(d) if return_document else orig
+            return None
+
+        def insert_one(self, doc):
+            # Check unique indexes
+            for idx in self.indexes:
+                kwargs = idx.get('kwargs', {})
+                if kwargs.get('unique'):
+                    filter_cond = kwargs.get('partialFilterExpression')
+                    if filter_cond and not self._matches(doc, filter_cond):
+                        continue
+                    keys = idx['keys']
+                    for existing in self.data:
+                        if filter_cond and not self._matches(existing, filter_cond):
+                            continue
+                        if all(existing.get(k[0]) == doc.get(k[0]) for k in keys if doc.get(k[0]) is not None):
+                            raise DuplicateKeyError(f"E11000 duplicate key error collection index: {keys}")
+
+            doc_copy = dict(doc)
+            if '_id' not in doc_copy: doc_copy['_id'] = ObjectId()
+            self.data.append(doc_copy)
+            class InsertResult:
+                def __init__(self, i_id): self.inserted_id = i_id
+            return InsertResult(doc_copy['_id'])
+
+        def update_one(self, query, update):
+            matched = 0
+            for d in self.data:
+                if self._matches(d, query):
+                    matched = 1
+                    if '$set' in update: d.update(update['$set'])
+                    break
+            class UpdateResult:
+                def __init__(self, m):
+                    self.matched_count = m
+                    self.modified_count = m
+            return UpdateResult(matched)
+
+        def update_many(self, query, update):
+            for d in self.data:
+                if self._matches(d, query):
+                    if '$set' in update: d.update(update['$set'])
+
         def delete_one(self, query):
             for i, d in enumerate(self.data):
-                match = True
-                for k, v in query.items():
-                    if d.get(k) != v: match = False; break
-                if match:
+                if self._matches(d, query):
                     del self.data[i]
                     break
+
         def delete_many(self, query):
-            self.data = [d for d in self.data if not all(d.get(k) == v for k, v in query.items())]
+            self.data = [d for d in self.data if not self._matches(d, query)]
+
         def find(self, query, proj=None):
             class MockCursor:
                 def __init__(self, items): self.items = items
@@ -142,10 +238,7 @@ except Exception as e:
                 def __iter__(self): return iter(self.items)
             res_list = []
             for d in self.data:
-                match = True
-                for k, v in query.items():
-                    if d.get(k) != v: match = False; break
-                if match:
+                if self._matches(d, query):
                     res = dict(d)
                     if proj:
                         for pk, pv in proj.items():
@@ -154,14 +247,37 @@ except Exception as e:
             return MockCursor(res_list)
 
     class MockDB:
-        def __init__(self): self.cols = {}
+        def __init__(self, name='fitlens'):
+            self.name = name
+            self.cols = {}
         def __getitem__(self, name):
             if name not in self.cols: self.cols[name] = MockCollection()
             return self.cols[name]
-    db = MockDB()
+    db = MockDB(mock_db_name)
 
 users_col = db['users']
 measurements_col = db['measurements']
+profiles_col = db['profiles']
+profile_invites_col = db['profile_invites']
+
+try:
+    profiles_col.create_index([('account_user_id', 1), ('is_archived', 1), ('last_used_at', -1)])
+    profiles_col.create_index(
+        [('account_user_id', 1), ('is_owner', 1)],
+        unique=True,
+        partialFilterExpression={'is_owner': True}
+    )
+    profiles_col.create_index(
+        [('invite_id', 1)],
+        unique=True,
+        partialFilterExpression={'invite_id': {'$exists': True}}
+    )
+    measurements_col.create_index([('account_user_id', 1), ('profile_id', 1), ('created_at', -1)])
+    measurements_col.create_index([('profile_id', 1), ('status', 1), ('created_at', -1)])
+    profile_invites_col.create_index([('account_user_id', 1), ('status', 1), ('created_at', -1)])
+    profile_invites_col.create_index([('expires_at', 1)], expireAfterSeconds=0)
+except Exception as idx_err:
+    print(f"Index setup: {idx_err}")
 
 app = Flask(__name__)
 CORS(app)
@@ -176,15 +292,56 @@ socketio = SocketIO(
     max_http_buffer_size=10 * 1024 * 1024
 )
 
-# JWT config
-app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'fitlens-secret-key')
+# JWT Configuration and Startup Security Validation
+_raw_jwt_secret = os.getenv('JWT_SECRET_KEY') or os.getenv('JWT_SECRET')
+if not _raw_jwt_secret or not _raw_jwt_secret.strip():
+    raise RuntimeError(
+        f"[FATAL CONFIG ERROR] JWT_SECRET_KEY environment variable is missing (FLASK_ENV='{os.getenv('FLASK_ENV', 'development')}'). "
+        "A secure secret of at least 32 bytes (256 bits) is required for HMAC-SHA256 tokens. "
+        "Generate a cryptographically random key using: "
+        ".\\venv\\Scripts\\python.exe -c \"import secrets; print(secrets.token_urlsafe(48))\""
+    )
+
+_jwt_secret_val = _raw_jwt_secret.strip()
+_jwt_key_len = len(_jwt_secret_val.encode('utf-8'))
+if _jwt_key_len < 32:
+    raise RuntimeError(
+        f"[FATAL CONFIG ERROR] JWT_SECRET_KEY is insecure: length is {_jwt_key_len} bytes, "
+        "which is below the minimum required 32 bytes (256 bits) for HMAC-SHA256. "
+        "Do not use weak secrets. Generate a secure key using: "
+        ".\\venv\\Scripts\\python.exe -c \"import secrets; print(secrets.token_urlsafe(48))\""
+    )
+
+app.config['JWT_SECRET_KEY'] = _jwt_secret_val
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = dt.timedelta(days=30)
 jwt = JWTManager(app)
 
-# Global directory paths
+# Global directory paths and environment-based storage root
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MESHES_DIR = os.path.join(BASE_DIR, "generated_meshes")
 os.makedirs(MESHES_DIR, exist_ok=True)
+
+FITLENS_DATA_ROOT = os.getenv('FITLENS_DATA_ROOT')
+if FITLENS_DATA_ROOT:
+    if not os.path.isabs(FITLENS_DATA_ROOT):
+        DATA_ROOT = os.path.realpath(os.path.join(parent_dir, FITLENS_DATA_ROOT))
+    else:
+        DATA_ROOT = os.path.realpath(FITLENS_DATA_ROOT)
+    ACCOUNTS_DIR = os.path.join(DATA_ROOT, "accounts")
+else:
+    DATA_ROOT = os.path.realpath(parent_dir)
+    ACCOUNTS_DIR = os.path.join(parent_dir, "accounts")
+
+os.makedirs(DATA_ROOT, exist_ok=True)
+os.makedirs(ACCOUNTS_DIR, exist_ok=True)
+
+def get_measurement_dir(account_user_id, profile_id, analysis_id):
+    safe_account = os.path.basename(str(account_user_id))
+    safe_profile = os.path.basename(str(profile_id))
+    safe_analysis = os.path.basename(str(analysis_id))
+    path = os.path.join(ACCOUNTS_DIR, safe_account, "profiles", safe_profile, "measurements", safe_analysis)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def to_native_types(obj):
@@ -282,9 +439,20 @@ def login():
         {'user_id': user['user_id']},
         {'$set': {'last_login': dt.datetime.now(dt.timezone.utc)}}
     )
-    token = create_access_token(identity=user['user_id'])
+    token = create_access_token(
+        identity=user['user_id'],
+        additional_claims={
+            'role': 'owner',
+            'access_mode': 'account_owner',
+            'account_user_id': user['user_id']
+        }
+    )
     return jsonify({
         'success': True,
+        'account_user_id': user['user_id'],
+        'role': 'owner',
+        'requires_profile_unlock': True,
+        'access_token': token,
         'token': token,
         'user': {
             'user_id': user['user_id'],
@@ -379,29 +547,8 @@ def verify_face():
     except Exception as e:
         return jsonify({'verified': False, 'error': str(e)}), 500
 
-def get_network_frontend_url():
-    # 1. If called within an HTTP request context, prioritize the client's actual Origin or Referer
-    try:
-        from flask import has_request_context
-        if has_request_context():
-            origin = request.headers.get('Origin')
-            if origin and origin.strip():
-                return origin.strip().rstrip('/')
-            referer = request.headers.get('Referer')
-            if referer and referer.strip():
-                from urllib.parse import urlparse
-                p = urlparse(referer.strip())
-                if p.scheme and p.netloc:
-                    return f"{p.scheme}://{p.netloc}".rstrip('/')
-    except Exception:
-        pass
-
-    # 2. Check configured environment variable
-    env_url = (os.getenv('FRONTEND_URL') or '').strip().rstrip('/')
-    if env_url:
-        return env_url
-
-    # 3. Dynamic fallback to machine's active local IP
+def get_machine_local_ip():
+    """Detects active host machine LAN IPv4 address (e.g. 10.42.93.161) so mobile devices on the network can connect."""
     local_ip = '127.0.0.1'
     try:
         import socket
@@ -410,9 +557,281 @@ def get_network_frontend_url():
         local_ip = s.getsockname()[0]
         s.close()
     except Exception:
+        try:
+            import socket
+            local_ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            local_ip = '127.0.0.1'
+    return local_ip
+
+def get_network_frontend_url():
+    local_ip = get_machine_local_ip()
+
+    # 1. If called within an HTTP request context, prioritize the client's actual Origin or Referer
+    try:
+        from flask import has_request_context
+        if has_request_context():
+            origin = request.headers.get('Origin')
+            if origin and origin.strip():
+                clean_origin = origin.strip().rstrip('/')
+                # If origin is localhost or 127.0.0.1, convert to local IP so mobile links work
+                clean_origin = clean_origin.replace('localhost', local_ip).replace('127.0.0.1', local_ip)
+                return clean_origin
+            referer = request.headers.get('Referer')
+            if referer and referer.strip():
+                from urllib.parse import urlparse
+                p = urlparse(referer.strip())
+                if p.scheme and p.netloc:
+                    netloc = p.netloc.replace('localhost', local_ip).replace('127.0.0.1', local_ip)
+                    return f"{p.scheme}://{netloc}".rstrip('/')
+    except Exception:
         pass
 
+    # 2. Check configured environment variable
+    env_url = (os.getenv('FRONTEND_URL') or '').strip().rstrip('/')
+    if env_url:
+        env_url = env_url.replace('localhost', local_ip).replace('127.0.0.1', local_ip)
+        return env_url
+
+    # 3. Dynamic fallback to machine's active local IP on port 3000
     return f"http://{local_ip}:3000"
+
+def render_reset_password_html(token=None, error_msg=None, success=False):
+    """
+    Renders a standalone, responsive, high-aesthetic HTML page matching FitLens dark mode.
+    Works directly in any mobile or desktop web browser without requiring Vite dev server.
+    """
+    token_val = token or ''
+    error_banner = f"""
+      <div style="background:rgba(252,129,129,0.12);border:1px solid #fc8181;color:#fc8181;
+                  padding:12px 16px;border-radius:10px;margin-bottom:20px;font-size:14px;line-height:1.5;">
+        ⚠️ {error_msg}
+      </div>
+    """ if error_msg else ""
+
+    if success:
+        body_content = """
+          <div style="font-size:56px;margin-bottom:16px;">✅</div>
+          <h2 style="color:#00d4aa;font-size:22px;margin:0 0 10px;font-weight:700;">Password Reset!</h2>
+          <p style="color:#a0aec0;font-size:14px;line-height:1.6;margin:0 0 24px;">
+            Your FitLens AI password has been updated successfully.<br>
+            You can now log into your account using your new password.
+          </p>
+          <a href="/" style="display:inline-block;padding:14px 28px;background:linear-gradient(135deg,#00d4aa,#0080ff);
+                             color:#ffffff;text-decoration:none;border-radius:10px;font-weight:700;font-size:15px;
+                             box-shadow:0 4px 15px rgba(0,212,170,0.3);">
+            Open FitLens Web / Login
+          </a>
+        """
+    elif error_msg and not token_val:
+        body_content = f"""
+          <div style="font-size:52px;margin-bottom:16px;">⚠️</div>
+          <h2 style="color:#fc8181;font-size:22px;margin:0 0 10px;font-weight:700;">Invalid Reset Link</h2>
+          {error_banner}
+          <p style="color:#a0aec0;font-size:14px;line-height:1.6;margin:0 0 24px;">
+            Password reset links expire in 15 minutes or can only be used once.<br>
+            Please request a new reset link from the login screen.
+          </p>
+          <a href="/" style="display:inline-block;padding:12px 24px;background:#1e2340;border:1px solid #2d3561;
+                             color:#00d4aa;text-decoration:none;border-radius:10px;font-weight:600;font-size:14px;">
+            Return to FitLens
+          </a>
+        """
+    else:
+        body_content = f"""
+          <div style="font-size:46px;margin-bottom:12px;">🔐</div>
+          <h2 style="color:#ffffff;font-size:22px;margin:0 0 8px;font-weight:700;">Set New Password</h2>
+          <p style="color:#a0aec0;font-size:14px;margin:0 0 22px;">
+            Create a secure new password for your FitLens AI account.
+          </p>
+          <div id="dynamic-error">{error_banner}</div>
+          <form id="reset-form" method="POST" action="/api/auth/reset-password">
+            <input type="hidden" name="token" id="token" value="{token_val}">
+
+            <div style="position:relative;margin-bottom:16px;text-align:left;">
+              <label style="display:block;color:#a0aec0;font-size:12px;margin-bottom:6px;font-weight:600;">NEW PASSWORD</label>
+              <div style="position:relative;">
+                <input type="password" id="new_password" name="new_password" placeholder="At least 8 characters" required minlength="8"
+                       style="width:100%;padding:14px 44px 14px 14px;background:#0c102b;border:1px solid #2d3561;
+                              border-radius:10px;color:#ffffff;font-size:15px;box-sizing:border-box;outline:none;" />
+                <button type="button" onclick="togglePass('new_password', this)"
+                        style="position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:18px;color:#a0aec0;padding:4px;">
+                  👁️
+                </button>
+              </div>
+            </div>
+
+            <div style="position:relative;margin-bottom:20px;text-align:left;">
+              <label style="display:block;color:#a0aec0;font-size:12px;margin-bottom:6px;font-weight:600;">CONFIRM NEW PASSWORD</label>
+              <div style="position:relative;">
+                <input type="password" id="confirm_password" name="confirm_password" placeholder="Re-enter new password" required minlength="8"
+                       style="width:100%;padding:14px 44px 14px 14px;background:#0c102b;border:1px solid #2d3561;
+                              border-radius:10px;color:#ffffff;font-size:15px;box-sizing:border-box;outline:none;" />
+                <button type="button" onclick="togglePass('confirm_password', this)"
+                        style="position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:18px;color:#a0aec0;padding:4px;">
+                  👁️
+                </button>
+              </div>
+            </div>
+
+            <button type="submit" id="submit-btn"
+                    style="width:100%;padding:15px;background:linear-gradient(135deg,#00d4aa,#0080ff);
+                           color:#ffffff;border:none;border-radius:10px;font-size:16px;font-weight:700;
+                           cursor:pointer;box-shadow:0 4px 15px rgba(0,212,170,0.3);transition:all 0.2s;">
+              Reset Password
+            </button>
+          </form>
+          <div id="success-view" style="display:none;margin-top:10px;">
+            <div style="font-size:56px;margin-bottom:14px;">✅</div>
+            <h2 style="color:#00d4aa;font-size:22px;margin:0 0 8px;font-weight:700;">Password Reset!</h2>
+            <p style="color:#a0aec0;font-size:14px;line-height:1.6;margin:0 0 20px;">
+              Your password has been updated successfully.<br>
+              You can now log in using your new password.
+            </p>
+          </div>
+        """
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Reset Password — FitLens AI</title>
+  <style>
+    * {{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }}
+    body {{
+      margin: 0; padding: 16px;
+      min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 50%, #0d1b2a 100%);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      color: #ffffff;
+    }}
+    .card {{
+      background: #1e2340;
+      border: 1px solid #2d3561;
+      border-radius: 20px;
+      padding: 36px 28px;
+      max-width: 440px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+    }}
+    .logo-badge {{
+      display: inline-flex; align-items: center; gap: 8px;
+      margin-bottom: 20px; padding: 6px 14px;
+      background: rgba(0,212,170,0.1); border: 1px solid rgba(0,212,170,0.3);
+      border-radius: 999px; color: #00d4aa; font-weight: 700; font-size: 13px;
+    }}
+    input:focus {{
+      border-color: #00d4aa !important;
+      box-shadow: 0 0 0 3px rgba(0,212,170,0.2);
+    }}
+    button:active {{
+      transform: scale(0.98);
+    }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo-badge">FITLENS AI</div>
+    <div id="content-container">
+      {body_content}
+    </div>
+  </div>
+
+  <script>
+    function togglePass(id, btn) {{
+      var inp = document.getElementById(id);
+      if (inp.type === 'password') {{
+        inp.type = 'text';
+        btn.innerText = '🙈';
+      }} else {{
+        inp.type = 'password';
+        btn.innerText = '👁️';
+      }}
+    }}
+
+    var form = document.getElementById('reset-form');
+    if (form) {{
+      form.addEventListener('submit', async function(e) {{
+        e.preventDefault();
+        var token = document.getElementById('token').value;
+        var newPass = document.getElementById('new_password').value;
+        var confirmPass = document.getElementById('confirm_password').value;
+        var errBox = document.getElementById('dynamic-error');
+        var submitBtn = document.getElementById('submit-btn');
+
+        if (!newPass || newPass.length < 8) {{
+          errBox.innerHTML = '<div style="background:rgba(252,129,129,0.12);border:1px solid #fc8181;color:#fc8181;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:13px;">⚠️ Password must be at least 8 characters</div>';
+          return;
+        }}
+        if (newPass !== confirmPass) {{
+          errBox.innerHTML = '<div style="background:rgba(252,129,129,0.12);border:1px solid #fc8181;color:#fc8181;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:13px;">⚠️ Passwords do not match</div>';
+          return;
+        }}
+
+        submitBtn.disabled = true;
+        submitBtn.innerText = 'Resetting Password...';
+        errBox.innerHTML = '';
+
+        try {{
+          var res = await fetch('/api/auth/reset-password', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{
+              token: token,
+              new_password: newPass,
+              confirm_password: confirmPass
+            }})
+          }});
+          var data = await res.json();
+          if (res.ok && data.success) {{
+            form.style.display = 'none';
+            document.getElementById('success-view').style.display = 'block';
+          }} else {{
+            errBox.innerHTML = '<div style="background:rgba(252,129,129,0.12);border:1px solid #fc8181;color:#fc8181;padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:13px;">⚠️ ' + (data.error || 'Password reset failed') + '</div>';
+            submitBtn.disabled = false;
+            submitBtn.innerText = 'Reset Password';
+          }}
+        }} catch(err) {{
+          form.submit();
+        }}
+      }});
+    }}
+  </script>
+</body>
+</html>"""
+    return html
+
+@app.route('/reset-password', methods=['GET'])
+def reset_password_page():
+    token = request.args.get('token', '').strip()
+    if not token:
+        return render_reset_password_html(error_msg='No reset token provided. Please use the link sent to your registered email.'), 400
+
+    reset_tokens_col = db['reset_tokens']
+    token_doc = reset_tokens_col.find_one({'token': token, 'used': False})
+    if not token_doc:
+        if token in reset_tokens and not reset_tokens[token].get('used'):
+            token_doc = reset_tokens[token]
+        else:
+            return render_reset_password_html(error_msg='This password reset link is invalid or has already been used. Please request a new reset email.'), 400
+
+    expires = token_doc['expires']
+    if isinstance(expires, str):
+        try:
+            expires = dt.datetime.fromisoformat(expires)
+        except Exception:
+            pass
+    if isinstance(expires, dt.datetime) and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=dt.timezone.utc)
+
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    if isinstance(expires, dt.datetime) and now_utc > expires:
+        return render_reset_password_html(error_msg='This password reset link has expired (links expire after 15 minutes). Please request a new one.'), 400
+
+    return render_reset_password_html(token=token), 200
 
 @app.route('/api/auth/forgot-password', methods=['POST'])
 def forgot_password():
@@ -461,50 +880,74 @@ def forgot_password():
             'used': False
         }
 
+        local_ip = get_machine_local_ip()
         frontend_url = get_network_frontend_url()
-        reset_link = f"{frontend_url}/reset-password?token={token}"
+
+        # Primary link points directly to Flask backend reset page (always available over LAN on mobile)
+        direct_reset_url = f"http://{local_ip}:5000/reset-password?token={token}"
+        # Secondary web portal link (when Vite dev server is running on port 3000)
+        web_reset_url = f"{frontend_url}/reset-password?token={token}"
 
         mail_email = (os.getenv('MAIL_EMAIL') or app.config.get('MAIL_USERNAME') or 'sinchanas4u@gmail.com').strip()
         mail_pass = (os.getenv('MAIL_PASSWORD') or app.config.get('MAIL_PASSWORD') or 'ytxpvjubamtdhzzz').replace(' ', '').strip()
 
-        # HTML Email content
+        # High-aesthetic responsive HTML email content
         html_content = f"""
-        <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;
-                    background:#0a0e27;color:#ffffff;padding:40px;border-radius:16px;
-                    border:1px solid #2d3561;">
+        <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+                    max-width:500px;margin:auto;background:#0a0e27;color:#ffffff;padding:36px 28px;
+                    border-radius:18px;border:1px solid #2d3561;">
           <div style="text-align:center;margin-bottom:24px;">
-            <h1 style="color:#00d4aa;font-size:28px;margin:0;">FitLens AI</h1>
-            <p style="color:#a0aec0;margin:4px 0 0;">AI-Powered Body Measurements</p>
+            <div style="display:inline-block;padding:6px 16px;background:rgba(0,212,170,0.12);
+                        border:1px solid rgba(0,212,170,0.3);border-radius:999px;color:#00d4aa;
+                        font-weight:700;font-size:13px;letter-spacing:1px;">
+              FITLENS AI
+            </div>
+            <h1 style="color:#ffffff;font-size:22px;margin:16px 0 4px;font-weight:700;">Password Reset Request</h1>
+            <p style="color:#a0aec0;font-size:13px;margin:0;">AI-Powered Body Measurement System</p>
           </div>
-          <h2 style="color:#ffffff;font-size:20px;">Password Reset Request</h2>
-          <p style="color:#a0aec0;">Hi <strong style="color:#fff;">{user.get('name', 'User')}</strong>,</p>
-          <p style="color:#a0aec0;">
-            We received a request to reset the password for your FitLens account.<br>
-            Click the button below to set a new password.
+
+          <p style="color:#cbd5e0;font-size:14px;line-height:1.6;">
+            Hi <strong style="color:#ffffff;">{user.get('name', 'User')}</strong>,<br><br>
+            We received a request to reset the password for your FitLens account.
+            Click the button below to open the secure reset page on your phone or computer.
           </p>
-          <p style="color:#fc8181;font-size:13px;">
-            Note: This link expires in <strong>15 minutes</strong>.
-          </p>
-          <div style="text-align:center;margin:32px 0;">
-            <a href="{reset_link}"
+
+          <div style="text-align:center;margin:28px 0;">
+            <a href="{direct_reset_url}"
                style="background:linear-gradient(135deg,#00d4aa,#0080ff);
-                      color:#ffffff;text-decoration:none;padding:16px 40px;
-                      border-radius:10px;font-size:16px;font-weight:bold;
-                      display:inline-block;">
+                      color:#ffffff;text-decoration:none;padding:15px 36px;
+                      border-radius:12px;font-size:15px;font-weight:700;
+                      display:inline-block;box-shadow:0 4px 16px rgba(0,212,170,0.3);">
               Reset My Password
             </a>
           </div>
-          <p style="color:#4a5568;font-size:12px;text-align:center;">
-            If you did not request a password reset, ignore this email.<br>
-            Your password will remain unchanged.
+
+          <div style="background:#131838;border:1px dashed #2d3561;padding:14px;border-radius:10px;text-align:center;margin:24px 0;">
+            <span style="font-size:11px;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;display:block;margin-bottom:6px;">
+              Reset Code for Mobile App
+            </span>
+            <code style="color:#00d4aa;font-family:Consolas,monospace;font-size:12px;word-break:break-all;user-select:all;display:inline-block;padding:4px 8px;background:rgba(0,212,170,0.08);border-radius:4px;">
+              {token}
+            </code>
+            <p style="color:#718096;font-size:11px;margin:6px 0 0;">
+              Using the FitLens mobile app? You can paste this code directly into the app's Reset screen.
+            </p>
+          </div>
+
+          <p style="color:#fc8181;font-size:12px;text-align:center;margin:16px 0;">
+            ⏱️ This link and code expire in <strong>15 minutes</strong>.
           </p>
-          <hr style="border:1px solid #2d3561;margin:24px 0;">
-          <p style="color:#4a5568;font-size:11px;text-align:center;">
-            Or copy this link: <br>
-            <span style="color:#00d4aa;word-break:break-all;">{reset_link}</span>
+
+          <hr style="border:0;border-top:1px solid #1e2445;margin:22px 0;">
+
+          <p style="color:#718096;font-size:11px;text-align:center;line-height:1.5;margin:0;">
+            Direct Link: <a href="{direct_reset_url}" style="color:#00d4aa;word-break:break-all;">{direct_reset_url}</a><br>
+            Web Portal Link: <a href="{web_reset_url}" style="color:#00d4aa;word-break:break-all;">{web_reset_url}</a><br><br>
+            If you did not request a password reset, you can safely ignore this email.
           </p>
         </div>
         """
+
         def send_email_async(sender_email, sender_pass, recipient_email, html_body, reset_url):
             try:
                 import smtplib
@@ -516,20 +959,20 @@ def forgot_password():
                 mime_msg['From'] = sender_email
                 mime_msg['To'] = recipient_email
 
-                plain_text = f"Reset your FitLens AI password by opening this link in your browser:\n{reset_url}\n\nThis link will expire in 15 minutes."
+                plain_text = f"Reset your FitLens AI password by opening this link in your browser:\n{reset_url}\n\nReset Code: {token}\n\nThis link will expire in 15 minutes."
                 mime_msg.attach(MIMEText(plain_text, 'plain', 'utf-8'))
                 mime_msg.attach(MIMEText(html_body, 'html', 'utf-8'))
 
                 server = smtplib.SMTP('smtp.gmail.com', 587, timeout=15)
                 server.starttls()
                 server.login(sender_email, sender_pass)
-                server.sendmail(sender_email, [recipient_email], mime_msg.as_string())
+                server.send_message(mime_msg)
                 server.quit()
                 print(f"[EMAIL SUCCESS] Password reset email delivered to '{recipient_email}' from '{sender_email}'", flush=True)
             except Exception as mail_err:
                 print(f"[EMAIL ERROR] Failed to send email to '{recipient_email}': {mail_err}. Reset link: {reset_url}", flush=True)
 
-        threading.Thread(target=send_email_async, args=(mail_email, mail_pass, email, html_content, reset_link), daemon=True).start()
+        threading.Thread(target=send_email_async, args=(mail_email, mail_pass, email, html_content, direct_reset_url), daemon=True).start()
 
         return generic_response
 
@@ -539,16 +982,28 @@ def forgot_password():
 
 @app.route('/api/auth/reset-password', methods=['POST'])
 def reset_password():
-    data = request.get_json() or {}
-    token = data.get('token', '').strip()
-    new_password = data.get('new_password', '')
-    confirm_password = data.get('confirm_password', '')
+    is_form = False
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+    else:
+        is_form = True
+        data = request.form.to_dict() or {}
+
+    token = (data.get('token') or '').strip()
+    new_password = (data.get('new_password') or data.get('newPassword') or '').strip()
+    confirm_password = (data.get('confirm_password') or data.get('confirmPassword') or '').strip()
 
     if not token:
+        if is_form:
+            return render_reset_password_html(token=token, error_msg='Reset token is missing'), 400
         return jsonify({'error': 'Reset token is missing'}), 400
     if len(new_password) < 8:
+        if is_form:
+            return render_reset_password_html(token=token, error_msg='Password must be at least 8 characters'), 400
         return jsonify({'error': 'Password must be at least 8 characters'}), 400
     if new_password != confirm_password:
+        if is_form:
+            return render_reset_password_html(token=token, error_msg='Passwords do not match'), 400
         return jsonify({'error': 'Passwords do not match'}), 400
 
     reset_tokens_col = db['reset_tokens']
@@ -562,7 +1017,10 @@ def reset_password():
                 'used': False
             }
         else:
-            return jsonify({'error': 'Invalid or already used reset link. Please request a new one.'}), 400
+            err = 'Invalid or already used reset link. Please request a new one.'
+            if is_form:
+                return render_reset_password_html(token=token, error_msg=err), 400
+            return jsonify({'error': err}), 400
 
     expires = token_doc['expires']
     if isinstance(expires, str):
@@ -577,7 +1035,10 @@ def reset_password():
     if isinstance(expires, dt.datetime) and now_utc > expires:
         reset_tokens_col.delete_one({'token': token})
         reset_tokens.pop(token, None)
-        return jsonify({'error': 'Reset link has expired. Please request a new one.'}), 400
+        err = 'Reset link has expired. Please request a new one.'
+        if is_form:
+            return render_reset_password_html(token=token, error_msg=err), 400
+        return jsonify({'error': err}), 400
 
     # Hash and update password
     password_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
@@ -593,6 +1054,9 @@ def reset_password():
     )
     if token in reset_tokens:
         reset_tokens[token]['used'] = True
+
+    if is_form:
+        return render_reset_password_html(token=token, success=True), 200
 
     return jsonify({'success': True, 'message': 'Password reset successfully. Please log in.'}), 200
 
@@ -660,73 +1124,1767 @@ def delete_account():
     measurements_col.delete_many({'user_id': user_id})
     return jsonify({'success': True, 'message': 'Account deleted'}), 200
 
-# --- MEASUREMENT ROUTES ---
+# --- MULTI-PROFILE & INVITATION HELPERS ---
+
+claim_ip_rate_limits = {}      # ip -> list of timestamps
+claim_target_rate_limits = {}  # target_hash -> list of timestamps
+claim_rate_limits = claim_ip_rate_limits  # alias for backward compatibility
+
+def is_claim_rate_limited(ip_address: str, target_hash: str = None, max_attempts: int = 5, window_seconds: int = 600) -> bool:
+    now = time.time()
+    # Check IP-level rate limit
+    ip_attempts = [t for t in claim_ip_rate_limits.get(ip_address, []) if now - t < window_seconds]
+    ip_attempts.append(now)
+    claim_ip_rate_limits[ip_address] = ip_attempts
+    if len(ip_attempts) > max_attempts:
+        return True
+
+    # Check target code/token hash rate limit if provided
+    if target_hash:
+        target_attempts = [t for t in claim_target_rate_limits.get(target_hash, []) if now - t < window_seconds]
+        target_attempts.append(now)
+        claim_target_rate_limits[target_hash] = target_attempts
+        if len(target_attempts) > max_attempts:
+            return True
+
+    return False
+
+def hash_secret(value: str) -> str:
+    if not value:
+        return ''
+    return hashlib.sha256(value.strip().encode('utf-8')).hexdigest()
+
+def generate_short_code() -> str:
+    chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
+    p1 = ''.join(secrets.choice(chars) for _ in range(4))
+    p2 = ''.join(secrets.choice(chars) for _ in range(4))
+    return f"FL-{p1}-{p2}"
+
+def get_or_create_owner_profile(account_user_id: str):
+    """Ensure account has exactly one owner profile, handling race conditions safely."""
+    owner_profile = profiles_col.find_one({
+        'account_user_id': account_user_id,
+        '$or': [{'is_owner': True}, {'profile_type': 'owner'}],
+        'is_archived': {'$ne': True}
+    })
+    if not owner_profile:
+        user = users_col.find_one({'user_id': account_user_id}) or {}
+        now = dt.datetime.now(dt.timezone.utc)
+        doc = {
+            'account_user_id': account_user_id,
+            'name': user.get('name') or 'My Profile',
+            'avatar_url': None,
+            'relationship': 'Self',
+            'profile_type': 'owner',
+            'is_owner': True,
+            'is_owner_profile': True,
+            'status': 'active',
+            'privacy_mode': 'account_owner_access',
+            'default_height_cm': 170.0,
+            'is_archived': False,
+            'created_by': 'owner',
+            'created_at': now,
+            'updated_at': now,
+            'last_used_at': now,
+            'pin_enabled': False,
+            'profile_pin_hash': None
+        }
+        try:
+            res = profiles_col.insert_one(doc)
+            doc['_id'] = getattr(res, 'inserted_id', doc.get('_id'))
+            return doc
+        except DuplicateKeyError:
+            owner_profile = profiles_col.find_one({
+                'account_user_id': account_user_id,
+                '$or': [{'is_owner': True}, {'profile_type': 'owner'}],
+                'is_archived': {'$ne': True}
+            })
+            if owner_profile:
+                return owner_profile
+            return profiles_col.find_one({'account_user_id': account_user_id, 'is_owner': True})
+    return owner_profile
+
+def get_verified_profile(account_user_id: str, profile_id_val):
+    if not profile_id_val:
+        return None
+    try:
+        p_oid = ObjectId(str(profile_id_val))
+    except Exception:
+        return None
+    return profiles_col.find_one({
+        '_id': p_oid,
+        'account_user_id': account_user_id,
+        'is_archived': {'$ne': True}
+    })
+
+def count_active_slots(account_user_id: str):
+    now = dt.datetime.now(dt.timezone.utc)
+    active_count = profiles_col.count_documents({
+        'account_user_id': account_user_id,
+        'is_archived': {'$ne': True}
+    })
+    reserved_invites_count = profile_invites_col.count_documents({
+        'account_user_id': account_user_id,
+        'status': {'$in': ['pending', 'claiming']},
+        'expires_at': {'$gt': now}
+    })
+    return active_count, reserved_invites_count, active_count + reserved_invites_count
+
+
+def verify_profile_owner_access(account_user_id: str, allow_member_self_edit_for=None):
+    """
+    Checks if caller has owner permissions.
+    Rejects restricted member sessions (role == 'profile_member_session' or access_mode == 'invited_profile').
+    If caller specifies X-Active-Profile-Id, verifies that profile is an owner profile.
+    Non-owner profiles are denied management actions (create, delete, archive, invite).
+    """
+    jwt_claims = get_jwt() or {}
+    if jwt_claims.get('role') == 'profile_member_session' or jwt_claims.get('access_mode') == 'invited_profile':
+        return False, jsonify({'error': 'Permission denied: Restricted member session cannot manage profiles.'}), 403
+
+    caller_profile_id = request.headers.get('X-Active-Profile-Id') or (
+        request.is_json and request.get_json(silent=True) or {}
+    ).get('active_profile_id')
+    if caller_profile_id:
+        caller = get_verified_profile(account_user_id, caller_profile_id)
+        if caller and not caller.get('is_owner') and not caller.get('is_owner_profile') and caller.get('profile_type') != 'owner':
+            if allow_member_self_edit_for is not None:
+                if str(caller['_id']) == str(allow_member_self_edit_for):
+                    return True, None, None
+                return False, jsonify({'error': 'Permission denied: Members can only update their own profile.'}), 403
+            return False, jsonify({'error': 'Permission denied: Only the account owner can manage profiles.'}), 403
+    return True, None, None
+
+
+def verify_profile_session_access(target_profile_id: str):
+    """
+    Enforces restricted profile session authorization for measurement & profile asset endpoints.
+    Verifies:
+    1. Caller has a valid JWT with account_user_id.
+    2. Target profile exists and belongs to account_user_id.
+    3. Target profile is active and not archived or deleted.
+    4. Token profile_id (if restricted session) must match target_profile_id.
+    5. Token account_user_id must match profile account_user_id.
+    6. Raw owner account tokens cannot directly access member profile measurements (HTTP 403).
+    """
+    account_user_id = get_jwt_identity()
+    claims = get_jwt() or {}
+
+    token_profile_id = str(claims.get('profile_id') or '').strip()
+    role = claims.get('role')
+    access_mode = claims.get('access_mode')
+
+    profile = get_verified_profile(account_user_id, target_profile_id)
+    if not profile:
+        return None, jsonify({'error': 'Profile not found or access denied.'}), 404
+
+    # Check active status
+    if profile.get('status') == 'archived' or profile.get('is_archived') is True or profile.get('status') == 'deleted':
+        return None, jsonify({'error': 'Profile is archived or deleted.'}), 403
+
+    p_str = str(profile['_id'])
+    is_owner_prof = bool(profile.get('is_owner') or profile.get('is_owner_profile') or profile.get('profile_type') == 'owner')
+
+    # If this is a restricted profile session token
+    if token_profile_id:
+        if token_profile_id != p_str or token_profile_id != str(target_profile_id):
+            return None, jsonify({'error': 'Forbidden: Session token cannot access this profile.'}), 403
+        if str(claims.get('account_user_id') or account_user_id) != str(profile.get('account_user_id')):
+            return None, jsonify({'error': 'Forbidden: Account mismatch.'}), 403
+        return profile, None, None
+
+    # If the token has no profile_id (raw owner account token):
+    # Owner cannot access non-owner sensitive measurement data
+    if not is_owner_prof:
+        return None, jsonify({'error': 'Forbidden: Owner account token cannot directly access member profile measurements. Restricted profile session required.'}), 403
+
+    # For owner profile with raw account token:
+    # Require unlocking owner profile session token
+    return None, jsonify({'error': 'Forbidden: Profile session token required. Please unlock owner profile first.'}), 403
+
+
+# --- PROFILE ROUTES ---
+
+@app.route('/api/profiles', methods=['GET'])
+@jwt_required()
+def list_profiles():
+    try:
+        account_user_id = get_jwt_identity()
+        allowed, err_resp, code = verify_profile_owner_access(account_user_id)
+        if not allowed:
+            return err_resp, code
+
+        # Ensure default owner profile exists
+        get_or_create_owner_profile(account_user_id)
+        
+        cursor = profiles_col.find({
+            'account_user_id': account_user_id,
+            'is_archived': {'$ne': True}
+        })
+        if hasattr(cursor, 'sort'):
+            cursor = cursor.sort('last_used_at', -1)
+            
+        owner_user = users_col.find_one({'user_id': account_user_id})
+        owner_email = owner_user.get('email', '') if owner_user else ''
+        profiles = list(cursor)
+        cards = []
+        for p in profiles:
+            p_id = str(p['_id'])
+            is_owner = bool(p.get('is_owner') or p.get('is_owner_profile') or p.get('profile_type') == 'owner')
+            p_email = p.get('email') or p.get('target_email')
+            if not p_email and p.get('invite_id'):
+                inv = profile_invites_col.find_one({'_id': p['invite_id']})
+                if inv:
+                    p_email = inv.get('target_email') or inv.get('invited_email')
+            if not p_email and is_owner:
+                p_email = owner_email
+
+            cards.append({
+                'id': p_id,
+                'name': p.get('name', ''),
+                'avatar_url': p.get('avatar_url'),
+                'relationship': p.get('relationship', 'Self' if is_owner else 'Family'),
+                'profile_type': 'owner' if is_owner else p.get('profile_type', 'adult'),
+                'is_owner': is_owner,
+                'is_owner_profile': is_owner,
+                'email': p_email or None,
+                'privacy_mode': p.get('privacy_mode', 'account_owner_access'),
+                'default_height_cm': p.get('default_height_cm', 170.0),
+                'status': p.get('status', 'active'),
+                'is_archived': p.get('is_archived', False),
+                'last_used_at': p.get('last_used_at').isoformat() if hasattr(p.get('last_used_at'), 'isoformat') else p.get('last_used_at'),
+                'created_at': p.get('created_at').isoformat() if hasattr(p.get('created_at'), 'isoformat') else p.get('created_at')
+            })
+            
+        active_count, pending_count, total_slots = count_active_slots(account_user_id)
+        return jsonify({
+            'success': True,
+            'profiles': cards,
+            'active_profiles_count': active_count,
+            'pending_invites_count': pending_count,
+            'total_reserved_slots': total_slots,
+            'max_allowed_slots': 4
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles', methods=['POST'])
+@jwt_required()
+def create_profile():
+    try:
+        account_user_id = get_jwt_identity()
+        allowed, err_resp, code = verify_profile_owner_access(account_user_id)
+        if not allowed:
+            return err_resp, code
+
+        data = request.get_json() or {}
+        name = str(data.get('name', '')).strip()
+        relationship = str(data.get('relationship', 'Family')).strip()
+        profile_type = str(data.get('profile_type', 'adult')).strip().lower()
+        default_height_cm = data.get('default_height_cm')
+
+        if not name or len(name) < 1 or len(name) > 50:
+            return jsonify({'error': 'Name must be between 1 and 50 characters'}), 400
+
+        if profile_type not in ['owner', 'adult', 'child']:
+            profile_type = 'adult'
+
+        if default_height_cm is not None:
+            try:
+                default_height_cm = float(default_height_cm)
+                if default_height_cm < 100 or default_height_cm > 250:
+                    return jsonify({'error': 'Height must be between 100 and 250 cm'}), 400
+            except (ValueError, TypeError):
+                return jsonify({'error': 'Invalid numeric height'}), 400
+        else:
+            default_height_cm = 170.0
+
+        # Enforce max 4 active profiles + pending invites
+        active_count, pending_count, total = count_active_slots(account_user_id)
+        if total >= 4:
+            return jsonify({'error': 'Maximum of 4 active profiles allowed per account.'}), 409
+
+        target_email = str(data.get('target_email') or data.get('email') or '').strip().lower()
+        now = dt.datetime.now(dt.timezone.utc)
+        doc = {
+            'account_user_id': account_user_id,
+            'name': name,
+            'email': target_email if target_email else None,
+            'target_email': target_email if target_email else None,
+            'avatar_url': None,
+            'relationship': relationship or 'Family',
+            'profile_type': profile_type,
+            'is_owner': False,
+            'is_owner_profile': False,
+            'status': 'active',
+            'privacy_mode': 'account_owner_access',
+            'default_height_cm': default_height_cm,
+            'is_archived': False,
+            'created_by': 'owner',
+            'created_at': now,
+            'updated_at': now,
+            'last_used_at': now,
+            'pin_enabled': False,
+            'profile_pin_hash': None
+        }
+        res = profiles_col.insert_one(doc)
+        p_id = str(getattr(res, 'inserted_id', doc.get('_id')))
+
+        return jsonify({
+            'success': True,
+            'profile': {
+                'id': p_id,
+                'name': name,
+                'relationship': doc['relationship'],
+                'profile_type': profile_type,
+                'privacy_mode': doc['privacy_mode'],
+                'default_height_cm': default_height_cm,
+                'is_archived': False,
+                'last_used_at': now.isoformat()
+            }
+        }), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/<profile_id>', methods=['GET'])
+@jwt_required()
+def get_profile(profile_id):
+    try:
+        account_user_id = get_jwt_identity()
+        profile = get_verified_profile(account_user_id, profile_id)
+        if not profile:
+            return jsonify({'error': 'Profile not found'}), 404
+
+        return jsonify({
+            'success': True,
+            'profile': {
+                'id': str(profile['_id']),
+                'name': profile.get('name', ''),
+                'avatar_url': profile.get('avatar_url'),
+                'relationship': profile.get('relationship', ''),
+                'profile_type': profile.get('profile_type', 'adult'),
+                'privacy_mode': profile.get('privacy_mode', 'account_owner_access'),
+                'default_height_cm': profile.get('default_height_cm', 170.0),
+                'is_archived': profile.get('is_archived', False),
+                'last_used_at': profile.get('last_used_at').isoformat() if hasattr(profile.get('last_used_at'), 'isoformat') else profile.get('last_used_at'),
+                'created_at': profile.get('created_at').isoformat() if hasattr(profile.get('created_at'), 'isoformat') else profile.get('created_at')
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/<profile_id>', methods=['PATCH'])
+@jwt_required()
+def update_profile_metadata(profile_id):
+    try:
+        account_user_id = get_jwt_identity()
+        allowed, err_resp, code = verify_profile_owner_access(account_user_id, allow_member_self_edit_for=profile_id)
+        if not allowed:
+            return err_resp, code
+
+        profile = get_verified_profile(account_user_id, profile_id)
+        if not profile:
+            return jsonify({'error': 'Profile not found'}), 404
+
+        # Non-owners can only update their own profile
+        caller_profile_id = request.headers.get('X-Active-Profile-Id') or (
+            request.is_json and request.get_json(silent=True) or {}
+        ).get('active_profile_id')
+        if caller_profile_id:
+            caller = get_verified_profile(account_user_id, caller_profile_id)
+            if caller and not caller.get('is_owner') and caller.get('profile_type') != 'owner':
+                if str(caller['_id']) != str(profile['_id']):
+                    return jsonify({'error': 'Permission denied: Members can only update their own profile.'}), 403
+
+        data = request.get_json() or {}
+        updates = {'updated_at': dt.datetime.now(dt.timezone.utc)}
+
+        if 'name' in data:
+            name = str(data['name']).strip()
+            if not name or len(name) < 1 or len(name) > 50:
+                return jsonify({'error': 'Name must be between 1 and 50 characters'}), 400
+            updates['name'] = name
+
+        if 'relationship' in data:
+            updates['relationship'] = str(data['relationship']).strip()
+
+        if 'avatar_url' in data:
+            updates['avatar_url'] = data['avatar_url']
+
+        if 'default_height_cm' in data and data['default_height_cm'] is not None:
+            try:
+                h = float(data['default_height_cm'])
+                if h < 100 or h > 250:
+                    return jsonify({'error': 'Height must be between 100 and 250 cm'}), 400
+                updates['default_height_cm'] = h
+            except (ValueError, TypeError):
+                return jsonify({'error': 'Invalid numeric height'}), 400
+
+        if 'profile_type' in data:
+            pt = str(data['profile_type']).strip().lower()
+            if pt in ['adult', 'child', 'owner']:
+                updates['profile_type'] = pt
+
+        profiles_col.update_one({'_id': profile['_id']}, {'$set': updates})
+        return jsonify({'success': True, 'message': 'Profile updated'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/available', methods=['GET'])
+@jwt_required()
+def get_available_profiles():
+    try:
+        account_user_id = get_jwt_identity()
+        get_or_create_owner_profile(account_user_id)
+        
+        cursor = profiles_col.find({
+            'account_user_id': str(account_user_id),
+            'is_archived': {'$ne': True}
+        })
+        if hasattr(cursor, 'sort'):
+            cursor = cursor.sort('created_at', 1)
+
+        available_profiles = []
+        for p in cursor:
+            is_owner = bool(p.get('is_owner') or p.get('is_owner_profile') or p.get('profile_type') == 'owner')
+            available_profiles.append({
+                'id': str(p['_id']),
+                'profile_id': str(p['_id']),
+                'name': p.get('name', 'Member'),
+                'relationship': p.get('relationship', 'Owner' if is_owner else 'Family'),
+                'profile_type': 'owner' if is_owner else p.get('profile_type', 'family'),
+                'is_owner': is_owner,
+                'is_owner_profile': is_owner,
+                'status': p.get('status', 'active'),
+                'is_archived': bool(p.get('is_archived', False)),
+                'default_height_cm': p.get('default_height_cm', 170.0),
+                'locked': True
+            })
+
+        return jsonify({
+            'success': True,
+            'profiles': available_profiles
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/unlock-invited', methods=['POST'])
+@jwt_required()
+def unlock_invited_profile():
+    try:
+        account_user_id = get_jwt_identity()
+        data = request.get_json() or {}
+        raw_email = data.get('invited_email') or data.get('email') or ''
+        invited_email = str(raw_email).strip().lower()
+
+        if not invited_email or '@' not in invited_email:
+            return jsonify({'error': 'A valid invited email address is required.'}), 400
+
+        now = dt.datetime.now(dt.timezone.utc)
+
+        # 1. Look for invitation under this authenticated owner account
+        inv_query = {
+            'account_user_id': str(account_user_id),
+            '$or': [
+                {'invited_email_normalized': invited_email},
+                {'invited_email': invited_email},
+                {'target_email': invited_email}
+            ]
+        }
+        invite = profile_invites_col.find_one(inv_query, sort=[('created_at', -1)])
+
+        if not invite:
+            return jsonify({'error': 'No invitation found for this email address under this owner account.'}), 404
+
+        # Check invitation status
+        status = invite.get('status')
+        if status == 'revoked':
+            return jsonify({'error': 'This invitation was revoked by the account owner.'}), 400
+        if status == 'claimed':
+            return jsonify({'error': 'This invitation has already been claimed and cannot be reused.'}), 400
+        if status != 'pending':
+            return jsonify({'error': f'Invitation is not pending (status: {status}).'}), 400
+
+        # Check expiration
+        exp = invite.get('expires_at')
+        if exp:
+            if getattr(exp, 'tzinfo', None) is None:
+                exp = exp.replace(tzinfo=dt.timezone.utc)
+            if exp <= now:
+                profile_invites_col.update_one({'_id': invite['_id']}, {'$set': {'status': 'expired'}})
+                return jsonify({'error': 'Invitation code/link has expired. Ask the owner for a new invitation.'}), 400
+
+        # Verify linked profile
+        linked_profile_id = invite.get('profile_id') or invite.get('claimed_profile_id')
+        if not linked_profile_id:
+            return jsonify({'error': 'Invitation is not linked to any profile.'}), 400
+
+        try:
+            p_oid = ObjectId(str(linked_profile_id))
+        except Exception:
+            return jsonify({'error': 'Invalid linked profile reference.'}), 400
+
+        profile = profiles_col.find_one({
+            '_id': p_oid,
+            'account_user_id': str(account_user_id)
+        })
+
+        if not profile:
+            return jsonify({'error': 'The profile linked to this invitation does not belong to this owner account.'}), 404
+
+        if profile.get('status') == 'archived' or profile.get('is_archived') is True:
+            return jsonify({'error': 'The linked profile has been archived or deleted.'}), 400
+
+        if profile.get('is_owner') or profile.get('is_owner_profile') or profile.get('profile_type') == 'owner':
+            return jsonify({'error': 'Cannot unlock owner profile via member invitation.'}), 400
+
+        # Atomically transition pending -> claimed
+        claimed_invite = profile_invites_col.find_one_and_update(
+            {
+                '_id': invite['_id'],
+                'status': 'pending',
+                'expires_at': {'$gt': now}
+            },
+            {
+                '$set': {
+                    'status': 'claimed',
+                    'claimed_at': now,
+                    'claimed_profile_id': profile['_id']
+                }
+            },
+            return_document=ReturnDocument.AFTER
+        )
+
+        if not claimed_invite:
+            return jsonify({'error': 'Invitation claim failed or was already used.'}), 400
+
+        profiles_col.update_one(
+            {'_id': profile['_id']},
+            {'$set': {'last_used_at': now, 'email': invited_email, 'status': 'active'}}
+        )
+
+        # Issue restricted profile-session token
+        profile_session_token = create_access_token(
+            identity=str(account_user_id),
+            additional_claims={
+                'role': 'profile_member_session',
+                'access_mode': 'invited_profile',
+                'account_user_id': str(account_user_id),
+                'profile_id': str(profile['_id']),
+                'invite_id': str(invite['_id'])
+            },
+            expires_delta=dt.timedelta(hours=4)
+        )
+
+        return jsonify({
+            'success': True,
+            'profile': {
+                'profile_id': str(profile['_id']),
+                'id': str(profile['_id']),
+                'name': profile.get('name', 'Member'),
+                'relationship': profile.get('relationship', 'Family'),
+                'profile_type': profile.get('profile_type', 'family'),
+                'is_owner': False,
+                'email': invited_email
+            },
+            'profile_session_token': profile_session_token,
+            'unlocked_profile_id': str(profile['_id'])
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/unlock-owner', methods=['POST'])
+@jwt_required()
+def unlock_owner_profile():
+    try:
+        account_user_id = get_jwt_identity()
+        jwt_claims = get_jwt() or {}
+
+        # Restricted member sessions cannot unlock the owner profile
+        if jwt_claims.get('role') == 'profile_member_session':
+            return jsonify({'error': 'Permission denied: Restricted member session cannot unlock owner profile.'}), 403
+
+        data = request.get_json(silent=True) or {}
+        password = str(data.get('password') or '').strip()
+
+        owner_user = users_col.find_one({'user_id': str(account_user_id)})
+        if not owner_user:
+            try:
+                owner_user = users_col.find_one({'_id': ObjectId(str(account_user_id))})
+            except Exception:
+                owner_user = None
+
+        if password and owner_user and owner_user.get('password_hash'):
+            if not bcrypt.checkpw(password.encode(), owner_user['password_hash'].encode()):
+                return jsonify({'error': 'Incorrect owner password.'}), 401
+
+        owner_profile = get_or_create_owner_profile(account_user_id)
+        if not owner_profile or str(owner_profile.get('account_user_id')) != str(account_user_id):
+            return jsonify({'error': 'Owner profile not found for this account.'}), 404
+
+        owner_session_token = create_access_token(
+            identity=str(account_user_id),
+            additional_claims={
+                'role': 'owner_profile_session',
+                'access_mode': 'owner_profile',
+                'account_user_id': str(account_user_id),
+                'profile_id': str(owner_profile['_id'])
+            },
+            expires_delta=dt.timedelta(hours=4)
+        )
+
+        return jsonify({
+            'success': True,
+            'profile': {
+                'profile_id': str(owner_profile['_id']),
+                'id': str(owner_profile['_id']),
+                'name': owner_profile.get('name', 'Owner'),
+                'relationship': 'Owner',
+                'profile_type': 'owner',
+                'is_owner': True,
+                'email': owner_user.get('email') if owner_user else None
+            },
+            'profile_session_token': owner_session_token,
+            'unlocked_profile_id': str(owner_profile['_id'])
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/unlock', methods=['POST'])
+@jwt_required()
+def unlock_profile():
+    """
+    Unified / backwards-compatible profile unlock route.
+    Dispatches to unlock_owner_profile if is_owner_unlock is true,
+    or unlock_invited_profile if email is provided.
+    """
+    data = request.get_json() or {}
+    if data.get('is_owner_unlock'):
+        return unlock_owner_profile()
+    if data.get('invited_email') or data.get('email'):
+        return unlock_invited_profile()
+    return jsonify({'error': 'Please provide invited_email or set is_owner_unlock=True.'}), 400
+
+
+@app.route('/api/profiles/<profile_id>/archive', methods=['POST'])
+@jwt_required()
+def archive_profile(profile_id):
+    try:
+        account_user_id = get_jwt_identity()
+        allowed, err_resp, code = verify_profile_owner_access(account_user_id)
+        if not allowed:
+            return err_resp, code
+
+        profile = get_verified_profile(account_user_id, profile_id)
+        if not profile:
+            return jsonify({'error': 'Profile not found'}), 404
+
+        if profile.get('is_owner') is True or profile.get('profile_type') == 'owner':
+            active_owner_count = profiles_col.count_documents({
+                'account_user_id': account_user_id,
+                '$or': [{'is_owner': True}, {'profile_type': 'owner'}],
+                'is_archived': {'$ne': True}
+            })
+            if active_owner_count <= 1:
+                return jsonify({'error': 'Cannot archive the primary owner profile'}), 400
+
+        now = dt.datetime.now(dt.timezone.utc)
+        profiles_col.update_one(
+            {'_id': profile['_id']},
+            {'$set': {'is_archived': True, 'updated_at': now}}
+        )
+
+        # Cancel any active Socket.IO session for the archived profile
+        try:
+            active_sids = [
+                sid for sid, sess in list(session_store.items())
+                if sess.profile_id == profile['_id'] or str(sess.profile_id) == str(profile['_id'])
+            ]
+            for sid in active_sids:
+                sess = session_store.get(sid)
+                if sess:
+                    sess.reset()
+                session_store.pop(sid, None)
+        except Exception as sess_err:
+            print(f"Session cleanup notice on archive: {sess_err}")
+
+        return jsonify({'success': True, 'message': 'Profile archived successfully'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/<profile_id>', methods=['DELETE'])
+@jwt_required()
+def delete_profile(profile_id):
+    try:
+        account_user_id = get_jwt_identity()
+        allowed, err_resp, code = verify_profile_owner_access(account_user_id)
+        if not allowed:
+            return err_resp, code
+
+        try:
+            p_oid = ObjectId(str(profile_id))
+        except Exception:
+            return jsonify({'error': 'Invalid profile ID'}), 400
+
+        profile = profiles_col.find_one({'_id': p_oid, 'account_user_id': account_user_id})
+        if not profile:
+            return jsonify({'error': 'Profile not found'}), 404
+
+        # Disallow deleting the primary owner profile
+        if profile.get('is_owner') is True or profile.get('profile_type') == 'owner':
+            return jsonify({'error': 'Cannot delete the primary owner profile'}), 400
+
+        p_oid = profile['_id']
+        profiles_col.delete_one({'_id': p_oid, 'account_user_id': account_user_id})
+        measurements_col.delete_many({'account_user_id': account_user_id, 'profile_id': p_oid})
+
+        # Cancel and remove any active Socket.IO live sessions for this profile
+        try:
+            active_sids = [
+                sid for sid, sess in list(session_store.items())
+                if sess.profile_id == p_oid or str(sess.profile_id) == str(p_oid)
+            ]
+            for sid in active_sids:
+                sess = session_store.get(sid)
+                if sess:
+                    sess.reset()
+                session_store.pop(sid, None)
+        except Exception as sess_err:
+            print(f"Session cleanup notice on delete: {sess_err}")
+
+        # Remove profile storage directory safely without path traversal
+        safe_account = os.path.basename(str(account_user_id))
+        safe_profile = os.path.basename(str(p_oid))
+        profile_storage_dir = os.path.realpath(os.path.join(ACCOUNTS_DIR, safe_account, "profiles", safe_profile))
+        accounts_real = os.path.realpath(ACCOUNTS_DIR)
+        if os.path.commonpath([accounts_real, profile_storage_dir]) == accounts_real:
+            if os.path.exists(profile_storage_dir):
+                try:
+                    shutil.rmtree(profile_storage_dir, ignore_errors=True)
+                except Exception as io_err:
+                    print(f"Error removing profile directory {profile_storage_dir}: {io_err}")
+
+        return jsonify({'success': True, 'message': f'Profile {profile.get("name")} and associated data deleted'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def get_local_ip():
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(('8.8.8.8', 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return '127.0.0.1'
+
+# --- PROFILE INVITATION ROUTES ---
+
+@app.route('/api/profile-invites', methods=['POST'])
+@app.route('/api/profiles/invite', methods=['POST'])
+@jwt_required()
+def create_invite():
+    try:
+        account_user_id = get_jwt_identity()
+        allowed, err_resp, code = verify_profile_owner_access(account_user_id)
+        if not allowed:
+            return err_resp, code
+
+        data = request.get_json() or {}
+        relationship = str(data.get('relationship', 'Friend')).strip()
+        profile_type = str(data.get('profile_type', 'adult')).strip().lower()
+        if profile_type not in ['adult', 'child']:
+            profile_type = 'adult'
+
+        target_email = str(data.get('target_email') or data.get('email') or data.get('invited_email') or '').strip()
+        invited_email_norm = target_email.lower().strip() if target_email else None
+        profile_id_req = data.get('profile_id')
+        linked_profile = None
+
+        if profile_id_req:
+            try:
+                linked_profile = profiles_col.find_one({
+                    '_id': ObjectId(str(profile_id_req)),
+                    'account_user_id': account_user_id,
+                    'status': {'$ne': 'deleted'}
+                })
+            except Exception:
+                linked_profile = None
+            if not linked_profile:
+                return jsonify({'error': 'Profile not found or does not belong to your account.'}), 404
+            if linked_profile.get('is_owner') or linked_profile.get('is_owner_profile') or linked_profile.get('profile_type') == 'owner':
+                return jsonify({'error': 'Cannot invite members to the owner profile.'}), 400
+        else:
+            active_count, pending_count, total = count_active_slots(account_user_id)
+            if total >= 4:
+                return jsonify({'error': 'Maximum of 4 active profiles allowed per account.'}), 409
+
+            if target_email:
+                linked_profile = profiles_col.find_one({
+                    'account_user_id': account_user_id,
+                    'is_archived': {'$ne': True},
+                    '$or': [{'email': target_email}, {'target_email': target_email}]
+                })
+
+            if not linked_profile and (target_email or data.get('name') or data.get('profile_name')):
+                prof_name = data.get('name') or data.get('profile_name') or target_email.split('@')[0].capitalize()
+                now_dt = dt.datetime.now(dt.timezone.utc)
+                new_prof = {
+                    'account_user_id': account_user_id,
+                    'name': prof_name,
+                    'profile_type': profile_type,
+                    'relationship': relationship,
+                    'is_owner': False,
+                    'is_owner_profile': False,
+                    'is_archived': False,
+                    'status': 'active',
+                    'email': target_email or None,
+                    'created_at': now_dt,
+                    'updated_at': now_dt
+                }
+                p_res = profiles_col.insert_one(new_prof)
+                linked_profile = new_prof
+                linked_profile['_id'] = p_res.inserted_id
+
+        linked_profile_id_str = str(linked_profile['_id']) if linked_profile else None
+
+        # If a pending invite already exists, revoke it first to replace it cleanly
+        now = dt.datetime.now(dt.timezone.utc)
+        profile_invites_col.update_many(
+            {'account_user_id': account_user_id, 'status': 'pending', 'expires_at': {'$gt': now}},
+            {'$set': {'status': 'revoked', 'revoked_at': now}}
+        )
+
+        short_code = generate_short_code()
+        opaque_token = secrets.token_urlsafe(32)
+        code_hash = hash_secret(short_code)
+        token_hash = hash_secret(opaque_token)
+        expires_at = now + dt.timedelta(minutes=15)
+
+        invite_doc = {
+            'account_user_id': account_user_id,
+            'profile_id': linked_profile_id_str,
+            'invited_email': target_email if target_email else None,
+            'invited_email_normalized': invited_email_norm,
+            'token_hash': token_hash,
+            'status': 'pending',
+            'profile_type': profile_type,
+            'relationship': relationship,
+            'target_email': target_email if target_email else None,
+            'invite_code_hash': code_hash,
+            'invite_token_hash': token_hash,
+            'expires_at': expires_at,
+            'created_at': now,
+            'claimed_at': None,
+            'claimed_profile_id': None,
+            'revoked_at': None
+        }
+        res = profile_invites_col.insert_one(invite_doc)
+        invite_id = str(getattr(res, 'inserted_id', invite_doc.get('_id')))
+
+        local_ip = get_local_ip()
+        client_base_url = str(data.get('client_base_url') or '').strip().rstrip('/')
+
+        # Determine dual links:
+        # 1. LAN URL for mobile phones connected on Wi-Fi
+        mobile_invite_link = f"http://{local_ip}:3000/?invite_code={short_code}"
+        # 2. Localhost URL for browsers running on the host computer
+        web_invite_link = f"http://localhost:3000/?invite_code={short_code}"
+
+        if client_base_url and 'localhost' not in client_base_url and '127.0.0.1' not in client_base_url:
+            mobile_invite_link = f"{client_base_url}/?invite_code={short_code}"
+            web_invite_link = mobile_invite_link
+
+        primary_invite_link = mobile_invite_link
+
+        share_msg = (
+            f"Join my FitLens account using this invite code: {short_code}\n\n"
+            f"Mobile / Wi-Fi Link: {mobile_invite_link}\n"
+            f"Computer Link: {web_invite_link}\n\n"
+            "You can create your own FitLens profile from your phone or browser. Your profile will have separate measurements, "
+            "photos, results, and history.\n\n"
+            "For the current version, the account owner manages all profiles. Private profile PIN protection is "
+            "planned for a future update.\n\n"
+            f"This invite expires at: {expires_at.strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        )
+
+        # Dispatch async email if target_email is provided
+        email_sent = False
+        if target_email:
+            try:
+                inviter_user = users_col.find_one({'user_id': str(account_user_id)})
+                if not inviter_user:
+                    try:
+                        inviter_user = users_col.find_one({'_id': ObjectId(account_user_id)})
+                    except Exception:
+                        inviter_user = None
+                inviter_user = inviter_user or {}
+                inviter_name = inviter_user.get('name') or inviter_user.get('email') or 'A family member'
+
+                mail_email = (os.getenv('MAIL_EMAIL') or app.config.get('MAIL_USERNAME') or 'sinchanas4u@gmail.com').strip()
+                mail_pass = (os.getenv('MAIL_PASSWORD') or app.config.get('MAIL_PASSWORD') or 'ytxpvjubamtdhzzz').replace(' ', '').strip()
+
+                invite_html = f"""
+                <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+                            max-width:520px;margin:auto;background:#0a0e27;color:#ffffff;padding:36px 28px;
+                            border-radius:18px;border:1px solid #2d3561;">
+                  <div style="text-align:center;margin-bottom:24px;">
+                    <div style="display:inline-block;padding:6px 16px;background:rgba(0,212,170,0.12);
+                                border:1px solid rgba(0,212,170,0.3);border-radius:999px;color:#00d4aa;
+                                font-weight:700;font-size:13px;letter-spacing:1px;">
+                      FITLENS AI
+                    </div>
+                    <h1 style="color:#ffffff;font-size:22px;margin:16px 0 4px;font-weight:700;">You're Invited to FitLens</h1>
+                    <p style="color:#a0aec0;font-size:13px;margin:0;">AI-Powered Body Measurement System</p>
+                  </div>
+
+                  <p style="color:#cbd5e0;font-size:14px;line-height:1.6;">
+                    Hi,<br><br>
+                    <strong style="color:#ffffff;">{inviter_name}</strong> has invited you to join their FitLens account as a <strong style="color:#00d4aa;">{relationship}</strong>.<br><br>
+                    You can create your own profile with separate body measurements, photos, results, and history.
+                  </p>
+
+                  <div style="text-align:center;margin:28px 0;">
+                    <a href="{primary_invite_link}"
+                       style="background:linear-gradient(135deg,#00d4aa,#0080ff);
+                              color:#ffffff;text-decoration:none;padding:15px 36px;
+                              border-radius:12px;font-size:16px;font-weight:700;
+                              display:inline-block;box-shadow:0 4px 16px rgba(0,212,170,0.3);">
+                      Claim My Profile
+                    </a>
+                  </div>
+
+                  <div style="background:#131838;border:1px dashed #2d3561;padding:16px;border-radius:10px;text-align:center;margin:24px 0;">
+                    <span style="font-size:11px;color:#a0aec0;text-transform:uppercase;letter-spacing:1px;display:block;margin-bottom:6px;">
+                      Your Invitation Code
+                    </span>
+                    <code style="color:#00d4aa;font-family:Consolas,monospace;font-size:24px;font-weight:bold;letter-spacing:3px;word-break:break-all;user-select:all;display:inline-block;padding:8px 16px;background:rgba(0,212,170,0.08);border-radius:6px;">
+                      {short_code}
+                    </code>
+                    <p style="color:#cbd5e0;font-size:12px;margin:8px 0 0;line-height:1.5;">
+                      Enter this code in FitLens on your phone or computer to activate your profile.
+                    </p>
+                  </div>
+
+                  <hr style="border:0;border-top:1px solid #1e2445;margin:22px 0;">
+
+                  <p style="color:#a0aec0;font-size:12px;line-height:1.7;margin:0;">
+                    <strong style="color:#ffffff;">Opening from your Phone (on Wi-Fi):</strong><br>
+                    <a href="{mobile_invite_link}" style="color:#00d4aa;word-break:break-all;">{mobile_invite_link}</a><br><br>
+                    <strong style="color:#ffffff;">Opening on the Computer:</strong><br>
+                    <a href="{web_invite_link}" style="color:#00d4aa;word-break:break-all;">{web_invite_link}</a><br><br>
+                    This invitation will expire in 15 minutes.
+                  </p>
+                </div>
+                """
+
+                def send_invite_email_async(sender_email, sender_pass, recipient_email, html_body, code, link, web_link):
+                    try:
+                        import smtplib
+                        from email.mime.text import MIMEText
+                        from email.mime.multipart import MIMEMultipart
+                        from email.utils import formatdate, make_msgid
+
+                        mime_msg = MIMEMultipart('alternative')
+                        mime_msg['Subject'] = f'FitLens AI: Invitation from {inviter_name}'
+                        mime_msg['From'] = f"FitLens AI <{sender_email}>"
+                        mime_msg['To'] = recipient_email
+                        mime_msg['Reply-To'] = sender_email
+                        mime_msg['Date'] = formatdate(localtime=True)
+                        mime_msg['Message-ID'] = make_msgid(domain='gmail.com')
+
+                        plain_text = (
+                            f"{inviter_name} has invited you to join FitLens AI as a {relationship}!\n\n"
+                            f"Your Invitation Code: {code}\n\n"
+                            "HOW TO CLAIM YOUR PROFILE:\n"
+                            "1. Open FitLens on your browser or mobile phone.\n"
+                            f"2. Go to 'Claim Profile' or 'Join Account' and enter code: {code}\n\n"
+                            "Direct Links (if connected to the same Wi-Fi network):\n"
+                            f"Phone / Wi-Fi: {link}\n"
+                            f"Computer: {web_link}\n\n"
+                            "Important: This invitation code will expire in 15 minutes.\n"
+                            "If this email is in your Spam or Junk folder, please click 'Not Spam' to enable the links."
+                        )
+                        mime_msg.attach(MIMEText(plain_text, 'plain', 'utf-8'))
+                        mime_msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+
+                        server = smtplib.SMTP('smtp.gmail.com', 587, timeout=20)
+                        server.starttls()
+                        server.login(sender_email, sender_pass)
+                        server.sendmail(sender_email, [recipient_email], mime_msg.as_string())
+                        server.quit()
+                        print(f"[INVITE EMAIL SUCCESS] Successfully sent invite to '{recipient_email}'", flush=True)
+                    except Exception as mail_err:
+                        print(f"[INVITE EMAIL ERROR] Failed to send to '{recipient_email}': {mail_err}", flush=True)
+
+                threading.Thread(
+                    target=send_invite_email_async,
+                    args=(mail_email, mail_pass, target_email, invite_html, short_code, primary_invite_link, web_invite_link),
+                    daemon=True
+                ).start()
+                email_sent = True
+            except Exception as mail_prep_err:
+                print(f"[INVITE EMAIL PREP ERROR] {mail_prep_err}", flush=True)
+
+        return jsonify({
+            'success': True,
+            'invite_id': invite_id,
+            'profile_id': linked_profile_id_str,
+            'invite_code': short_code,
+            'invite_token': opaque_token,
+            'claim_url': primary_invite_link,
+            'invite_link': web_invite_link,
+            'mobile_invite_link': mobile_invite_link,
+            'local_ip': local_ip,
+            'target_email': target_email or None,
+            'email_sent': email_sent,
+            'qr_payload': opaque_token,
+            'expires_at': expires_at.isoformat(),
+            'expires_in_seconds': 900,
+            'status': 'pending',
+            'share_message': share_msg
+        }), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profile-invites', methods=['GET'])
+@jwt_required()
+def list_invites():
+    try:
+        account_user_id = get_jwt_identity()
+        allowed, err_resp, code = verify_profile_owner_access(account_user_id)
+        if not allowed:
+            return err_resp, code
+
+        now = dt.datetime.now(dt.timezone.utc)
+        cursor = profile_invites_col.find({'account_user_id': account_user_id})
+        if hasattr(cursor, 'sort'):
+            cursor = cursor.sort('created_at', -1)
+            
+        invites = []
+        for inv in cursor:
+            status = inv.get('status', 'pending')
+            exp = inv.get('expires_at')
+            if exp and getattr(exp, 'tzinfo', None) is None:
+                exp = exp.replace(tzinfo=dt.timezone.utc)
+            if status == 'pending' and exp and exp <= now:
+                status = 'expired'
+            invites.append({
+                'invite_id': str(inv['_id']),
+                'profile_id': str(inv.get('profile_id')) if inv.get('profile_id') else None,
+                'invited_email': inv.get('invited_email') or inv.get('target_email'),
+                'status': status,
+                'relationship': inv.get('relationship', 'Friend'),
+                'profile_type': inv.get('profile_type', 'adult'),
+                'expires_at': exp.isoformat() if hasattr(exp, 'isoformat') else str(exp),
+                'created_at': inv.get('created_at').isoformat() if hasattr(inv.get('created_at'), 'isoformat') else str(inv.get('created_at')),
+                'claimed_at': inv.get('claimed_at').isoformat() if hasattr(inv.get('claimed_at'), 'isoformat') and inv.get('claimed_at') else None
+            })
+        return jsonify({'success': True, 'invites': invites}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profile-invites/<invite_id>', methods=['DELETE'])
+@jwt_required()
+def revoke_invite(invite_id):
+    try:
+        account_user_id = get_jwt_identity()
+        allowed, err_resp, code = verify_profile_owner_access(account_user_id)
+        if not allowed:
+            return err_resp, code
+
+        try:
+            inv_oid = ObjectId(str(invite_id))
+        except Exception:
+            return jsonify({'error': 'Invalid invite ID'}), 400
+
+        invite = profile_invites_col.find_one({'_id': inv_oid, 'account_user_id': account_user_id})
+        if not invite:
+            return jsonify({'error': 'Invite not found'}), 404
+
+        if invite.get('status') != 'pending':
+            return jsonify({'error': f'Cannot revoke invite with status {invite.get("status")}'}), 400
+
+        now = dt.datetime.now(dt.timezone.utc)
+        profile_invites_col.update_one(
+            {'_id': inv_oid},
+            {'$set': {'status': 'revoked', 'revoked_at': now}}
+        )
+        return jsonify({'success': True, 'message': 'Invite revoked successfully'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def recover_stale_claiming_invites(stale_seconds: int = 300, target_invite_id=None, account_user_id=None) -> dict:
+    """
+    Safe trusted recovery method for invites stuck in 'claiming' after a backend crash.
+    Does NOT allow public takeover: must be run via trusted backend startup maintenance,
+    periodic scheduled workers, or authenticated owner/admin endpoints.
+    
+    Rules:
+    1. Checks whether a profile with invite_id already exists:
+       - If a matching profile exists: reconciles invite status to 'claimed' with claimed_profile_id.
+    2. If no matching profile exists:
+       - If invite has expired (expires_at <= now): marks status as 'expired'. Never resets expired invites to pending.
+       - If invite is unexpired: safely resets status to 'pending' using claim_attempt_id fencing.
+    3. Fencing: all updates require status == 'claiming' and matching claim_attempt_id.
+    4. Default threshold: 300 seconds (5 minutes). Claims younger than threshold are untouched.
+    """
+    now = dt.datetime.now(dt.timezone.utc)
+    threshold = now - dt.timedelta(seconds=stale_seconds)
+    query = {
+        'status': 'claiming',
+        'claiming_at': {'$lt': threshold}
+    }
+    if target_invite_id:
+        try:
+            query['_id'] = ObjectId(str(target_invite_id))
+        except Exception:
+            query['_id'] = target_invite_id
+    if account_user_id:
+        query['account_user_id'] = str(account_user_id)
+
+    stale_invites = list(profile_invites_col.find(query))
+    recovered_to_pending = 0
+    transitioned_to_expired = 0
+    reconciled_to_claimed = 0
+
+    for inv in stale_invites:
+        inv_id = inv['_id']
+        claim_attempt_id = inv.get('claim_attempt_id')
+        exp = inv.get('expires_at')
+        if exp and getattr(exp, 'tzinfo', None) is None:
+            exp = exp.replace(tzinfo=dt.timezone.utc)
+        is_expired = (exp is not None and exp <= now)
+
+        # Check whether a profile with this invite_id was already created
+        existing_profile = profiles_col.find_one({'invite_id': inv_id})
+        if existing_profile:
+            # Profile exists: reconcile invite to claimed
+            res = profile_invites_col.update_one(
+                {'_id': inv_id, 'status': 'claiming', 'claim_attempt_id': claim_attempt_id},
+                {'$set': {'status': 'claimed', 'claimed_at': now, 'claimed_profile_id': existing_profile['_id'], 'claiming_at': None}}
+            )
+            if getattr(res, 'matched_count', 0) > 0:
+                reconciled_to_claimed += 1
+        elif is_expired:
+            # No profile created and invite has expired: transition to 'expired', NEVER reset to pending
+            res = profile_invites_col.update_one(
+                {'_id': inv_id, 'status': 'claiming', 'claim_attempt_id': claim_attempt_id},
+                {'$set': {'status': 'expired', 'claiming_at': None, 'claim_attempt_id': None}}
+            )
+            if getattr(res, 'matched_count', 0) > 0:
+                transitioned_to_expired += 1
+        else:
+            # No profile created and unexpired: safely restore to pending using claim_attempt_id fencing
+            res = profile_invites_col.update_one(
+                {'_id': inv_id, 'status': 'claiming', 'claim_attempt_id': claim_attempt_id, 'expires_at': {'$gt': now}},
+                {'$set': {'status': 'pending', 'claiming_at': None, 'claim_attempt_id': None}}
+            )
+            if getattr(res, 'matched_count', 0) > 0:
+                recovered_to_pending += 1
+
+    return {
+        'total_stale_checked': len(stale_invites),
+        'recovered_to_pending': recovered_to_pending,
+        'transitioned_to_expired': transitioned_to_expired,
+        'reconciled_to_claimed': reconciled_to_claimed
+    }
+
+
+@app.route('/api/profile-invites/<invite_id>/recover-stale', methods=['POST'])
+@jwt_required()
+def trigger_stale_claiming_recovery(invite_id):
+    """
+    Restricted recovery endpoint for stuck claiming invites.
+    Caller Authorization Policy:
+    - Requires valid JWT authentication from the account owner who created the invite.
+    - Requires explicit invite_id path parameter.
+    - Ownership validation: verified against account_user_id.
+    - Requires status == 'claiming' and stale threshold (default 300s/5min).
+    - Fencing: verifies claim_attempt_id matches.
+    """
+    try:
+        account_user_id = get_jwt_identity()
+        try:
+            inv_oid = ObjectId(str(invite_id))
+        except Exception:
+            return jsonify({'error': 'Invalid invite ID format'}), 400
+
+        invite = profile_invites_col.find_one({'_id': inv_oid, 'account_user_id': account_user_id})
+        if not invite:
+            return jsonify({'error': 'Invite not found or access denied'}), 404
+
+        if invite.get('status') != 'claiming':
+            return jsonify({'error': f"Cannot recover invite with status '{invite.get('status')}'. Must be 'claiming'."}), 400
+
+        data = request.get_json(silent=True) or {}
+        # Strictly enforce minimum 300 seconds (5 minutes) stale threshold
+        stale_seconds = max(300, int(data.get('stale_seconds', 300)))
+
+        res = recover_stale_claiming_invites(
+            stale_seconds=stale_seconds,
+            target_invite_id=inv_oid,
+            account_user_id=account_user_id
+        )
+        return jsonify({'success': True, 'result': res}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profile-invites/claim', methods=['POST'])
+def claim_invite():
+    """Public endpoint to claim an invite without owner credentials."""
+    client_ip = request.remote_addr or 'unknown'
+
+    try:
+        data = request.get_json() or {}
+        invite_code = str(data.get('invite_code', '')).strip().upper()
+        invite_token = str(data.get('invite_token', '')).strip()
+        name = str(data.get('name', '')).strip()
+        default_height_cm = data.get('default_height_cm')
+
+        if not name or len(name) < 1 or len(name) > 50:
+            return jsonify({'error': 'Name must be between 1 and 50 characters'}), 400
+
+        if not invite_code and not invite_token:
+            return jsonify({'error': 'Invitation code or token is required'}), 400
+
+        code_hash = hash_secret(invite_code) if invite_code else None
+        token_hash = hash_secret(invite_token) if invite_token else None
+
+        # Rate limit check: 5 attempts per 10 minutes per IP & target code hash
+        target_hash = code_hash or token_hash
+        if is_claim_rate_limited(client_ip, target_hash=target_hash, max_attempts=5, window_seconds=600):
+            return jsonify({'error': 'Too many claim attempts. Please wait a few minutes.'}), 429
+
+        if default_height_cm is not None:
+            try:
+                default_height_cm = float(default_height_cm)
+                if default_height_cm < 100 or default_height_cm > 250:
+                    return jsonify({'error': 'Height must be between 100 and 250 cm'}), 400
+            except (ValueError, TypeError):
+                return jsonify({'error': 'Invalid numeric height'}), 400
+        else:
+            default_height_cm = 170.0
+
+        now = dt.datetime.now(dt.timezone.utc)
+        match_conditions = []
+        if token_hash:
+            match_conditions.append({'invite_token_hash': token_hash})
+        if code_hash:
+            match_conditions.append({'invite_code_hash': code_hash})
+
+        # Atomic transition: pending -> claiming with unique fencing token claim_attempt_id
+        # Disallow automatic public stale-claim takeover to prevent race conditions.
+        claim_attempt_id = str(uuid.uuid4())
+        claimable_query = {
+            '$and': [
+                {'$or': match_conditions},
+                {'expires_at': {'$gt': now}},
+                {'status': 'pending'}
+            ]
+        }
+
+        updated_invite = profile_invites_col.find_one_and_update(
+            claimable_query,
+            {
+                '$set': {
+                    'status': 'claiming',
+                    'claiming_at': now,
+                    'claim_attempt_id': claim_attempt_id
+                }
+            },
+            return_document=ReturnDocument.AFTER
+        )
+
+        if not updated_invite:
+            inv = profile_invites_col.find_one({'$or': match_conditions})
+            if inv:
+                status = inv.get('status')
+                if status == 'claimed':
+                    return jsonify({'error': 'Invite code has already been used.'}), 400
+                if status == 'claiming':
+                    return jsonify({'error': 'Invitation is currently being claimed. Please try again shortly.'}), 409
+                if status == 'revoked':
+                    return jsonify({'error': 'This invite was revoked by the account owner.'}), 400
+                exp = inv.get('expires_at')
+                if exp:
+                    if getattr(exp, 'tzinfo', None) is None:
+                        exp = exp.replace(tzinfo=dt.timezone.utc)
+                    if exp <= now:
+                        return jsonify({'error': 'Invite code has expired. Ask the account owner for a new invitation.'}), 400
+            return jsonify({'error': 'Invalid invitation code or token.'}), 404
+
+        account_user_id = updated_invite['account_user_id']
+        invite_id = updated_invite['_id']
+
+        try:
+            active_count = profiles_col.count_documents({
+                'account_user_id': account_user_id,
+                'is_archived': {'$ne': True}
+            })
+            if active_count >= 4:
+                # Capacity limit exceeded: Roll back invite to pending
+                profile_invites_col.update_one(
+                    {'_id': invite_id, 'status': 'claiming', 'claim_attempt_id': claim_attempt_id},
+                    {'$set': {'status': 'pending', 'claiming_at': None, 'claim_attempt_id': None}}
+                )
+                return jsonify({'error': 'Maximum of 4 active profiles allowed per account.'}), 409
+
+            target_email = updated_invite.get('target_email')
+            new_profile = {
+                'account_user_id': account_user_id,
+                'invite_id': invite_id,
+                'claim_attempt_id': claim_attempt_id,
+                'name': name,
+                'email': target_email if target_email else None,
+                'target_email': target_email if target_email else None,
+                'avatar_url': None,
+                'relationship': updated_invite.get('relationship', 'Friend'),
+                'profile_type': 'adult',
+                'privacy_mode': 'account_owner_access',
+                'default_height_cm': default_height_cm,
+                'is_archived': False,
+                'created_by': 'invited_member',
+                'created_at': now,
+                'updated_at': now,
+                'last_used_at': now,
+                'pin_enabled': False,
+                'profile_pin_hash': None
+            }
+            try:
+                res = profiles_col.insert_one(new_profile)
+                new_profile_id = getattr(res, 'inserted_id', new_profile.get('_id'))
+            except DuplicateKeyError:
+                # Guaranteed by unique partial index on profiles.invite_id
+                return jsonify({'error': 'An account profile has already been created for this invitation.'}), 409
+
+            # Finalize claim: claiming -> claimed, strictly verifying claim_attempt_id fencing token
+            finalize_res = profile_invites_col.find_one_and_update(
+                {
+                    '_id': invite_id,
+                    'status': 'claiming',
+                    'claim_attempt_id': claim_attempt_id
+                },
+                {
+                    '$set': {
+                        'status': 'claimed',
+                        'claimed_at': now,
+                        'claimed_profile_id': new_profile_id,
+                        'claiming_at': None
+                    }
+                },
+                return_document=ReturnDocument.AFTER
+            )
+
+            if not finalize_res:
+                # Current attempt no longer owns claim_attempt_id.
+                # Must not finalize or retain profile! Clean up orphan profile immediately.
+                try:
+                    profiles_col.delete_one({'_id': new_profile_id, 'claim_attempt_id': claim_attempt_id})
+                except Exception as del_err:
+                    print(f"Error removing orphan profile on superseded claim: {del_err}")
+                return jsonify({'error': 'Invitation claim was superseded or revoked. Profile not created.'}), 409
+
+        except DuplicateKeyError:
+            return jsonify({'error': 'An account profile has already been created for this invitation.'}), 409
+        except Exception as profile_creation_err:
+            # Compensation: Restore invite back to pending state so it is recoverable and not stuck
+            print(f"Profile creation failed during claim: {profile_creation_err}. Rolling back invite state to pending.")
+            try:
+                profile_invites_col.update_one(
+                    {'_id': invite_id, 'status': 'claiming', 'claim_attempt_id': claim_attempt_id},
+                    {'$set': {'status': 'pending', 'claiming_at': None, 'claim_attempt_id': None}}
+                )
+            except Exception as rollback_err:
+                print(f"Error during rollback compensation: {rollback_err}")
+            raise profile_creation_err
+
+        disclosure_text = (
+            "An account owner invited you to create a FitLens profile.\n\n"
+            "You can create your own profile and keep your measurements, uploaded photos, body-analysis "
+            "results, and history separate from other profiles.\n\n"
+            "The account owner can manage the profile list, including creating, archiving, or deleting profiles.\n\n"
+            "In the current version, the account owner may access profiles under their account. Private profile "
+            "PIN protection for adult profiles is planned for a future update."
+        )
+
+        return jsonify({
+            'success': True,
+            'message': 'Profile created successfully.',
+            'profile': {
+                'profile_id': str(new_profile_id),
+                'name': name,
+                'relationship': new_profile['relationship'],
+                'profile_type': 'adult',
+                'privacy_mode': 'account_owner_access'
+            },
+            'disclosure': disclosure_text
+        }), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# --- PROFILE-AWARE MEASUREMENT ROUTES ---
+
 @app.route('/api/measurements/save', methods=['POST'])
 @jwt_required()
 def save_measurement():
     try:
-        user_id = get_jwt_identity()
+        account_user_id = get_jwt_identity()
         data = request.get_json() or {}
         measurements = data.get('measurements', {})
+        profile_id_param = data.get('profile_id')
+
+        # Validate or resolve profile
+        profile = None
+        claims = get_jwt() or {}
+        token_profile_id = claims.get('profile_id')
+        if token_profile_id:
+            if profile_id_param and str(profile_id_param) != str(token_profile_id):
+                return jsonify({'error': 'Forbidden: Session token cannot save measurements for another profile.'}), 403
+            profile_id_param = str(token_profile_id)
+
+        if profile_id_param:
+            profile = get_verified_profile(account_user_id, profile_id_param)
+        if not profile:
+            profile = get_or_create_owner_profile(account_user_id)
+
+        analysis_id = data.get('analysis_id') or ('A' + str(uuid.uuid4())[:8].upper())
+        now = dt.datetime.now(dt.timezone.utc)
+
+        # Update profile's last_used_at
+        profiles_col.update_one({'_id': profile['_id']}, {'$set': {'last_used_at': now}})
+
+        # Build isolated measurement keys
+        p_str = str(profile['_id'])
+        m_dir = f"accounts/{account_user_id}/profiles/{p_str}/measurements/{analysis_id}"
+
         record = {
-            'analysis_id': 'A' + str(uuid.uuid4())[:8].upper(),
-            'user_id': user_id,
-            'date': dt.datetime.now(dt.timezone.utc).strftime('%d-%b-%Y'),
-            'height_cm': data.get('user_height') or data.get('height_cm'),
+            'analysis_id': analysis_id,
+            'account_user_id': account_user_id,
+            'user_id': account_user_id, # backward compatibility
+            'profile_id': profile['_id'],
+            'date': now.strftime('%d-%b-%Y'),
+            'height_cm': data.get('user_height') or data.get('height_cm') or profile.get('default_height_cm', 170.0),
             'source': data.get('source', 'upload'),
-            'created_at': dt.datetime.now(dt.timezone.utc)
+            'created_at': now,
+            'storage_dir': m_dir,
+            'front_image_key': f"{m_dir}/front.jpg",
+            'side_image_key': f"{m_dir}/side.jpg",
+            'front_overlay_key': f"{m_dir}/front_overlay.jpg",
+            'side_overlay_key': f"{m_dir}/side_overlay.jpg",
+            'mesh_glb_key': f"{m_dir}/body_mesh.glb",
+            'measurements': {}
         }
         for key, val in measurements.items():
             if isinstance(val, dict):
                 record[key] = val.get('value_cm') or val.get('value')
+                record['measurements'][key] = val.get('value_cm') or val.get('value')
             else:
                 record[key] = val
+                record['measurements'][key] = val
+
         measurements_col.insert_one(record)
         record.pop('_id', None)
+        record['profile_id'] = str(record['profile_id'])
         return jsonify({'success': True, 'analysis': record}), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/measurements/history', methods=['GET'])
 @jwt_required()
 def get_measurement_history():
     try:
-        user_id = get_jwt_identity()
-        cursor = measurements_col.find(
-            {'user_id': user_id},
-            {'_id': 0}
-        )
+        account_user_id = get_jwt_identity()
+        claims = get_jwt() or {}
+        token_profile_id = claims.get('profile_id')
+        profile_id_param = request.args.get('profile_id')
+        
+        if token_profile_id:
+            if profile_id_param and str(profile_id_param) != str(token_profile_id):
+                return jsonify({'error': 'Forbidden: Session token cannot access another profile.'}), 403
+            profile_id_param = str(token_profile_id)
+
+        query = {'account_user_id': account_user_id}
+        if profile_id_param:
+            profile = get_verified_profile(account_user_id, profile_id_param)
+            if not profile:
+                return jsonify({'error': 'Profile not found'}), 404
+            # If caller is using owner account token without profile_id, cannot view member data
+            if not token_profile_id and not (profile.get('is_owner') or profile.get('is_owner_profile') or profile.get('profile_type') == 'owner'):
+                return jsonify({'error': 'Forbidden: Owner account token cannot access member measurement data.'}), 403
+            query['profile_id'] = profile['_id']
+        else:
+            owner_profile = get_or_create_owner_profile(account_user_id)
+            query['$or'] = [
+                {'profile_id': owner_profile['_id']},
+                {'user_id': account_user_id, 'profile_id': {'$exists': False}}
+            ]
+
+        cursor = measurements_col.find(query, {'_id': 0})
         if hasattr(cursor, 'sort'):
             cursor = cursor.sort('created_at', -1)
         if hasattr(cursor, 'limit'):
-            cursor = cursor.limit(20)
+            cursor = cursor.limit(30)
+            
         records = list(cursor)
+        for r in records:
+            if 'profile_id' in r and isinstance(r['profile_id'], ObjectId):
+                r['profile_id'] = str(r['profile_id'])
+            if 'created_at' in r and hasattr(r['created_at'], 'isoformat'):
+                r['created_at'] = r['created_at'].isoformat()
         return jsonify({'success': True, 'history': records}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/measurements/latest', methods=['GET'])
 @jwt_required()
 def get_latest_measurement():
     try:
-        user_id = get_jwt_identity()
-        record = measurements_col.find_one(
-            {'user_id': user_id},
-            {'_id': 0},
-            sort=[('created_at', -1)]
-        )
+        account_user_id = get_jwt_identity()
+        claims = get_jwt() or {}
+        token_profile_id = claims.get('profile_id')
+        profile_id_param = request.args.get('profile_id')
+
+        if token_profile_id:
+            if profile_id_param and str(profile_id_param) != str(token_profile_id):
+                return jsonify({'error': 'Forbidden: Session token cannot access another profile.'}), 403
+            profile_id_param = str(token_profile_id)
+        
+        query = {'account_user_id': account_user_id}
+        if profile_id_param:
+            profile = get_verified_profile(account_user_id, profile_id_param)
+            if not profile:
+                return jsonify({'error': 'Profile not found'}), 404
+            # If caller is using owner account token without profile_id, cannot view member data
+            if not token_profile_id and not (profile.get('is_owner') or profile.get('is_owner_profile') or profile.get('profile_type') == 'owner'):
+                return jsonify({'error': 'Forbidden: Owner account token cannot access member measurement data.'}), 403
+            query['profile_id'] = profile['_id']
+        else:
+            owner_profile = get_or_create_owner_profile(account_user_id)
+            query['$or'] = [
+                {'profile_id': owner_profile['_id']},
+                {'user_id': account_user_id, 'profile_id': {'$exists': False}}
+            ]
+
+        record = measurements_col.find_one(query, {'_id': 0}, sort=[('created_at', -1)])
+        if record:
+            if 'profile_id' in record and isinstance(record['profile_id'], ObjectId):
+                record['profile_id'] = str(record['profile_id'])
+            if 'created_at' in record and hasattr(record['created_at'], 'isoformat'):
+                record['created_at'] = record['created_at'].isoformat()
         return jsonify({'success': True, 'latest': record, 'analysis': record}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/measurements/delete/<analysis_id>', methods=['DELETE'])
 @jwt_required()
 def delete_measurement(analysis_id):
     try:
-        user_id = get_jwt_identity()
-        measurements_col.delete_one(
-            {'analysis_id': analysis_id, 'user_id': user_id})
+        account_user_id = get_jwt_identity()
+        m = measurements_col.find_one({'analysis_id': analysis_id, 'account_user_id': account_user_id})
+        if not m:
+            # Check legacy user_id
+            m = measurements_col.find_one({'analysis_id': analysis_id, 'user_id': account_user_id})
+            if not m:
+                return jsonify({'error': 'Measurement not found'}), 404
+
+        profile_id = m.get('profile_id')
+        measurements_col.delete_one({'analysis_id': analysis_id})
+
+        # Remove disk directory if present
+        if profile_id:
+            m_dir = os.path.join(ACCOUNTS_DIR, str(account_user_id), "profiles", str(profile_id), "measurements", str(analysis_id))
+            if os.path.exists(m_dir):
+                shutil.rmtree(m_dir, ignore_errors=True)
+
         return jsonify({'success': True, 'message': 'Measurement deleted'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# --- PROFILE-SPECIFIC MEASUREMENT SHORTCUT ROUTES ---
+
+@app.route('/api/profiles/<profile_id>/measurements', methods=['GET'])
+@app.route('/api/profiles/<profile_id>/history', methods=['GET'])
+@jwt_required()
+def get_profile_measurement_history(profile_id):
+    try:
+        profile, err_resp, code = verify_profile_session_access(profile_id)
+        if not profile:
+            return err_resp, code
+
+        account_user_id = profile['account_user_id']
+        cursor = measurements_col.find(
+            {'account_user_id': account_user_id, 'profile_id': profile['_id']},
+            {'_id': 0}
+        )
+        if hasattr(cursor, 'sort'):
+            cursor = cursor.sort('created_at', -1)
+        if hasattr(cursor, 'limit'):
+            cursor = cursor.limit(30)
+
+        records = list(cursor)
+        for r in records:
+            if 'profile_id' in r and isinstance(r['profile_id'], ObjectId):
+                r['profile_id'] = str(r['profile_id'])
+            if 'created_at' in r and hasattr(r['created_at'], 'isoformat'):
+                r['created_at'] = r['created_at'].isoformat()
+
+        return jsonify({
+            'success': True,
+            'history': records,
+            'profile': {
+                'id': str(profile['_id']),
+                'name': profile.get('name')
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/<profile_id>/measurements/latest', methods=['GET'])
+@jwt_required()
+def get_profile_latest_measurement(profile_id):
+    try:
+        profile, err_resp, code = verify_profile_session_access(profile_id)
+        if not profile:
+            return err_resp, code
+
+        account_user_id = profile['account_user_id']
+        record = measurements_col.find_one(
+            {'account_user_id': account_user_id, 'profile_id': profile['_id']},
+            {'_id': 0},
+            sort=[('created_at', -1)]
+        )
+        if record:
+            if 'profile_id' in record and isinstance(record['profile_id'], ObjectId):
+                record['profile_id'] = str(record['profile_id'])
+            if 'created_at' in record and hasattr(record['created_at'], 'isoformat'):
+                record['created_at'] = record['created_at'].isoformat()
+        return jsonify({'success': True, 'latest': record, 'analysis': record}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/<profile_id>/measurements/<analysis_id>', methods=['DELETE'])
+@jwt_required()
+def delete_profile_measurement(profile_id, analysis_id):
+    try:
+        profile, err_resp, code = verify_profile_session_access(profile_id)
+        if not profile:
+            return err_resp, code
+
+        account_user_id = profile['account_user_id']
+        measurements_col.delete_one({
+            'analysis_id': analysis_id,
+            'account_user_id': account_user_id,
+            'profile_id': profile['_id']
+        })
+
+        m_dir = os.path.join(ACCOUNTS_DIR, str(account_user_id), "profiles", str(profile['_id']), "measurements", str(analysis_id))
+        if os.path.exists(m_dir):
+            shutil.rmtree(m_dir, ignore_errors=True)
+
+        return jsonify({'success': True, 'message': 'Measurement deleted'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/<profile_id>/files/<path:file_id>', methods=['GET'])
+@jwt_required()
+def get_profile_file(profile_id, file_id):
+    try:
+        profile, err_resp, code = verify_profile_session_access(profile_id)
+        if not profile:
+            return err_resp, code
+
+        account_user_id = profile['account_user_id']
+        safe_account = os.path.basename(str(account_user_id))
+        safe_profile = os.path.basename(str(profile['_id']))
+        profile_dir = os.path.realpath(os.path.join(ACCOUNTS_DIR, safe_account, "profiles", safe_profile))
+
+        clean_file_id = os.path.normpath(file_id).lstrip(r'\/')
+        file_path = os.path.realpath(os.path.join(profile_dir, clean_file_id))
+        if os.path.commonpath([profile_dir, file_path]) != profile_dir:
+            return jsonify({'error': 'Access denied'}), 403
+
+        if not os.path.exists(file_path) or not os.path.isfile(file_path):
+            return jsonify({'error': 'File not found'}), 404
+
+        return send_file(file_path)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/<profile_id>/mesh/<mesh_id>', methods=['GET'])
+@jwt_required()
+def get_profile_mesh(profile_id, mesh_id):
+    try:
+        profile, err_resp, code = verify_profile_session_access(profile_id)
+        if not profile:
+            return err_resp, code
+
+        account_user_id = profile['account_user_id']
+        safe_account = os.path.basename(str(account_user_id))
+        safe_profile = os.path.basename(str(profile['_id']))
+        profile_dir = os.path.realpath(os.path.join(ACCOUNTS_DIR, safe_account, "profiles", safe_profile))
+
+        clean_mesh_id = os.path.basename(str(mesh_id))
+        mesh_candidates = [
+            os.path.join(profile_dir, "meshes", clean_mesh_id),
+            os.path.join(profile_dir, "mesh", clean_mesh_id),
+            os.path.join(profile_dir, clean_mesh_id),
+            os.path.join(MESHES_DIR, clean_mesh_id),
+        ]
+        for cand in mesh_candidates:
+            if os.path.exists(cand) and os.path.isfile(cand):
+                mimetype = 'model/gltf-binary' if cand.endswith('.glb') else 'text/plain'
+                return send_file(cand, mimetype=mimetype)
+
+        return jsonify({'error': 'Mesh not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/<profile_id>/process', methods=['POST'])
+@jwt_required()
+def process_profile_measurement(profile_id):
+    try:
+        profile, err_resp, code = verify_profile_session_access(profile_id)
+        if not profile:
+            return err_resp, code
+        return process_upload()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/<profile_id>/process-manual', methods=['POST'])
+@jwt_required()
+def process_profile_manual(profile_id):
+    try:
+        profile, err_resp, code = verify_profile_session_access(profile_id)
+        if not profile:
+            return err_resp, code
+        return process_manual_landmarks()
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1526,6 +3684,7 @@ def merge_manual_measurements(front_results, side_results):
 
 
 @app.route('/api/process-manual', methods=['POST'])
+@jwt_required(optional=True)
 def process_manual_landmarks():
     """
     Process manually marked landmarks and compute measurements.
@@ -1533,6 +3692,25 @@ def process_manual_landmarks():
     """
     try:
         data = request.json or {}
+
+        account_user_id = None
+        try:
+            account_user_id = get_jwt_identity()
+        except Exception:
+            pass
+
+        profile = None
+        profile_id_param = data.get('profile_id')
+        if account_user_id:
+            if profile_id_param:
+                profile = get_verified_profile(account_user_id, profile_id_param)
+            if not profile:
+                profile = get_or_create_owner_profile(account_user_id)
+        else:
+            account_user_id = 'guest'
+            profile = {'_id': 'guest', 'name': 'Guest'}
+
+        analysis_id = data.get('analysis_id') or ('A' + str(uuid.uuid4())[:8].upper())
         
         try:
             user_height_cm = float(data.get('user_height') or 0)
@@ -1580,6 +3758,8 @@ def process_manual_landmarks():
         response = {
             'success': True,
             'mode': 'manual',
+            'analysis_id': analysis_id,
+            'profile_id': str(profile['_id']) if isinstance(profile.get('_id'), ObjectId) else profile.get('_id'),
             'calibration': calibration_data,
             'results': {
                 'merged': merged_result
@@ -1921,10 +4101,32 @@ def validate_person_route():
 
 
 @app.route('/api/upload/process', methods=['POST'])
+@jwt_required(optional=True)
 def process_upload():
-    """Process uploaded images"""
+    """Process uploaded images with isolated profile storage"""
     try:
         data = request.json or {}
+
+        account_user_id = None
+        try:
+            account_user_id = get_jwt_identity()
+        except Exception:
+            pass
+
+        profile = None
+        profile_id_param = data.get('profile_id')
+        if account_user_id:
+            if profile_id_param:
+                profile = get_verified_profile(account_user_id, profile_id_param)
+            if not profile:
+                profile = get_or_create_owner_profile(account_user_id)
+        else:
+            account_user_id = 'guest'
+            profile = {'_id': 'guest', 'name': 'Guest', 'default_height_cm': 170.0}
+
+        analysis_id = data.get('analysis_id') or ('A' + str(uuid.uuid4())[:8].upper())
+        m_dir = get_measurement_dir(account_user_id, str(profile['_id']), analysis_id)
+        m_rel_dir = f"accounts/{account_user_id}/profiles/{profile['_id']}/measurements/{analysis_id}"
         
         # Decode images safely
         front_img = decode_image(data.get('front_image'))
@@ -2013,30 +4215,23 @@ def process_upload():
 
         import tempfile, cv2, numpy as np
 
-        # Save front image to disk for SMPLify-X
-        front_temp_path = os.path.join(
-            parent_dir, 'data', 'images', 'front.jpg'
-        )
-        os.makedirs(
-            os.path.dirname(front_temp_path),
-            exist_ok=True
-        )
+        # Save front image to isolated measurement folder for SMPLify-X
+        front_temp_path = os.path.join(m_dir, 'front.jpg')
         cv2.imwrite(front_temp_path, front_img)
         print(f"Saved front image: {front_temp_path}")
 
-        # Save side image if provided
+        # Save side image to isolated measurement folder if provided
         side_temp_path = None
         if side_img is not None:
-            side_temp_path = os.path.join(
-                parent_dir, 'data', 'images', 'side.jpg'
-            )
+            side_temp_path = os.path.join(m_dir, 'side.jpg')
             cv2.imwrite(side_temp_path, side_img)
             print(f"Saved side image: {side_temp_path}")
 
         # ── SMPLify-X Integration ──────────────────
-        mesh_data    = None
-        smplx_meas   = {}
-        smplx_status = "not_run"
+        mesh_data       = None
+        smplx_meas      = {}
+        smplx_status    = "not_run"
+        smplifyx_result = None
 
         try:
             # Get user height safely
@@ -2109,13 +4304,16 @@ def process_upload():
             print(f"Running SMPLify-X with "
                   f"height={final_height}cm...")
 
-            smplifyx_result = run_smplifyx(
-                front_image_path = front_temp_path,
-                side_image_path  = side_temp_path,
-                timeout_seconds  = 120
-            )
+            if run_smplifyx is not None:
+                smplifyx_result = run_smplifyx(
+                    front_image_path = front_temp_path,
+                    side_image_path  = side_temp_path,
+                    timeout_seconds  = 120
+                )
+            else:
+                smplifyx_result = {"success": False, "mesh_path": None, "error": "SMPLify-X runner not available"}
 
-            if smplifyx_result["success"]:
+            if smplifyx_result and smplifyx_result.get("success") and SMPLifyXReader is not None:
                 reader = SMPLifyXReader(
                     smplifyx_result["mesh_path"]
                 )
@@ -2229,8 +4427,43 @@ def process_upload():
             'mask': results['front'].get('mask') if 'front' in results else None,
         }
 
+        # Copy generated mesh if available
+        if smplx_status == "success" and isinstance(smplifyx_result, dict) and smplifyx_result.get("mesh_path"):
+            try:
+                gen_m = smplifyx_result["mesh_path"]
+                if os.path.exists(gen_m):
+                    target_mesh_name = "body_mesh.glb" if gen_m.endswith('.glb') else "body_mesh.obj"
+                    shutil.copy2(gen_m, os.path.join(m_dir, target_mesh_name))
+            except Exception as copy_m_err:
+                print(f"Mesh copy notice: {copy_m_err}")
+
+        # Save overlays to isolated measurement folder
+        try:
+            if 'front' in results and results['front'].get('visualization'):
+                f_dec = decode_image(results['front']['visualization'])
+                if f_dec is not None:
+                    cv2.imwrite(os.path.join(m_dir, 'front_overlay.jpg'), f_dec)
+            if 'side' in results and results['side'].get('visualization'):
+                s_dec = decode_image(results['side']['visualization'])
+                if s_dec is not None:
+                    cv2.imwrite(os.path.join(m_dir, 'side_overlay.jpg'), s_dec)
+        except Exception as o_err:
+            print(f"Overlay save notice: {o_err}")
+
+        # Update profile last_used_at
+        if account_user_id != 'guest' and isinstance(profile.get('_id'), ObjectId):
+            profiles_col.update_one({'_id': profile['_id']}, {'$set': {'last_used_at': dt.datetime.now(dt.timezone.utc)}})
+
         return jsonify({
             'success':      True,
+            'analysis_id':  analysis_id,
+            'profile_id':   str(profile['_id']) if isinstance(profile.get('_id'), ObjectId) else profile.get('_id'),
+            'storage_dir':  m_rel_dir,
+            'front_image_key': f"{m_rel_dir}/front.jpg",
+            'side_image_key': f"{m_rel_dir}/side.jpg",
+            'front_overlay_key': f"{m_rel_dir}/front_overlay.jpg",
+            'side_overlay_key': f"{m_rel_dir}/side_overlay.jpg",
+            'mesh_glb_key': f"{m_rel_dir}/body_mesh.glb",
             'scale_factor': scale_factor,
             'reference_px': ref_px,
             'calibration': {
@@ -4163,6 +6396,11 @@ class LiveSession:
         self.last_instruction_time = 0.0
         self.user_height_cm = 165.0
         self.scale_factor = 0.0
+        self.account_user_id = None
+        self.profile_id = None
+        self.analysis_id = None
+        self.storage_dir = None
+        self.is_authenticated = False
 
 session_store = {}
 
@@ -4502,8 +6740,60 @@ def process_all_captured_images(session=None):
                             'smpl': auto_results.get('smpl'),
                         }
 
+        # If session has profile context, save record and images
+        if session.account_user_id and session.profile_id:
+            now = dt.datetime.now(dt.timezone.utc)
+            m_rel_dir = f"accounts/{session.account_user_id}/profiles/{session.profile_id}/measurements/{session.analysis_id}"
+            
+            # Save original images to isolated storage folder:
+            if 'front' in session.captured_images and session.storage_dir:
+                try:
+                    f_img = decode_image(session.captured_images['front'])
+                    if f_img is not None:
+                        cv2.imwrite(os.path.join(session.storage_dir, 'front.jpg'), f_img)
+                except Exception as save_err:
+                    print(f"Error saving front image: {save_err}")
+
+            if 'side' in session.captured_images and session.storage_dir:
+                try:
+                    s_img = decode_image(session.captured_images['side'])
+                    if s_img is not None:
+                        cv2.imwrite(os.path.join(session.storage_dir, 'side.jpg'), s_img)
+                except Exception as save_err:
+                    print(f"Error saving side image: {save_err}")
+
+            # Collect measurements
+            merged_meas = {}
+            for v_data in final_results.values():
+                for mk, mv in v_data.get('measurements', {}).items():
+                    merged_meas[mk] = mv.get('value_cm') if isinstance(mv, dict) else mv
+
+            record = {
+                'analysis_id': session.analysis_id,
+                'account_user_id': session.account_user_id,
+                'user_id': session.account_user_id,
+                'profile_id': session.profile_id,
+                'date': now.strftime('%d-%b-%Y'),
+                'height_cm': session.user_height_cm,
+                'source': 'camera',
+                'created_at': now,
+                'storage_dir': m_rel_dir,
+                'front_image_key': f"{m_rel_dir}/front.jpg",
+                'side_image_key': f"{m_rel_dir}/side.jpg",
+                'front_overlay_key': f"{m_rel_dir}/front_overlay.jpg",
+                'side_overlay_key': f"{m_rel_dir}/side_overlay.jpg",
+                'mesh_glb_key': f"{m_rel_dir}/body_mesh.glb",
+                'measurements': merged_meas
+            }
+            for mk, mv in merged_meas.items():
+                record[mk] = mv
+            measurements_col.insert_one(record)
+            print(f"Saved live camera measurement record {session.analysis_id} for profile {session.profile_id}")
+
         payload = {
             'success': True,
+            'analysis_id': session.analysis_id,
+            'profile_id': str(session.profile_id) if session.profile_id else None,
             'results': final_results,
             'calibration': {
                 'user_height_cm': session.user_height_cm,
@@ -4525,15 +6815,30 @@ def serve_mesh_obj(view, session_id=None):
     """Serve 000.obj mesh file with multi-directory fallback."""
     candidate_paths = []
     if session_id:
+        clean_sid = os.path.basename(str(session_id))
+        clean_view = os.path.basename(str(view))
+        # Check measurements collection for profile measurement folder
+        try:
+            m_rec = measurements_col.find_one({'analysis_id': clean_sid})
+            if m_rec and m_rec.get('storage_dir'):
+                m_dir = os.path.join(parent_dir, m_rec['storage_dir'])
+                for m_candidate in ['body_mesh.obj', 'body_mesh.glb', '000.obj']:
+                    cand = os.path.join(m_dir, m_candidate)
+                    if os.path.exists(cand):
+                        return send_file(cand, mimetype='text/plain' if cand.endswith('.obj') else 'model/gltf-binary')
+        except Exception:
+            pass
+
         candidate_paths.extend([
-            os.path.join(MESHES_DIR, session_id, view, "000.obj"),
-            os.path.join(MESHES_DIR, session_id, "000.obj"),
-            os.path.join(BASE_DIR, "output", "meshes", session_id, view, "000.obj"),
+            os.path.join(MESHES_DIR, clean_sid, clean_view, "000.obj"),
+            os.path.join(MESHES_DIR, clean_sid, "000.obj"),
+            os.path.join(BASE_DIR, "output", "meshes", clean_sid, clean_view, "000.obj"),
         ])
     
+    clean_view = os.path.basename(str(view))
     candidate_paths.extend([
-        os.path.join(MESHES_DIR, view, "000.obj"),
-        os.path.join(BASE_DIR, "output", "meshes", view, "000.obj"),
+        os.path.join(MESHES_DIR, clean_view, "000.obj"),
+        os.path.join(BASE_DIR, "output", "meshes", clean_view, "000.obj"),
         os.path.join(BASE_DIR, "output", "meshes", "front", "000.obj"),
     ])
 
@@ -4575,10 +6880,112 @@ def handle_reset():
     session.reset()
     print('Session reset')
 
+@socketio.on('start_measurement_session')
+def handle_start_measurement_session(data):
+    try:
+        session = get_session()
+        data = data or {}
+        token = data.get('token') or data.get('profile_session_token')
+        profile_id_str = data.get('profile_id')
+        user_height = data.get('user_height')
+        height_unit = data.get('height_unit', 'cm')
+
+        if not token:
+            emit('error', {'message': 'Authentication required. Profile session token is missing.'})
+            return
+
+        try:
+            # Cryptographically decode and validate token signature & expiration
+            decoded = decode_token(token)
+            account_user_id = decoded.get('sub') or decoded.get('account_user_id')
+            token_profile_id = decoded.get('profile_id')
+            role = decoded.get('role')
+            access_mode = decoded.get('access_mode') or ('invited_profile' if role == 'profile_member_session' else 'owner_profile')
+        except Exception:
+            emit('error', {'message': 'Invalid or expired authentication token.'})
+            return
+
+        if not account_user_id:
+            emit('error', {'message': 'Invalid authentication identity in token.'})
+            return
+
+        # Check target profile ID
+        target_check_id = token_profile_id or profile_id_str
+        if target_check_id:
+            profile = get_verified_profile(account_user_id, target_check_id)
+            if not profile:
+                emit('error', {'message': 'Select a valid FitLens profile before starting measurement.'})
+                return
+        else:
+            emit('error', {'message': 'Select a valid FitLens profile before starting measurement.'})
+            return
+
+        # Profile session token must contain profile_id
+        if not token_profile_id:
+            emit('error', {'message': 'Restricted profile session token required. Please unlock profile first.'})
+            return
+
+        # If client sends profile_id, verify it matches the token
+        if profile_id_str and str(profile_id_str) != str(token_profile_id):
+            emit('error', {'message': 'Profile ID mismatch with session token.'})
+            return
+
+        if profile.get('status') == 'archived' or profile.get('is_archived') is True or profile.get('status') == 'deleted':
+            emit('error', {'message': 'Profile is archived or deleted.'})
+            return
+
+        analysis_id = 'A' + str(uuid.uuid4())[:8].upper()
+        storage_dir = get_measurement_dir(account_user_id, str(profile['_id']), analysis_id)
+
+        # Bind ONLY validated server-side context to session (keyed by request.sid)
+        session.account_user_id = str(account_user_id)
+        session.profile_id = str(profile['_id'])
+        session.access_mode = access_mode
+        session.analysis_id = analysis_id
+        session.storage_dir = storage_dir
+        session.is_authenticated = True
+
+        if user_height:
+            session.user_height_cm = _normalize_height_to_cm(
+                user_height,
+                height_unit,
+                fallback=profile.get('default_height_cm', 170.0)
+            )
+        else:
+            session.user_height_cm = float(profile.get('default_height_cm', 170.0))
+
+        profiles_col.update_one({'_id': profile['_id']}, {'$set': {'last_used_at': dt.datetime.now(dt.timezone.utc)}})
+
+        emit('session_started', {
+            'success': True,
+            'session_id': analysis_id,
+            'profile_id': str(profile['_id']),
+            'profile_name': profile.get('name'),
+            'access_mode': access_mode,
+            'user_height_cm': session.user_height_cm
+        })
+        print(f"Started measurement session: account {account_user_id}, profile {profile.get('name')} ({profile['_id']}), mode {access_mode}")
+    except Exception as e:
+        print(f"Error in start_measurement_session: {e}")
+        emit('error', {'message': str(e)})
+
 @socketio.on('process_frame')
 def handle_frame(data):
     try:
         session = get_session()
+        data = data or {}
+
+        # Require an active, authenticated profile session
+        if not session.profile_id or not session.account_user_id:
+            emit('error', {'message': 'Select a FitLens profile before starting measurement.'})
+            return
+
+        # Do not trust profile_id from later frame payloads; reject mismatches
+        frame_profile_id = data.get('profile_id')
+        if frame_profile_id and str(frame_profile_id) != str(session.profile_id):
+            emit('error', {'message': 'Forbidden: Frame profile ID does not match active measurement session.'})
+            return
+
         image_data = data.get('image')
         view = data.get('view', 'front')
         user_height = data.get('user_height')
@@ -4871,6 +7278,11 @@ def _free_port_5000_if_occupied():
 
 if __name__ == '__main__':
     _free_port_5000_if_occupied()
+    try:
+        startup_recovery = recover_stale_claiming_invites(stale_seconds=300)
+        print(f"[STARTUP MAINTENANCE] Stale claiming invites sweep: {startup_recovery}")
+    except Exception as m_err:
+        print(f"[STARTUP MAINTENANCE] Could not sweep stale claiming invites: {m_err}")
     try:
         socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
     except OSError as err:

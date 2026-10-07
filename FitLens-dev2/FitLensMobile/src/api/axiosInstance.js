@@ -8,11 +8,22 @@ const axiosInstance = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
-// Add JWT token to every request
+// Add JWT token & active profile header to every request
 axiosInstance.interceptors.request.use(async (config) => {
   const token = await AsyncStorage.getItem(Config.TOKEN_KEY);
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
+  }
+  try {
+    const savedProfile = await AsyncStorage.getItem('@fitlens_active_profile');
+    if (savedProfile) {
+      const parsed = JSON.parse(savedProfile);
+      if (parsed?.id) {
+        config.headers['X-Active-Profile-Id'] = parsed.id;
+      }
+    }
+  } catch (e) {
+    // Ignore JSON parse errors
   }
   return config;
 });

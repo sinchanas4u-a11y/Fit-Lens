@@ -4,7 +4,7 @@ import './UploadMode.css';
 import ModeSelection from './ModeSelection';
 import ManualLandmarkMarker from './ManualLandmarkMarker';
 import SMPLViewer from './SMPLViewer';
-import { authHeaders } from '../services/authService';
+import { authHeaders, profileAuthHeaders } from '../services/authService';
 import ZoomableImage from './ZoomableImage';
 
 const PoseSilhouette = () => (
@@ -227,15 +227,21 @@ const PhotoGuidelines = ({ onProceed }) => (
   </div>
 );
 
-const UploadMode = () => {
+const UploadMode = ({ user, activeProfile }) => {
   const [frontImage, setFrontImage] = useState(null);
   const [sideImage, setSideImage] = useState(null);
 
   const [frontPreview, setFrontPreview] = useState(null);
   const [sidePreview, setSidePreview] = useState(null);
 
-  const [userHeight, setUserHeight] = useState('');
+  const [userHeight, setUserHeight] = useState(activeProfile?.default_height_cm ? String(activeProfile.default_height_cm) : '');
   const [heightUnit, setHeightUnit] = useState('cm');
+
+  useEffect(() => {
+    if (activeProfile?.default_height_cm) {
+      setUserHeight(String(activeProfile.default_height_cm));
+    }
+  }, [activeProfile?.id, activeProfile?.default_height_cm]);
 
   const [processing, setProcessing] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
@@ -611,7 +617,8 @@ const UploadMode = () => {
         front_landmarks: landmarks.front || null,
         side_landmarks: landmarks.side || null,
         front_image: frontImage ? await imageToBase64(frontImage) : null,
-        side_image: sideImage ? await imageToBase64(sideImage) : null
+        side_image: sideImage ? await imageToBase64(sideImage) : null,
+        profile_id: activeProfile?.id || null
       };
 
       console.log('📤 Sending manual landmarks to backend:', {
@@ -621,6 +628,7 @@ const UploadMode = () => {
       });
 
       const response = await axios.post('/api/process-manual', requestData, {
+          headers: profileAuthHeaders(),
           timeout: 180000
       });
 
@@ -671,7 +679,8 @@ const UploadMode = () => {
       const requestData = {
         front_image: frontBase64,
         side_image: sideBase64,
-        user_height: heightInCm
+        user_height: heightInCm,
+        profile_id: activeProfile?.id || null
       };
 
       console.log('📤 Sending request to backend:', {
@@ -683,6 +692,7 @@ const UploadMode = () => {
 
       // Send to backend
       const response = await axios.post('/api/process', requestData, {
+          headers: profileAuthHeaders(),
           timeout: 180000
       });
 
@@ -717,15 +727,16 @@ const UploadMode = () => {
 
       // Save measurements to MongoDB if user logged in
       try {
-        const token = localStorage.getItem('fitlens_token');
+        const token = localStorage.getItem('fitlens_profile_session_token') || localStorage.getItem('fitlens_token');
         if (token && response.data) {
           const meas = response.data.final_measurements || response.data.measurements || response.data.results?.front?.measurements || {};
           await fetch('http://localhost:5000/api/measurements/save', {
             method: 'POST',
-            headers: authHeaders(),
+            headers: profileAuthHeaders(),
             body: JSON.stringify({
               measurements: meas,
               user_height: heightInCm,
+              profile_id: activeProfile?.profile_id || activeProfile?.id || null,
               source: 'upload'
             })
           });

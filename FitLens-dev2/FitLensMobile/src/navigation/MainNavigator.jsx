@@ -10,12 +10,20 @@ import HistoryDetailScreen from '../screens/history/HistoryDetailScreen';
 import ChangePasswordScreen from '../screens/settings/ChangePasswordScreen';
 import DeleteAccountScreen from '../screens/settings/DeleteAccountScreen';
 import ProfileSettings from '../screens/settings/ProfileSettings';
+import ProfileSelectionScreen from '../screens/profile/ProfileSelectionScreen';
+import AddProfileScreen from '../screens/profile/AddProfileScreen';
+import InviteAdultScreen from '../screens/profile/InviteAdultScreen';
+import ManageProfilesScreen from '../screens/profile/ManageProfilesScreen';
 
 const Stack = createStackNavigator();
 
 const MainNavigator = () => (
   <Stack.Navigator screenOptions={{ headerShown: false }}>
     <Stack.Screen name="Tabs" component={TabNavigator} />
+    <Stack.Screen name="ProfileSelection" component={ProfileSelectionScreen} />
+    <Stack.Screen name="AddProfile" component={AddProfileScreen} />
+    <Stack.Screen name="InviteAdult" component={InviteAdultScreen} />
+    <Stack.Screen name="ManageProfiles" component={ManageProfilesScreen} />
     <Stack.Screen name="Guidelines" component={GuidelinesScreen} />
     <Stack.Screen name="Upload" component={UploadScreen} />
     <Stack.Screen name="Camera" component={CameraScreen} />

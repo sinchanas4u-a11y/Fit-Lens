@@ -24,6 +24,11 @@ export const Endpoints = {
   DOWNLOAD_DOCX: '/api/download/docx',
   DOWNLOAD_XML: '/api/download/xml',
 
+  // Multi-Profile & Invites
+  PROFILES: '/api/profiles',
+  PROFILE_INVITES: '/api/profile-invites',
+  CLAIM_INVITE: '/api/profile-invites/claim',
+
   // Health
   HEALTH: '/api/health',
 };
