@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { login, register, saveToken, forgotPassword } from '../services/authService';
 import ClaimInviteModal from './ClaimInviteModal';
 
-export default function LoginScreen({ onLoginSuccess }) {
+export default function LoginScreen({ onLoginSuccess, onClaimInviteClick }) {
   const [isRegister, setIsRegister] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -298,19 +298,35 @@ export default function LoginScreen({ onLoginSuccess }) {
             {isRegister ? 'Already have an account? Sign In' : "Don't have an account? Register"}
           </button>
 
-          <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: '1px solid #2D3561' }}>
+          <div style={{ marginTop: '20px', paddingTop: '16px', borderTop: '1px solid #2D3561' }}>
             <button
               type="button"
-              onClick={() => setShowClaimInvite(true)}
+              onClick={() => {
+                if (onClaimInviteClick) {
+                  onClaimInviteClick();
+                } else {
+                  setShowClaimInvite(true);
+                }
+              }}
               style={{
-                background: 'none',
-                border: 'none',
-                color: '#a0aec0',
-                fontSize: '13px',
-                cursor: 'pointer'
+                width: '100%',
+                padding: '12px 16px',
+                backgroundColor: 'rgba(0, 212, 170, 0.08)',
+                border: '1px solid #00D4AA',
+                borderRadius: '12px',
+                color: '#00D4AA',
+                fontSize: '14px',
+                fontWeight: '700',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                boxShadow: '0 2px 10px rgba(0, 212, 170, 0.15)',
+                transition: 'all 0.2s ease'
               }}
             >
-              🎟️ Have an invitation code? <span style={{ color: '#00D4AA', textDecoration: 'underline' }}>Join Account</span>
+              <span>🎟️</span> Have an Invitation Code? Claim Member Profile
             </button>
           </div>
         </div>

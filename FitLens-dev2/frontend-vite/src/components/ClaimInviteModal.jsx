@@ -43,7 +43,20 @@ export default function ClaimInviteModal({ initialCode = '', onClose, onClaimSuc
         setClaimedProfile(res.profile || { name: trimmedName });
         if (onClaimSuccess) onClaimSuccess(res);
       } else {
-        setError(res.error || 'Failed to claim invitation. Code may be invalid or expired.');
+        const errMsg = res.error || 'Failed to claim invitation. Code may be invalid or expired.';
+        const isAlreadyClaimed = errMsg.toLowerCase().includes('already been used') ||
+                                 errMsg.toLowerCase().includes('already been accepted') ||
+                                 errMsg.toLowerCase().includes('already been claimed');
+
+        if (isAlreadyClaimed) {
+          const activeProf = profileService.getActiveProfile();
+          if (activeProf && (activeProf.name || activeProf.id || activeProf.profile_id)) {
+            setClaimedProfile(activeProf);
+            if (onClaimSuccess) onClaimSuccess({ success: true, profile: activeProf });
+            return;
+          }
+        }
+        setError(errMsg);
       }
     } catch (err) {
       setError(err.message || 'Error claiming invitation code.');
@@ -116,7 +129,31 @@ export default function ClaimInviteModal({ initialCode = '', onClose, onClaimSuc
                 fontSize: '13px',
                 marginBottom: '18px'
               }}>
-                ⚠️ {error}
+                <div>⚠️ {error}</div>
+                {profileService.getActiveProfile() && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const p = profileService.getActiveProfile();
+                      if (onClaimSuccess) onClaimSuccess({ success: true, profile: p });
+                      if (onClose) onClose();
+                    }}
+                    style={{
+                      marginTop: '10px',
+                      padding: '10px 14px',
+                      backgroundColor: '#00D4AA',
+                      border: 'none',
+                      borderRadius: '8px',
+                      color: '#0a0e27',
+                      fontWeight: '700',
+                      fontSize: '13px',
+                      cursor: 'pointer',
+                      width: '100%'
+                    }}
+                  >
+                    Enter My Profile ({profileService.getActiveProfile().name || 'Member'})
+                  </button>
+                )}
               </div>
             )}
 

@@ -5,6 +5,8 @@ import ResetPasswordScreen from './components/ResetPasswordScreen'
 import SettingsScreen from './components/SettingsScreen'
 import ProfileSelectionModal from './components/ProfileSelectionModal'
 import ClaimInviteModal from './components/ClaimInviteModal'
+import InviteClaimScreen from './components/InviteClaimScreen'
+import MyProfileModal from './components/MyProfileModal'
 import { isLoggedIn, removeToken, getCurrentUser, clearAllAuthSessions, getAccessMode } from './services/authService'
 import { profileService } from './services/profileService'
 import logo from './assets/logo.png'
@@ -15,6 +17,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
   const [settingsTab, setSettingsTab] = useState('profile')
+  const [showMyProfile, setShowMyProfile] = useState(false)
 
   // Multi-Profile State
   const [activeProfile, setActiveProfile] = useState(() => profileService.getActiveProfile())
@@ -23,8 +26,15 @@ function App() {
   const [showProfileSelector, setShowProfileSelector] = useState(false)
   const [loginMemberEmail, setLoginMemberEmail] = useState('')
 
-  const isResetPasswordPath = window.location.pathname === '/reset-password' || new URLSearchParams(window.location.search).has('token')
-  const [claimInviteCode, setClaimInviteCode] = useState(() => new URLSearchParams(window.location.search).get('invite_code'))
+  const [inviteToken, setInviteToken] = useState(() => {
+    const sp = new URLSearchParams(window.location.search);
+    if (sp.get('invite_token')) return sp.get('invite_token');
+    if (sp.get('invite_code')) return sp.get('invite_code');
+    if (!window.location.pathname.includes('reset') && !sp.has('reset') && sp.get('token')) return sp.get('token');
+    return null;
+  });
+  const isResetPasswordPath = window.location.pathname === '/reset-password' || (!inviteToken && new URLSearchParams(window.location.search).has('token'));
+  const [claimInviteCode, setClaimInviteCode] = useState(null);
 
   const loadProfiles = async () => {
     try {
@@ -61,8 +71,20 @@ function App() {
           setUser(currentUser)
           const loadedProfiles = await loadProfiles()
           const saved = profileService.getActiveProfile()
-          if (!saved && loadedProfiles.length > 0) {
-            setShowProfileSelector(true)
+          if (saved) {
+            setActiveProfile(saved)
+            if (getAccessMode() === 'invited_profile') {
+              setProfiles([saved])
+              setShowProfileSelector(false)
+            }
+          } else if (loadedProfiles.length > 0) {
+            if (getAccessMode() === 'invited_profile') {
+              setActiveProfile(loadedProfiles[0])
+              profileService.saveActiveProfile(loadedProfiles[0])
+              setShowProfileSelector(false)
+            } else {
+              setShowProfileSelector(true)
+            }
           }
         } else {
           clearAllAuthSessions()
@@ -95,6 +117,45 @@ function App() {
     return <ResetPasswordScreen onResetSuccess={() => { window.location.href = '/'; }} />
   }
 
+  // Non-owner member invitation flow:
+  // Non-owner opens link or scans QR -> NEVER show owner login page!
+  if (inviteToken) {
+    return (
+      <InviteClaimScreen
+        token={inviteToken}
+        onCancel={() => {
+          window.history.replaceState({}, '', window.location.pathname);
+          setInviteToken(null);
+        }}
+        onClaimSuccess={async (claimRes) => {
+          window.history.replaceState({}, '', window.location.pathname);
+          setInviteToken(null);
+          setClaimInviteCode(null);
+          try {
+            if (claimRes?.profile) {
+              const p = claimRes.profile;
+              setActiveProfile(p);
+              profileService.saveActiveProfile(p);
+              profileService.saveUnlockedProfileId(p.id || p.profile_id);
+              setProfiles([p]);
+              setUser(claimRes.user || {
+                name: p.name,
+                role: 'profile_member_session',
+                access_mode: 'invited_profile'
+              });
+              setShowProfileSelector(false);
+              setShowSettings(false);
+            } else {
+              await loadProfiles();
+            }
+          } catch (err) {
+            console.error('Error completing claim in App:', err);
+          }
+        }}
+      />
+    );
+  }
+
   if (loading) {
     return (
       <div style={{ minHeight: '100vh', background: '#0a0e27', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#00D4AA' }}>
@@ -106,13 +167,36 @@ function App() {
   if (!user && !isLoggedIn()) {
     return (
       <>
-        <LoginScreen onLoginSuccess={handleLoginSuccess} />
+        <LoginScreen
+          onLoginSuccess={handleLoginSuccess}
+          onClaimInviteClick={() => setInviteToken('manual')}
+        />
         {claimInviteCode && (
           <ClaimInviteModal
             initialCode={claimInviteCode}
             onClose={() => {
               setClaimInviteCode(null);
               window.history.replaceState({}, '', window.location.pathname);
+            }}
+            onClaimSuccess={async (claimRes) => {
+              setClaimInviteCode(null);
+              window.history.replaceState({}, '', window.location.pathname);
+              if (claimRes?.profile) {
+                const p = claimRes.profile;
+                setActiveProfile(p);
+                profileService.saveActiveProfile(p);
+                profileService.saveUnlockedProfileId(p.id || p.profile_id);
+                setProfiles([p]);
+                setUser(claimRes.user || {
+                  name: p.name,
+                  role: 'profile_member_session',
+                  access_mode: 'invited_profile'
+                });
+                setShowProfileSelector(false);
+                setShowSettings(false);
+              } else {
+                await loadProfiles();
+              }
             }}
           />
         )}
@@ -128,7 +212,23 @@ function App() {
             <span style={{ color: '#00D4AA', fontWeight: 'bold', fontSize: '14px' }}>
               👤 Welcome back, {user?.name || 'User'} 👋
             </span>
-            {getAccessMode() !== 'invited_profile' && (
+            {getAccessMode() === 'invited_profile' ? (
+              <button
+                onClick={() => setShowMyProfile(true)}
+                style={{
+                  padding: '6px 14px',
+                  backgroundColor: '#1E2340',
+                  border: '1px solid #00D4AA',
+                  color: '#00D4AA',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontWeight: '600',
+                  fontSize: '13px'
+                }}
+              >
+                👤 My Profile
+              </button>
+            ) : (
               <button
                 onClick={() => {
                   setSettingsTab('profile');
@@ -168,6 +268,11 @@ function App() {
           {/* Active Profile Chip below Welcome back, User 👋 */}
           {user && (
             <div
+              onClick={() => {
+                if (getAccessMode() === 'invited_profile') {
+                  setShowMyProfile(true);
+                }
+              }}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -177,7 +282,9 @@ function App() {
                 borderRadius: '20px',
                 padding: '4px 12px 4px 6px',
                 boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
+                cursor: getAccessMode() === 'invited_profile' ? 'pointer' : 'default'
               }}
+              title={getAccessMode() === 'invited_profile' ? 'Click to edit your personal details' : undefined}
             >
               <div style={{
                 width: '24px',
@@ -219,7 +326,7 @@ function App() {
       </header>
 
       <main>
-        {showSettings ? (
+        {showSettings && getAccessMode() !== 'invited_profile' ? (
           <SettingsScreen
             user={user}
             initialTab={settingsTab}
@@ -245,6 +352,17 @@ function App() {
         )}
       </main>
 
+      {/* Non-owner Member Self-Service Edit Modal */}
+      <MyProfileModal
+        isOpen={showMyProfile}
+        activeProfile={activeProfile}
+        onProfileUpdated={(updated) => {
+          setActiveProfile(updated);
+          profileService.saveActiveProfile(updated);
+        }}
+        onClose={() => setShowMyProfile(false)}
+      />
+
       {claimInviteCode && (
         <ClaimInviteModal
           initialCode={claimInviteCode}
@@ -260,18 +378,20 @@ function App() {
       )}
 
       {/* Available Profiles Modal: Select & Unlock Profiles */}
-      <ProfileSelectionModal
-        isOpen={showProfileSelector}
-        profiles={profiles}
-        user={user}
-        initialMemberEmail={loginMemberEmail}
-        onSelectProfile={(profile) => {
-          setActiveProfile(profile);
-          profileService.saveActiveProfile(profile);
-          setShowProfileSelector(false);
-        }}
-        onLogout={handleLogout}
-      />
+      {getAccessMode() !== 'invited_profile' && (
+        <ProfileSelectionModal
+          isOpen={showProfileSelector}
+          profiles={profiles}
+          user={user}
+          initialMemberEmail={loginMemberEmail}
+          onSelectProfile={(profile) => {
+            setActiveProfile(profile);
+            profileService.saveActiveProfile(profile);
+            setShowProfileSelector(false);
+          }}
+          onLogout={handleLogout}
+        />
+      )}
 
       <footer className="App-footer">
         <p></p>

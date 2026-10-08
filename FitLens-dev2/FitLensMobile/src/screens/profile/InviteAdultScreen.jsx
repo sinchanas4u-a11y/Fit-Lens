@@ -9,6 +9,7 @@ import {
   Alert,
   ActivityIndicator,
   Share,
+  Modal,
 } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import QRCode from 'react-native-qrcode-svg';
@@ -24,6 +25,7 @@ const InviteAdultScreen = ({ navigation }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [timeLeft, setTimeLeft] = useState(null); // seconds remaining
+  const [isQrModalVisible, setIsQrModalVisible] = useState(false);
 
   const { activeCount, pendingCount, maxSlots, fetchProfiles, activeProfile } = useProfileStore();
 
@@ -190,14 +192,22 @@ const InviteAdultScreen = ({ navigation }) => {
               </Text>
             </View>
 
-            <View style={styles.qrWrapper}>
+            <TouchableOpacity
+              style={styles.qrWrapper}
+              onPress={() => setIsQrModalVisible(true)}
+              activeOpacity={0.85}
+            >
               <QRCode
                 value={activeInvite.claim_url}
-                size={180}
-                color="#0A0E27"
+                size={230}
+                color="#000000"
                 backgroundColor="#FFFFFF"
+                ecl="M"
+                quietZone={14}
               />
-            </View>
+              <Text style={styles.tapEnlargeText}>🔍 Tap to enlarge for easy scanning</Text>
+            </TouchableOpacity>
+            <Text style={styles.qrHint}>📷 Point another phone camera at this QR code to claim</Text>
 
             <Text style={styles.codeLabel}>15-MINUTE INVITATION CODE</Text>
             <TouchableOpacity style={styles.codeBox} onPress={handleCopyCode} activeOpacity={0.7}>
@@ -344,6 +354,52 @@ const InviteAdultScreen = ({ navigation }) => {
           </View>
         )}
       </ScrollView>
+
+      {/* Full-Screen Enlarged QR Modal */}
+      <Modal
+        visible={isQrModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setIsQrModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Scan FitLens Invitation</Text>
+              <TouchableOpacity onPress={() => setIsQrModalVisible(false)} style={styles.modalCloseBtn}>
+                <Text style={styles.modalCloseText}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.modalQrWrapper}>
+              <QRCode
+                value={activeInvite?.claim_url || ''}
+                size={260}
+                color="#000000"
+                backgroundColor="#FFFFFF"
+                ecl="M"
+                quietZone={16}
+              />
+            </View>
+
+            <Text style={styles.modalTip}>
+              💡 Turn up screen brightness to make scanning easier from another phone camera.
+            </Text>
+
+            <View style={styles.modalCodeBox}>
+              <Text style={styles.modalCodeLabel}>OR ENTER CODE MANUALLY</Text>
+              <Text style={styles.modalCodeValue}>{activeInvite?.invite_code}</Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.modalDismissBtn}
+              onPress={() => setIsQrModalVisible(false)}
+            >
+              <Text style={styles.modalDismissText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </LinearGradient>
   );
 };
@@ -375,7 +431,14 @@ const styles = StyleSheet.create({
     padding: 16,
     backgroundColor: '#FFFFFF',
     borderRadius: 16,
-    marginBottom: 20,
+    marginBottom: 12,
+  },
+  qrHint: {
+    color: Colors.textSecondary,
+    fontSize: 12,
+    marginBottom: 16,
+    textAlign: 'center',
+    fontWeight: '600',
   },
   codeLabel: {
     color: Colors.textSecondary,
@@ -634,6 +697,101 @@ const styles = StyleSheet.create({
   regenBtnText: {
     color: '#FFFFFF',
     fontWeight: '700',
+    fontSize: 14,
+  },
+  tapEnlargeText: {
+    color: Colors.accent,
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 8,
+    textAlign: 'center',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(10, 14, 39, 0.92)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalCard: {
+    backgroundColor: '#1E2340',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#2D3561',
+    padding: 24,
+    alignItems: 'center',
+    width: '100%',
+    maxWidth: 340,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '800',
+  },
+  modalCloseBtn: {
+    padding: 6,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  modalCloseText: {
+    color: '#A0AEC0',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  modalQrWrapper: {
+    padding: 16,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    marginBottom: 14,
+  },
+  modalTip: {
+    color: '#A0AEC0',
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 16,
+    marginBottom: 16,
+  },
+  modalCodeBox: {
+    backgroundColor: '#0A0E27',
+    borderWidth: 1,
+    borderColor: '#00D4AA',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+    width: '100%',
+    marginBottom: 16,
+  },
+  modalCodeLabel: {
+    color: '#00D4AA',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  modalCodeValue: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '900',
+    letterSpacing: 2,
+  },
+  modalDismissBtn: {
+    backgroundColor: '#00D4AA',
+    paddingVertical: 12,
+    borderRadius: 12,
+    width: '100%',
+    alignItems: 'center',
+  },
+  modalDismissText: {
+    color: '#0A0E27',
+    fontWeight: '800',
     fontSize: 14,
   },
 });

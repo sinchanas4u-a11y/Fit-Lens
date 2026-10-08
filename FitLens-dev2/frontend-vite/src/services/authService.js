@@ -1,7 +1,34 @@
-const API = 'http://localhost:5000';
+export const getCandidateAuthBases = () => {
+  const bases = [];
+  if (typeof window !== 'undefined') {
+    bases.push('');
+    const host = window.location.hostname;
+    if (host) {
+      bases.push(`http://${host}:5000`);
+    }
+  }
+  bases.push('http://127.0.0.1:5000');
+  bases.push('http://localhost:5000');
+  return [...new Set(bases)];
+};
+
+export const resilientFetchAuth = async (endpoint, options = {}) => {
+  const bases = getCandidateAuthBases();
+  let lastErr = null;
+  for (const base of bases) {
+    try {
+      const url = `${base}${endpoint}`;
+      return await fetch(url, options);
+    } catch (err) {
+      lastErr = err;
+      continue;
+    }
+  }
+  throw lastErr || new Error('Network error: Unable to connect to FitLens server.');
+};
 
 export const register = async (name, email, password) => {
-  const res = await fetch(`${API}/api/auth/register`, {
+  const res = await resilientFetchAuth('/api/auth/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, email, password })
@@ -10,7 +37,7 @@ export const register = async (name, email, password) => {
 };
 
 export const login = async (email, password) => {
-  const res = await fetch(`${API}/api/auth/login`, {
+  const res = await resilientFetchAuth('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password })
@@ -18,20 +45,33 @@ export const login = async (email, password) => {
   return res.json();
 };
 
+const API = '';
+
 export const getCurrentUser = async () => {
-  const token = getAccountAuthToken();
+  const token = getProfileSessionToken() || getAccountAuthToken();
   if (!token) return null;
   try {
-    const res = await fetch(`${API}/api/auth/me`, {
-      headers: authHeaders()
+    const res = await resilientFetchAuth('/api/auth/me', {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
     });
     if (!res.ok) {
-      removeToken();
+      if (getProfileSessionToken()) {
+        clearAllAuthSessions();
+      } else {
+        removeToken();
+      }
       return null;
     }
     const data = await res.json();
     if (!data.success) {
-      removeToken();
+      if (getProfileSessionToken()) {
+        clearAllAuthSessions();
+      } else {
+        removeToken();
+      }
       return null;
     }
     return data.user;
@@ -94,11 +134,11 @@ export const saveAccessMode = (mode) => {
   }
 };
 
-export const isLoggedIn = () => !!getAccountAuthToken();
+export const isLoggedIn = () => !!getAccountAuthToken() || !!getProfileSessionToken();
 
 // Auth Headers for Owner / Account Management
 export const authHeaders = () => {
-  const token = getAccountAuthToken();
+  const token = getAccountAuthToken() || getProfileSessionToken();
   const headers = { 'Content-Type': 'application/json' };
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;

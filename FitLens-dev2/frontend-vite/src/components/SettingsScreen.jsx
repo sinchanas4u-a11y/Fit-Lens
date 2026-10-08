@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { updateProfile, changePassword, deleteAccount, deleteMeasurement, authHeaders } from '../services/authService';
+import { updateProfile, changePassword, deleteAccount, deleteMeasurement, authHeaders, getAccessMode } from '../services/authService';
 import { profileService } from '../services/profileService';
 import { QRCodeSVG } from 'qrcode.react';
 
@@ -12,6 +12,11 @@ export default function SettingsScreen({
   activeProfile: propActiveProfile,
   onActiveProfileChanged
 }) {
+  // Restricted non-owner profile member sessions are blocked from owner settings
+  if (getAccessMode() === 'invited_profile' || user?.role === 'profile_member_session' || user?.access_mode === 'invited_profile') {
+    return null;
+  }
+
   const [activeTab, setActiveTab] = useState(initialTab || 'profile');
   const [msg, setMsg] = useState(null);
   const [error, setError] = useState(null);
@@ -43,6 +48,11 @@ export default function SettingsScreen({
   const [inviteResult, setInviteResult] = useState(null);
   const [pendingInvite, setPendingInvite] = useState(null);
   const [copiedType, setCopiedType] = useState(null);
+  const [selectedInviteProfileId, setSelectedInviteProfileId] = useState('');
+  const [invitesList, setInvitesList] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [showEnlargedQr, setShowEnlargedQr] = useState(false);
 
   const handleCopy = (text, type) => {
     if (!text) return;
@@ -117,15 +127,27 @@ export default function SettingsScreen({
         }
       }
 
-      // Also fetch pending invites if owner
+      // Also fetch invitations and in-app notifications if owner
       try {
         const invRes = await profileService.listInvites();
         if (invRes.success) {
-          const pending = (invRes.invites || []).find(i => i.status === 'pending');
-          setPendingInvite(pending || null);
+          const allInvites = invRes.invites || [];
+          setInvitesList(allInvites);
+          const activePending = allInvites.find(i => ['sent', 'opened', 'verification_pending', 'pending'].includes(i.status));
+          setPendingInvite(activePending || null);
         }
       } catch (invErr) {
         // Silently catch invite list errors
+      }
+
+      try {
+        const notifRes = await profileService.getNotifications();
+        if (notifRes.success && notifRes.notifications) {
+          setNotifications(notifRes.notifications || []);
+          setUnreadCount((notifRes.notifications || []).filter(n => !n.read).length);
+        }
+      } catch (notifErr) {
+        // Silently catch notification errors
       }
     } catch (e) {
       console.error(e);
@@ -333,7 +355,8 @@ export default function SettingsScreen({
     try {
       const res = await profileService.createInvite({
         target_email: email,
-        relationship: inviteRelationship
+        relationship: inviteRelationship,
+        profile_id: selectedInviteProfileId || undefined
       });
 
       // Debug safely: log ONLY boolean state, never raw tokens or URLs
@@ -342,6 +365,7 @@ export default function SettingsScreen({
       if (res.success) {
         setInviteResult(res);
         setPendingInvite(null);
+        setSelectedInviteProfileId('');
         setMsg(`Invitation created for ${email}. Email sent and QR / invite link ready.`);
         setInviteEmail('');
         await fetchProfilesList();
@@ -352,6 +376,87 @@ export default function SettingsScreen({
       setError(err.message || 'Error sending invitation.');
     } finally {
       setInviteLoading(false);
+    }
+  };
+
+  const formatDate = (isoStr) => {
+    if (!isoStr) return '—';
+    try {
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return isoStr;
+      return d.toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch (e) {
+      return isoStr;
+    }
+  };
+
+  const renderStatusBadge = (statusDisplay, statusRaw) => {
+    const s = (statusDisplay || statusRaw || 'sent').toLowerCase();
+    let bg = 'rgba(59, 130, 246, 0.15)';
+    let border = '#3B82F6';
+    let color = '#60A5FA';
+    let text = statusDisplay || 'Sent';
+
+    if (s.includes('accepted') || s.includes('claim')) {
+      bg = 'rgba(16, 185, 129, 0.15)';
+      border = '#10B981';
+      color = '#34D399';
+      text = 'Accepted';
+    } else if (s.includes('open')) {
+      bg = 'rgba(245, 158, 11, 0.15)';
+      border = '#F59E0B';
+      color = '#FBBF24';
+      text = 'Opened';
+    } else if (s.includes('verif')) {
+      bg = 'rgba(139, 92, 246, 0.15)';
+      border = '#8B5CF6';
+      color = '#A78BFA';
+      text = 'Verification Pending';
+    } else if (s.includes('expir')) {
+      bg = 'rgba(107, 114, 128, 0.15)';
+      border = '#6B7280';
+      color = '#9CA3AF';
+      text = 'Expired';
+    } else if (s.includes('revok')) {
+      bg = 'rgba(239, 68, 68, 0.15)';
+      border = '#EF4444';
+      color = '#F87171';
+      text = 'Revoked';
+    }
+
+    return (
+      <span style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '4px',
+        padding: '3px 10px',
+        borderRadius: '8px',
+        backgroundColor: bg,
+        border: `1px solid ${border}`,
+        color: color,
+        fontSize: '11px',
+        fontWeight: '700',
+        textTransform: 'uppercase',
+        letterSpacing: '0.5px'
+      }}>
+        ● {text}
+      </span>
+    );
+  };
+
+  const handleMarkNotificationRead = async (notifId) => {
+    try {
+      await profileService.markNotificationRead(notifId);
+      setNotifications(prev => prev.map(n => n.id === notifId ? { ...n, read: true } : n));
+      setUnreadCount(c => Math.max(0, c - 1));
+    } catch (err) {
+      console.warn('Could not mark notification read:', err);
     }
   };
 
@@ -536,6 +641,21 @@ export default function SettingsScreen({
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <span style={{ fontSize: '24px' }}>⚙️</span>
           <h2 style={{ margin: 0, fontSize: '22px', fontWeight: '800' }}>Account Settings</h2>
+          {unreadCount > 0 && (
+            <span style={{
+              backgroundColor: '#00D4AA',
+              color: '#0a0e27',
+              borderRadius: '12px',
+              padding: '2px 10px',
+              fontSize: '11px',
+              fontWeight: '800',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px'
+            }}>
+              🔔 {unreadCount} new alert{unreadCount > 1 ? 's' : ''}
+            </span>
+          )}
         </div>
         {onClose && (
           <button
@@ -564,7 +684,7 @@ export default function SettingsScreen({
       }}>
         {[
           { key: 'profile', label: '👤 Profile' },
-          { key: 'profiles', label: isCallerOwner() ? '👥 Manage Profiles' : '👥 Family Profiles' },
+          { key: 'profiles', label: isCallerOwner() ? (unreadCount > 0 ? `👥 Manage Profiles (${unreadCount})` : '👥 Manage Profiles') : '👥 Family Profiles' },
           { key: 'security', label: '🔒 Security' },
           { key: 'history', label: '📊 Scan History' },
           { key: 'account', label: '⚠️ Account' },
@@ -985,9 +1105,31 @@ export default function SettingsScreen({
                               </button>
                             )}
 
-                            {/* Archive & Delete buttons: ONLY owner can archive or permanently delete non-owner profiles */}
+                            {/* Invite, Archive & Delete buttons: ONLY owner can invite, archive or permanently delete non-owner profiles */}
                             {isCurrentOwner && !p.is_owner && (
                               <div style={{ display: 'flex', gap: '6px' }}>
+                                <button
+                                  onClick={() => {
+                                    setSelectedInviteProfileId(p.id);
+                                    setInviteRelationship(p.relationship || 'Spouse');
+                                    setShowInviteSection(true);
+                                    setShowAddSection(false);
+                                  }}
+                                  style={{
+                                    backgroundColor: 'rgba(0, 212, 170, 0.12)',
+                                    border: '1px solid rgba(0, 212, 170, 0.4)',
+                                    color: '#00D4AA',
+                                    padding: '8px 12px',
+                                    borderRadius: '8px',
+                                    fontWeight: '600',
+                                    fontSize: '13px',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.15s ease'
+                                  }}
+                                  title="Generate invitation QR & deep link for this profile"
+                                >
+                                  ✉️ Invite
+                                </button>
                                 <button
                                   onClick={() => handleArchiveProfile(p)}
                                   style={{
@@ -1237,6 +1379,38 @@ export default function SettingsScreen({
                 <form onSubmit={handleSendInvitation} style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '480px' }}>
                   <div>
                     <label style={{ display: 'block', color: '#a0aec0', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>
+                      ASSIGN TO PROFILE (OPTIONAL)
+                    </label>
+                    <select
+                      value={selectedInviteProfileId}
+                      onChange={(e) => {
+                        setSelectedInviteProfileId(e.target.value);
+                        const found = profiles.find(p => p.id === e.target.value);
+                        if (found?.relationship) setInviteRelationship(found.relationship);
+                      }}
+                      style={{
+                        width: '100%',
+                        padding: '12px 14px',
+                        backgroundColor: '#1E2340',
+                        border: '1px solid #2D3561',
+                        borderRadius: '10px',
+                        color: '#ffffff',
+                        fontSize: '14px',
+                        outline: 'none',
+                        boxSizing: 'border-box'
+                      }}
+                    >
+                      <option value="">Create new profile automatically</option>
+                      {profiles.filter(p => !p.is_owner).map(p => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} ({p.relationship || 'Member'})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', color: '#a0aec0', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>
                       INVITEE EMAIL ADDRESS
                     </label>
                     <input
@@ -1360,7 +1534,7 @@ export default function SettingsScreen({
                       </div>
                     )}
 
-                    {/* QR Code Container */}
+                    {/* QR Code Container (Optimized for Mobile Camera Scanning) */}
                     <div style={{
                       display: 'flex',
                       flexDirection: 'column',
@@ -1368,31 +1542,214 @@ export default function SettingsScreen({
                       backgroundColor: '#0a0e27',
                       border: '1px solid #2D3561',
                       borderRadius: '16px',
-                      padding: '20px',
+                      padding: '24px 20px',
                       marginBottom: '18px',
                       textAlign: 'center'
                     }}>
-                      <div style={{
-                        padding: '16px',
-                        backgroundColor: '#FFFFFF',
-                        borderRadius: '16px',
-                        boxShadow: '0 8px 24px rgba(0, 212, 170, 0.25)',
-                        display: 'inline-block'
-                      }}>
+                      <div
+                        onClick={() => setShowEnlargedQr(true)}
+                        title="Click to enlarge QR code for easy phone scanning"
+                        style={{
+                          padding: '20px',
+                          backgroundColor: '#FFFFFF',
+                          borderRadius: '20px',
+                          boxShadow: '0 12px 36px rgba(0, 212, 170, 0.35)',
+                          display: 'inline-block',
+                          cursor: 'pointer',
+                          transition: 'transform 0.2s ease',
+                          maxWidth: '100%',
+                          boxSizing: 'border-box'
+                        }}
+                      >
                         <QRCodeSVG
                           value={inviteResult.claim_url}
-                          size={180}
-                          level="H"
+                          size={240}
+                          level="M"
                           includeMargin={true}
+                          fgColor="#000000"
+                          bgColor="#FFFFFF"
                         />
                       </div>
-                      <p style={{ color: '#cbd5e0', fontSize: '12px', fontWeight: '600', marginTop: '12px', marginBottom: '2px' }}>
-                        📷 Scan QR code to claim profile instantly
+
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '14px', flexWrap: 'wrap', justifyContent: 'center' }}>
+                        <button
+                          type="button"
+                          onClick={() => setShowEnlargedQr(true)}
+                          style={{
+                            padding: '6px 14px',
+                            backgroundColor: 'rgba(0, 212, 170, 0.15)',
+                            border: '1px solid #00D4AA',
+                            borderRadius: '20px',
+                            color: '#00D4AA',
+                            fontSize: '12px',
+                            fontWeight: '700',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          🔍 Tap to Enlarge QR Code
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleShareInvite}
+                          style={{
+                            padding: '6px 14px',
+                            backgroundColor: '#1E2340',
+                            border: '1px solid #2D3561',
+                            borderRadius: '20px',
+                            color: '#cbd5e0',
+                            fontSize: '12px',
+                            fontWeight: '600',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          📤 Share Link
+                        </button>
+                      </div>
+
+                      <p style={{ color: '#ffffff', fontSize: '13px', fontWeight: '700', marginTop: '12px', marginBottom: '2px' }}>
+                        📷 Scan QR code with phone camera to claim profile instantly
                       </p>
-                      <span style={{ color: '#718096', fontSize: '11px' }}>
-                        Open phone camera on the same Wi-Fi network to claim profile
+                      <span style={{ color: '#a0aec0', fontSize: '11px', lineHeight: '1.4' }}>
+                        Ensure the phone is connected to the same Wi-Fi network ({inviteResult.local_ip || 'Local Network'})
                       </span>
                     </div>
+
+                    {/* Enlarged Fullscreen QR Modal */}
+                    {showEnlargedQr && (
+                      <div
+                        onClick={() => setShowEnlargedQr(false)}
+                        style={{
+                          position: 'fixed',
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          backgroundColor: 'rgba(5, 7, 20, 0.95)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          zIndex: 9999,
+                          backdropFilter: 'blur(10px)',
+                          padding: '20px'
+                        }}
+                      >
+                        <div
+                          onClick={(e) => e.stopPropagation()}
+                          style={{
+                            backgroundColor: '#131838',
+                            border: '2px solid #00D4AA',
+                            borderRadius: '24px',
+                            padding: '30px 24px',
+                            maxWidth: '380px',
+                            width: '100%',
+                            textAlign: 'center',
+                            boxShadow: '0 24px 64px rgba(0, 0, 0, 0.8)'
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                            <strong style={{ color: '#00D4AA', fontSize: '16px' }}>
+                              📷 Scan FitLens Invitation
+                            </strong>
+                            <button
+                              onClick={() => setShowEnlargedQr(false)}
+                              style={{
+                                background: 'none',
+                                border: 'none',
+                                color: '#a0aec0',
+                                fontSize: '20px',
+                                cursor: 'pointer',
+                                padding: '4px 8px'
+                              }}
+                            >
+                              ✕
+                            </button>
+                          </div>
+
+                          <div style={{
+                            padding: '24px',
+                            backgroundColor: '#FFFFFF',
+                            borderRadius: '20px',
+                            display: 'inline-block',
+                            boxShadow: '0 8px 30px rgba(0, 212, 170, 0.4)',
+                            marginBottom: '18px'
+                          }}>
+                            <QRCodeSVG
+                              value={inviteResult.claim_url}
+                              size={280}
+                              level="M"
+                              includeMargin={true}
+                              fgColor="#000000"
+                              bgColor="#FFFFFF"
+                            />
+                          </div>
+
+                          {inviteResult.invite_code && (
+                            <div style={{
+                              padding: '10px 16px',
+                              backgroundColor: '#0a0e27',
+                              borderRadius: '12px',
+                              border: '1px dashed #2D3561',
+                              marginBottom: '16px'
+                            }}>
+                              <span style={{ fontSize: '11px', color: '#a0aec0', textTransform: 'uppercase', letterSpacing: '1px', display: 'block' }}>
+                                Or enter invitation code
+                              </span>
+                              <strong style={{ fontSize: '22px', color: '#00D4AA', letterSpacing: '2px', fontFamily: 'monospace' }}>
+                                {inviteResult.invite_code}
+                              </strong>
+                            </div>
+                          )}
+
+                          <div style={{
+                            padding: '10px 14px',
+                            backgroundColor: 'rgba(0, 212, 170, 0.1)',
+                            borderRadius: '10px',
+                            fontSize: '12px',
+                            color: '#e6fffa',
+                            marginBottom: '20px',
+                            lineHeight: '1.4'
+                          }}>
+                            💡 <strong>Tip:</strong> Turn up your phone screen brightness to maximum so the other phone camera can scan instantly without reflections.
+                          </div>
+
+                          <div style={{ display: 'flex', gap: '10px' }}>
+                            <button
+                              type="button"
+                              onClick={handleShareInvite}
+                              style={{
+                                flex: 1,
+                                padding: '12px',
+                                backgroundColor: '#00D4AA',
+                                border: 'none',
+                                borderRadius: '10px',
+                                color: '#0a0e27',
+                                fontWeight: '700',
+                                fontSize: '13px',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              📤 Share Link
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setShowEnlargedQr(false)}
+                              style={{
+                                padding: '12px 20px',
+                                backgroundColor: '#1E2340',
+                                border: '1px solid #2D3561',
+                                borderRadius: '10px',
+                                color: '#ffffff',
+                                fontWeight: '600',
+                                fontSize: '13px',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              Close
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
                     {/* 15-Minute Code Box */}
                     {inviteResult.invite_code && (
@@ -1545,62 +1902,284 @@ export default function SettingsScreen({
                   </div>
                 )}
 
-                {/* 2. Pending invite after reload WITHOUT raw claim_url: Clear revoke/regenerate notice instead of blank QR */}
-                {!inviteResult?.claim_url && pendingInvite && pendingInvite.status === 'pending' && (
+                {/* 2. Pending invite after reload notice (only if active pending without fresh QR) */}
+                {!inviteResult?.claim_url && pendingInvite && (
                   <div style={{
                     marginTop: '20px',
-                    padding: '24px',
+                    padding: '20px',
                     backgroundColor: '#131838',
                     border: '1px solid #ED8936',
                     borderRadius: '16px',
                     textAlign: 'center'
                   }}>
-                    <div style={{ fontSize: '32px', marginBottom: '8px' }}>⏱️</div>
-                    <h4 style={{ color: '#ED8936', margin: '0 0 8px 0', fontSize: '16px', fontWeight: '700' }}>
-                      Active Pending Invitation ({pendingInvite.relationship || 'Member'})
+                    <div style={{ fontSize: '28px', marginBottom: '6px' }}>⏱️</div>
+                    <h4 style={{ color: '#ED8936', margin: '0 0 6px 0', fontSize: '15px', fontWeight: '700' }}>
+                      Active Invitation in Progress ({pendingInvite.profile_name || pendingInvite.relationship || 'Member'})
                     </h4>
-                    <p style={{ color: '#cbd5e0', fontSize: '13px', lineHeight: '1.5', maxWidth: '480px', margin: '0 auto 14px auto' }}>
-                      An invitation is currently active and reserving 1 of your account's 4 profile slots.
+                    <p style={{ color: '#cbd5e0', fontSize: '12px', lineHeight: '1.5', maxWidth: '480px', margin: '0 auto 10px auto' }}>
+                      Status: <strong style={{ color: '#00D4AA' }}>{pendingInvite.status_display || pendingInvite.status}</strong> • Invited Email: <strong style={{ color: '#00D4AA' }}>{pendingInvite.masked_email}</strong>
                     </p>
-
                     <div style={{
-                      padding: '12px 16px',
+                      padding: '10px 14px',
                       backgroundColor: 'rgba(237, 137, 54, 0.1)',
                       border: '1px solid rgba(237, 137, 54, 0.3)',
-                      borderRadius: '10px',
-                      fontSize: '12px',
+                      borderRadius: '8px',
+                      fontSize: '11px',
                       color: '#fed7aa',
                       lineHeight: '1.5',
                       maxWidth: '480px',
-                      margin: '0 auto 16px auto',
+                      margin: '0 auto 12px auto',
                       textAlign: 'left'
                     }}>
-                      🔒 <strong>Security Policy:</strong> One-time QR codes and claim links are generated in memory and displayed only immediately upon creation. To protect your account security, raw tokens are never saved in plain text or restored after a page reload.
+                      🔒 <strong>Security Policy:</strong> Single-use invitation tokens are hashed and never stored in plain text. If your member needs a fresh link, revoke this invite to immediately generate a new one.
                     </div>
-
-                    <p style={{ color: '#a0aec0', fontSize: '12px', margin: '0 0 16px 0' }}>
-                      If your invited member did not scan the QR code or needs a new invite, revoke this invite to immediately regenerate a new one.
-                    </p>
-
                     <button
                       type="button"
                       onClick={() => handleRevokeInvite(pendingInvite.invite_id)}
                       style={{
-                        padding: '12px 24px',
+                        padding: '10px 20px',
                         backgroundColor: 'rgba(252, 129, 129, 0.15)',
                         border: '1px solid #fc8181',
-                        borderRadius: '10px',
+                        borderRadius: '8px',
                         color: '#fc8181',
                         fontWeight: '700',
-                        fontSize: '14px',
-                        cursor: 'pointer',
-                        transition: 'all 0.2s ease'
+                        fontSize: '13px',
+                        cursor: 'pointer'
                       }}
                     >
-                      🗑️ Revoke & Regenerate Invite
+                      🗑️ Revoke Invite
                     </button>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* 3. OWNER IN-APP NOTIFICATIONS & VERIFICATION CONFIRMATIONS */}
+            {isCurrentOwner && (
+              <div style={{
+                marginTop: '28px',
+                backgroundColor: '#0a0e27',
+                border: '1px solid #2D3561',
+                borderRadius: '16px',
+                padding: '24px'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span style={{ fontSize: '20px' }}>🔔</span>
+                    <div>
+                      <h4 style={{ margin: 0, color: '#ffffff', fontSize: '16px', fontWeight: '800' }}>
+                        Verified Invitation Confirmations
+                      </h4>
+                      <p style={{ margin: '2px 0 0', color: '#a0aec0', fontSize: '12px' }}>
+                        Verifiable in-app confirmations when member invitations are claimed
+                      </p>
+                    </div>
+                  </div>
+                  {unreadCount > 0 && (
+                    <span style={{
+                      padding: '3px 10px',
+                      backgroundColor: 'rgba(0, 212, 170, 0.15)',
+                      border: '1px solid #00D4AA',
+                      borderRadius: '12px',
+                      color: '#00D4AA',
+                      fontWeight: '800',
+                      fontSize: '11px'
+                    }}>
+                      {unreadCount} UNREAD
+                    </span>
+                  )}
+                </div>
+
+                {notifications.length === 0 ? (
+                  <p style={{ margin: 0, color: '#718096', fontSize: '13px', fontStyle: 'italic' }}>
+                    No invitation confirmation alerts yet.
+                  </p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {notifications.map(notif => (
+                      <div
+                        key={notif.id}
+                        style={{
+                          backgroundColor: notif.read ? '#131838' : 'rgba(0, 212, 170, 0.08)',
+                          border: `1px solid ${notif.read ? '#2D3561' : '#00D4AA'}`,
+                          borderRadius: '12px',
+                          padding: '12px 16px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: '12px',
+                          flexWrap: 'wrap'
+                        }}
+                      >
+                        <div style={{ flex: 1, minWidth: '240px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <strong style={{ color: '#ffffff', fontSize: '13px' }}>{notif.title}</strong>
+                            <span style={{ color: '#a0aec0', fontSize: '11px' }}>• {formatDate(notif.created_at)}</span>
+                          </div>
+                          <div style={{ color: '#cbd5e0', fontSize: '12px', marginTop: '3px' }}>
+                            {notif.message}
+                          </div>
+                        </div>
+                        {!notif.read && (
+                          <button
+                            type="button"
+                            onClick={() => handleMarkNotificationRead(notif.id)}
+                            style={{
+                              padding: '5px 12px',
+                              backgroundColor: '#1E2340',
+                              border: '1px solid #00D4AA',
+                              color: '#00D4AA',
+                              borderRadius: '8px',
+                              fontSize: '11px',
+                              fontWeight: '700',
+                              cursor: 'pointer'
+                            }}
+                          >
+                            Mark Read ✓
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 4. OWNER INVITATIONS & AUDIT TABLE */}
+            {isCurrentOwner && (
+              <div style={{
+                marginTop: '28px',
+                backgroundColor: '#0a0e27',
+                border: '1px solid #2D3561',
+                borderRadius: '16px',
+                padding: '24px'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', flexWrap: 'wrap', gap: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span style={{ fontSize: '20px' }}>📋</span>
+                    <div>
+                      <h4 style={{ margin: 0, color: '#00D4AA', fontSize: '16px', fontWeight: '800' }}>
+                        Invitation Audit & Status
+                      </h4>
+                      <p style={{ margin: '2px 0 0', color: '#a0aec0', fontSize: '12px' }}>
+                        Verifiable audit trail: Sent, Opened, Verification Pending, Accepted, Expired, Revoked
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={fetchProfilesList}
+                    style={{
+                      padding: '6px 12px',
+                      backgroundColor: '#1E2340',
+                      border: '1px solid #2D3561',
+                      borderRadius: '8px',
+                      color: '#00D4AA',
+                      fontSize: '12px',
+                      fontWeight: '600',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    🔄 Refresh Audit
+                  </button>
+                </div>
+
+                {invitesList.length === 0 ? (
+                  <p style={{ margin: 0, color: '#718096', fontSize: '13px', fontStyle: 'italic' }}>
+                    No invitations have been created for this account yet.
+                  </p>
+                ) : (
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '12px' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '1px solid #2D3561', color: '#a0aec0', textTransform: 'uppercase', fontSize: '11px', letterSpacing: '0.5px' }}>
+                          <th style={{ padding: '10px 12px' }}>Profile Display Name</th>
+                          <th style={{ padding: '10px 12px' }}>Invite State</th>
+                          <th style={{ padding: '10px 12px' }}>Masked Email</th>
+                          <th style={{ padding: '10px 12px' }}>Sent Date/Time</th>
+                          <th style={{ padding: '10px 12px' }}>Opened Date/Time</th>
+                          <th style={{ padding: '10px 12px' }}>Accepted Date/Time</th>
+                          <th style={{ padding: '10px 12px' }}>Last Active</th>
+                          <th style={{ padding: '10px 12px', textAlign: 'right' }}>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {invitesList.map(inv => {
+                          const isActive = ['sent', 'opened', 'verification_pending', 'pending'].includes(inv.status);
+                          return (
+                            <tr key={inv.invite_id || inv.id} style={{ borderBottom: '1px solid rgba(45, 53, 97, 0.4)' }}>
+                              <td style={{ padding: '12px', fontWeight: '700', color: '#ffffff' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <span>{inv.profile_name || 'Member Profile'}</span>
+                                  {inv.relationship && (
+                                    <span style={{ fontSize: '10px', backgroundColor: '#1E2340', color: '#a0aec0', padding: '1px 6px', borderRadius: '4px' }}>
+                                      {inv.relationship}
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td style={{ padding: '12px' }}>
+                                {renderStatusBadge(inv.status_display, inv.status)}
+                              </td>
+                              <td style={{ padding: '12px', color: '#00D4AA', fontFamily: 'monospace' }}>
+                                {inv.masked_email || '—'}
+                              </td>
+                              <td style={{ padding: '12px', color: '#cbd5e0' }}>
+                                {formatDate(inv.created_at || inv.sent_at)}
+                              </td>
+                              <td style={{ padding: '12px', color: inv.opened_at ? '#FBBF24' : '#718096' }}>
+                                {formatDate(inv.opened_at)}
+                              </td>
+                              <td style={{ padding: '12px', color: inv.claimed_at ? '#34D399' : '#718096' }}>
+                                {formatDate(inv.claimed_at)}
+                              </td>
+                              <td style={{ padding: '12px', color: '#cbd5e0' }}>
+                                {formatDate(inv.last_active_at)}
+                              </td>
+                              <td style={{ padding: '12px', textAlign: 'right' }}>
+                                {isActive ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRevokeInvite(inv.invite_id || inv.id)}
+                                    style={{
+                                      padding: '4px 10px',
+                                      backgroundColor: 'rgba(239, 68, 68, 0.15)',
+                                      border: '1px solid #EF4444',
+                                      color: '#F87171',
+                                      borderRadius: '6px',
+                                      fontSize: '11px',
+                                      fontWeight: '700',
+                                      cursor: 'pointer'
+                                    }}
+                                  >
+                                    Revoke
+                                  </button>
+                                ) : inv.status === 'claimed' ? (
+                                  <span style={{ color: '#10B981', fontWeight: '700', fontSize: '11px' }}>✓ Claimed</span>
+                                ) : (
+                                  <span style={{ color: '#718096', fontSize: '11px' }}>Inactive</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                <div style={{
+                  marginTop: '16px',
+                  padding: '12px 14px',
+                  backgroundColor: '#131838',
+                  border: '1px solid #2D3561',
+                  borderRadius: '10px',
+                  color: '#a0aec0',
+                  fontSize: '11px',
+                  lineHeight: '1.5'
+                }}>
+                  🔒 <strong>Privacy Isolation Guarantee:</strong> Non-owner member measurements, photos, 3D mesh models, scan histories, OTP values, and raw IP addresses are strictly isolated and never exposed in this dashboard.
+                </div>
               </div>
             )}
           </div>

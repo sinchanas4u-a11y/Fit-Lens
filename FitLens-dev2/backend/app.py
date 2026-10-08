@@ -173,11 +173,23 @@ except Exception as e:
         def count_documents(self, query):
             return sum(1 for d in self.data if self._matches(d, query))
 
+        def _apply_update(self, d, update):
+            if '$set' in update:
+                d.update(update['$set'])
+            if '$push' in update:
+                for k, v in update['$push'].items():
+                    if k not in d or not isinstance(d[k], list):
+                        d[k] = []
+                    d[k].append(v)
+            if '$inc' in update:
+                for k, v in update['$inc'].items():
+                    d[k] = d.get(k, 0) + v
+
         def find_one_and_update(self, query, update, return_document=False):
             for i, d in enumerate(self.data):
                 if self._matches(d, query):
                     orig = dict(d)
-                    if '$set' in update: d.update(update['$set'])
+                    self._apply_update(d, update)
                     return dict(d) if return_document else orig
             return None
 
@@ -208,7 +220,7 @@ except Exception as e:
             for d in self.data:
                 if self._matches(d, query):
                     matched = 1
-                    if '$set' in update: d.update(update['$set'])
+                    self._apply_update(d, update)
                     break
             class UpdateResult:
                 def __init__(self, m):
@@ -219,7 +231,7 @@ except Exception as e:
         def update_many(self, query, update):
             for d in self.data:
                 if self._matches(d, query):
-                    if '$set' in update: d.update(update['$set'])
+                    self._apply_update(d, update)
 
         def delete_one(self, query):
             for i, d in enumerate(self.data):
@@ -233,7 +245,13 @@ except Exception as e:
         def find(self, query, proj=None):
             class MockCursor:
                 def __init__(self, items): self.items = items
-                def sort(self, key, order): return self
+                def sort(self, key, order=1):
+                    reverse = (order == -1)
+                    try:
+                        self.items.sort(key=lambda x: str(x.get(key, '')), reverse=reverse)
+                    except Exception:
+                        pass
+                    return self
                 def limit(self, n): return self.items[:n]
                 def __iter__(self): return iter(self.items)
             res_list = []
@@ -259,6 +277,8 @@ users_col = db['users']
 measurements_col = db['measurements']
 profiles_col = db['profiles']
 profile_invites_col = db['profile_invites']
+notifications_col = db['notifications']
+audit_logs_col = db['audit_logs']
 
 try:
     profiles_col.create_index([('account_user_id', 1), ('is_archived', 1), ('last_used_at', -1)])
@@ -467,6 +487,32 @@ def login():
 def get_current_user():
     try:
         user_id = get_jwt_identity()
+        claims = get_jwt() or {}
+
+        # If this is a restricted member session, return only safe member profile metadata
+        if claims.get('role') == 'profile_member_session' or claims.get('access_mode') == 'invited_profile':
+            prof_id = claims.get('profile_id')
+            profile = None
+            if prof_id:
+                try:
+                    profile = profiles_col.find_one({'_id': ObjectId(str(prof_id))})
+                except Exception:
+                    pass
+            p_name = claims.get('profile_name') or (profile.get('name') if profile else 'Member')
+            return jsonify({
+                'success': True,
+                'user': {
+                    'user_id': user_id,
+                    'name': p_name,
+                    'email': claims.get('email') or '',
+                    'role': 'profile_member_session',
+                    'access_mode': 'invited_profile',
+                    'profile_id': str(prof_id) if prof_id else None,
+                    'is_owner': False,
+                    'has_face_embedding': False
+                }
+            }), 200
+
         user = users_col.find_one({'user_id': user_id}, {'password_hash': 0, '_id': 0})
         if not user:
             return jsonify({'success': False, 'error': 'User not found'}), 401
@@ -480,6 +526,10 @@ def get_current_user():
 @jwt_required()
 def save_face_embedding():
     """Save face embedding for identity verification"""
+    claims = get_jwt() or {}
+    if claims.get('role') == 'profile_member_session' or claims.get('access_mode') == 'invited_profile':
+        return jsonify({'error': 'Permission denied: Restricted member session cannot access account settings.'}), 403
+
     user_id = get_jwt_identity()
     data = request.get_json() or {}
     front_image_b64 = data.get('front_image')
@@ -1063,6 +1113,10 @@ def reset_password():
 @app.route('/api/auth/change-password', methods=['POST'])
 @jwt_required()
 def change_password():
+    claims = get_jwt() or {}
+    if claims.get('role') == 'profile_member_session' or claims.get('access_mode') == 'invited_profile':
+        return jsonify({'error': 'Permission denied: Restricted member session cannot access account settings.'}), 403
+
     user_id = get_jwt_identity()
     data = request.get_json() or {}
     current_password = data.get('current_password', '')
@@ -1092,6 +1146,10 @@ def change_password():
 @app.route('/api/auth/update-profile', methods=['PUT'])
 @jwt_required()
 def update_profile():
+    claims = get_jwt() or {}
+    if claims.get('role') == 'profile_member_session' or claims.get('access_mode') == 'invited_profile':
+        return jsonify({'error': 'Permission denied: Restricted member session cannot access account settings.'}), 403
+
     user_id = get_jwt_identity()
     data = request.get_json() or {}
     name = data.get('name', '').strip()
@@ -1105,6 +1163,10 @@ def update_profile():
 @app.route('/api/auth/delete-account', methods=['DELETE'])
 @jwt_required()
 def delete_account():
+    claims = get_jwt() or {}
+    if claims.get('role') == 'profile_member_session' or claims.get('access_mode') == 'invited_profile':
+        return jsonify({'error': 'Permission denied: Restricted member session cannot access account settings.'}), 403
+
     user_id = get_jwt_identity()
     data = request.get_json() or {}
     password = data.get('password', '')
@@ -1153,6 +1215,27 @@ def hash_secret(value: str) -> str:
     if not value:
         return ''
     return hashlib.sha256(value.strip().encode('utf-8')).hexdigest()
+
+otp_request_rate_limits = {}  # key -> list of timestamps
+
+def is_otp_request_rate_limited(ip_address: str, invite_id: str, max_attempts: int = 5, window_seconds: int = 600) -> bool:
+    now = time.time()
+    key = f"{ip_address}:{invite_id}"
+    attempts = [t for t in otp_request_rate_limits.get(key, []) if now - t < window_seconds]
+    attempts.append(now)
+    otp_request_rate_limits[key] = attempts
+    return len(attempts) > max_attempts
+
+def mask_email(email_str: str) -> str:
+    if not email_str or '@' not in email_str:
+        return '***'
+    parts = email_str.split('@')
+    name_part, domain = parts[0], parts[1]
+    if len(name_part) <= 1:
+        masked_name = name_part + '***'
+    else:
+        masked_name = name_part[0] + '***'
+    return f"{masked_name}@{domain}"
 
 def generate_short_code() -> str:
     chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
@@ -1225,7 +1308,7 @@ def count_active_slots(account_user_id: str):
     })
     reserved_invites_count = profile_invites_col.count_documents({
         'account_user_id': account_user_id,
-        'status': {'$in': ['pending', 'claiming']},
+        'status': {'$in': ['sent', 'opened', 'owner_approval_pending', 'verification_pending', 'pending', 'claiming']},
         'expires_at': {'$gt': now}
     })
     return active_count, reserved_invites_count, active_count + reserved_invites_count
@@ -1347,7 +1430,8 @@ def list_profiles():
                 'profile_type': 'owner' if is_owner else p.get('profile_type', 'adult'),
                 'is_owner': is_owner,
                 'is_owner_profile': is_owner,
-                'email': p_email or None,
+                'email': p_email if is_owner else (mask_email(p_email) if p_email else None),
+                'masked_email': mask_email(p_email) if p_email else None,
                 'privacy_mode': p.get('privacy_mode', 'account_owner_access'),
                 'default_height_cm': p.get('default_height_cm', 170.0),
                 'status': p.get('status', 'active'),
@@ -1534,11 +1618,215 @@ def update_profile_metadata(profile_id):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/profiles/me/personal-details', methods=['PATCH'])
+@jwt_required()
+def update_my_personal_details():
+    try:
+        jwt_claims = get_jwt() or {}
+        role = jwt_claims.get('role')
+        access_mode = jwt_claims.get('access_mode')
+        token_profile_id = jwt_claims.get('profile_id')
+        token_account_user_id = jwt_claims.get('account_user_id') or get_jwt_identity()
+
+        # 1. Require restricted profile-session JWT
+        if role != 'profile_member_session' or access_mode != 'invited_profile' or not token_profile_id or not token_account_user_id:
+            return jsonify({'error': 'Forbidden: Restricted profile session token required.'}), 403
+
+        # 2. Derive profile_id and account_user_id exclusively from JWT claims
+        profile_id_str = str(token_profile_id).strip()
+        account_user_id_str = str(token_account_user_id).strip()
+
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({'error': 'Invalid JSON body'}), 400
+
+        # 3. Allow-list only display_name and height_cm; reject any unknown or protected field with HTTP 403
+        allowed_keys = {'display_name', 'height_cm'}
+        disallowed_keys = [k for k in data.keys() if k not in allowed_keys]
+        if disallowed_keys:
+            return jsonify({'error': f"Forbidden: Field(s) {disallowed_keys} are protected or not allowed for member self-service editing."}), 403
+
+        if not any(k in data for k in allowed_keys):
+            return jsonify({'error': 'At least one allowed field (display_name or height_cm) must be provided.'}), 400
+
+        updates = {}
+        fields_updated = []
+
+        # 4. Validate name and height server-side
+        if 'display_name' in data:
+            raw_name = data.get('display_name')
+            if not isinstance(raw_name, str):
+                return jsonify({'error': 'display_name must be a string'}), 400
+            name_clean = raw_name.strip()
+            if len(name_clean) < 1 or len(name_clean) > 50:
+                return jsonify({'error': 'display_name must be between 1 and 50 characters'}), 400
+            updates['name'] = name_clean
+            updates['display_name'] = name_clean
+            fields_updated.append('display_name')
+
+        if 'height_cm' in data:
+            raw_height = data.get('height_cm')
+            try:
+                h_val = float(raw_height)
+                if h_val < 100.0 or h_val > 250.0:
+                    return jsonify({'error': 'height_cm must be between 100 and 250 cm'}), 400
+                height_clean = round(h_val, 1)
+                updates['height_cm'] = height_clean
+                updates['default_height_cm'] = height_clean
+                fields_updated.append('height_cm')
+            except (ValueError, TypeError):
+                return jsonify({'error': 'Invalid numeric height'}), 400
+
+        # 5. Profile must be active and match token account/profile claims
+        try:
+            p_oid = ObjectId(profile_id_str)
+        except Exception:
+            return jsonify({'error': 'Invalid profile ID in session token'}), 403
+
+        profile = profiles_col.find_one({
+            '_id': p_oid,
+            'account_user_id': account_user_id_str
+        })
+        if not profile:
+            return jsonify({'error': 'Profile not found or access denied.'}), 404
+
+        if profile.get('is_archived') is True or profile.get('status') == 'archived' or profile.get('status') == 'deleted':
+            return jsonify({'error': 'Forbidden: Profile is archived or deleted.'}), 403
+
+        if profile.get('is_owner') is True or profile.get('profile_type') == 'owner':
+            return jsonify({'error': 'Forbidden: Restricted member session cannot edit owner profile.'}), 403
+
+        now = dt.datetime.now(dt.timezone.utc)
+        updates['updated_at'] = now
+
+        # 6. Record audit event: profile_personal_details_updated
+        # with profile_id, allowed field names, timestamp, and actor role.
+        # Do not store or expose previous/new body measurement data in the audit log.
+        audit_event = {
+            'event': 'profile_personal_details_updated',
+            'profile_id': profile_id_str,
+            'fields_updated': sorted(fields_updated),
+            'timestamp': now.isoformat(),
+            'actor_role': 'profile_member_session'
+        }
+
+        profiles_col.update_one(
+            {'_id': p_oid},
+            {
+                '$set': updates,
+                '$push': {'audit_events': audit_event}
+            }
+        )
+        try:
+            audit_logs_col.insert_one(audit_event.copy())
+        except Exception:
+            pass
+
+        # 7. Return only safe personal profile fields
+        updated_profile = profiles_col.find_one({'_id': p_oid})
+        safe_name = updated_profile.get('display_name') or updated_profile.get('name', '')
+        safe_height = float(updated_profile.get('height_cm') or updated_profile.get('default_height_cm', 170.0))
+
+        return jsonify({
+            'success': True,
+            'message': 'Personal details updated successfully.',
+            'profile': {
+                'id': profile_id_str,
+                'profile_id': profile_id_str,
+                'display_name': safe_name,
+                'name': safe_name,
+                'height_cm': safe_height,
+                'default_height_cm': safe_height
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/profiles/me/personal-details', methods=['GET'])
+@jwt_required()
+def get_my_personal_details():
+    try:
+        jwt_claims = get_jwt() or {}
+        role = jwt_claims.get('role')
+        access_mode = jwt_claims.get('access_mode')
+        token_profile_id = jwt_claims.get('profile_id')
+        token_account_user_id = jwt_claims.get('account_user_id') or get_jwt_identity()
+
+        if role != 'profile_member_session' or access_mode != 'invited_profile' or not token_profile_id or not token_account_user_id:
+            return jsonify({'error': 'Forbidden: Restricted profile session token required.'}), 403
+
+        profile_id_str = str(token_profile_id).strip()
+        account_user_id_str = str(token_account_user_id).strip()
+
+        try:
+            p_oid = ObjectId(profile_id_str)
+        except Exception:
+            return jsonify({'error': 'Invalid profile ID in session token'}), 403
+
+        profile = profiles_col.find_one({
+            '_id': p_oid,
+            'account_user_id': account_user_id_str
+        })
+        if not profile:
+            return jsonify({'error': 'Profile not found or access denied.'}), 404
+
+        if profile.get('is_archived') is True or profile.get('status') == 'archived' or profile.get('status') == 'deleted':
+            return jsonify({'error': 'Forbidden: Profile is archived or deleted.'}), 403
+
+        safe_name = profile.get('display_name') or profile.get('name', '')
+        safe_height = float(profile.get('height_cm') or profile.get('default_height_cm', 170.0))
+
+        return jsonify({
+            'success': True,
+            'profile': {
+                'id': profile_id_str,
+                'profile_id': profile_id_str,
+                'display_name': safe_name,
+                'name': safe_name,
+                'height_cm': safe_height,
+                'default_height_cm': safe_height
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/profiles/available', methods=['GET'])
 @jwt_required()
 def get_available_profiles():
     try:
         account_user_id = get_jwt_identity()
+        claims = get_jwt() or {}
+
+        # If this is a restricted invited member session, return only their single assigned profile (unlocked)
+        if claims.get('role') == 'profile_member_session' or claims.get('access_mode') == 'invited_profile':
+            prof_id = str(claims.get('profile_id') or '')
+            assigned = None
+            if prof_id:
+                try:
+                    assigned = profiles_col.find_one({'_id': ObjectId(prof_id), 'account_user_id': str(account_user_id)})
+                except Exception:
+                    pass
+            if not assigned:
+                return jsonify({'success': False, 'error': 'Profile not found.'}), 404
+
+            return jsonify({
+                'success': True,
+                'profiles': [{
+                    'id': str(assigned['_id']),
+                    'profile_id': str(assigned['_id']),
+                    'name': assigned.get('name', 'Member'),
+                    'relationship': assigned.get('relationship', 'Member'),
+                    'profile_type': assigned.get('profile_type', 'adult'),
+                    'is_owner': False,
+                    'is_owner_profile': False,
+                    'status': assigned.get('status', 'active'),
+                    'default_height_cm': assigned.get('default_height_cm', 170.0),
+                    'locked': False
+                }]
+            }), 200
+
         get_or_create_owner_profile(account_user_id)
         
         cursor = profiles_col.find({
@@ -1601,16 +1889,7 @@ def unlock_invited_profile():
         if not invite:
             return jsonify({'error': 'No invitation found for this email address under this owner account.'}), 404
 
-        # Check invitation status
-        status = invite.get('status')
-        if status == 'revoked':
-            return jsonify({'error': 'This invitation was revoked by the account owner.'}), 400
-        if status == 'claimed':
-            return jsonify({'error': 'This invitation has already been claimed and cannot be reused.'}), 400
-        if status != 'pending':
-            return jsonify({'error': f'Invitation is not pending (status: {status}).'}), 400
-
-        # Check expiration
+        # Check expiration first
         exp = invite.get('expires_at')
         if exp:
             if getattr(exp, 'tzinfo', None) is None:
@@ -1618,6 +1897,15 @@ def unlock_invited_profile():
             if exp <= now:
                 profile_invites_col.update_one({'_id': invite['_id']}, {'$set': {'status': 'expired'}})
                 return jsonify({'error': 'Invitation code/link has expired. Ask the owner for a new invitation.'}), 400
+
+        # Check invitation status
+        status = invite.get('status')
+        if status == 'revoked':
+            return jsonify({'error': 'This invitation was revoked by the account owner.'}), 400
+        if status == 'claimed':
+            return jsonify({'error': 'This invitation has already been claimed and cannot be reused.'}), 400
+        if status not in ['sent', 'opened', 'verification_pending', 'pending']:
+            return jsonify({'error': f'Invitation is not active (status: {status}).'}), 400
 
         # Verify linked profile
         linked_profile_id = invite.get('profile_id') or invite.get('claimed_profile_id')
@@ -1643,11 +1931,11 @@ def unlock_invited_profile():
         if profile.get('is_owner') or profile.get('is_owner_profile') or profile.get('profile_type') == 'owner':
             return jsonify({'error': 'Cannot unlock owner profile via member invitation.'}), 400
 
-        # Atomically transition pending -> claimed
+        # Atomically transition to claimed
         claimed_invite = profile_invites_col.find_one_and_update(
             {
                 '_id': invite['_id'],
-                'status': 'pending',
+                'status': {'$in': ['sent', 'opened', 'verification_pending', 'pending']},
                 'expires_at': {'$gt': now}
             },
             {
@@ -1959,63 +2247,78 @@ def create_invite():
 
         linked_profile_id_str = str(linked_profile['_id']) if linked_profile else None
 
-        # If a pending invite already exists, revoke it first to replace it cleanly
+        # If an active invite already exists, revoke it first to replace it cleanly
         now = dt.datetime.now(dt.timezone.utc)
         profile_invites_col.update_many(
-            {'account_user_id': account_user_id, 'status': 'pending', 'expires_at': {'$gt': now}},
+            {'account_user_id': account_user_id, 'status': {'$in': ['sent', 'opened', 'owner_approval_pending', 'verification_pending', 'pending']}, 'expires_at': {'$gt': now}},
             {'$set': {'status': 'revoked', 'revoked_at': now}}
         )
+
+        owner_user = users_col.find_one({'user_id': str(account_user_id)})
+        if not owner_user and ObjectId.is_valid(str(account_user_id)):
+            owner_user = users_col.find_one({'_id': ObjectId(str(account_user_id))})
+        owner_email_norm = (owner_user.get('email') or '').strip().lower() if owner_user else ''
 
         short_code = generate_short_code()
         opaque_token = secrets.token_urlsafe(32)
         code_hash = hash_secret(short_code)
         token_hash = hash_secret(opaque_token)
-        expires_at = now + dt.timedelta(minutes=15)
+        expires_at = now + dt.timedelta(hours=24)
 
         invite_doc = {
-            'account_user_id': account_user_id,
+            'account_user_id': str(account_user_id),
             'profile_id': linked_profile_id_str,
-            'invited_email': target_email if target_email else None,
-            'invited_email_normalized': invited_email_norm,
+            'owner_email_normalized': owner_email_norm,
             'token_hash': token_hash,
-            'status': 'pending',
+            'status': 'sent',
             'profile_type': profile_type,
             'relationship': relationship,
+            'invited_email': target_email if target_email else None,
+            'invited_email_normalized': invited_email_norm,
             'target_email': target_email if target_email else None,
             'invite_code_hash': code_hash,
             'invite_token_hash': token_hash,
+            'owner_otp_hash': None,
+            'owner_otp_expires_at': None,
+            'owner_otp_attempt_count': 0,
+            'owner_otp_resend_count': 0,
             'expires_at': expires_at,
             'created_at': now,
+            'opened_at': None,
+            'owner_approval_requested_at': None,
+            'owner_approved_at': None,
             'claimed_at': None,
             'claimed_profile_id': None,
-            'revoked_at': None
+            'revoked_at': None,
+            'audit_events': [{
+                'event': 'profile_invitation_created',
+                'timestamp': now.isoformat()
+            }]
         }
         res = profile_invites_col.insert_one(invite_doc)
         invite_id = str(getattr(res, 'inserted_id', invite_doc.get('_id')))
 
         local_ip = get_local_ip()
+        request_host = request.headers.get('Host', '').split(':')[0].strip()
+        if request_host and request_host not in ['localhost', '127.0.0.1'] and not request_host.startswith('127.'):
+            local_ip = request_host
         client_base_url = str(data.get('client_base_url') or '').strip().rstrip('/')
 
-        # Determine dual links:
-        # 1. LAN URL for mobile phones connected on Wi-Fi
-        mobile_invite_link = f"http://{local_ip}:3000/?invite_code={short_code}"
-        # 2. Localhost URL for browsers running on the host computer
-        web_invite_link = f"http://localhost:3000/?invite_code={short_code}"
+        # Determine dual links with opaque token:
+        mobile_invite_link = f"http://{local_ip}:3000/?invite_token={opaque_token}&invite_code={short_code}"
+        web_invite_link = f"http://localhost:3000/?invite_token={opaque_token}&invite_code={short_code}"
 
         if client_base_url and 'localhost' not in client_base_url and '127.0.0.1' not in client_base_url:
-            mobile_invite_link = f"{client_base_url}/?invite_code={short_code}"
+            mobile_invite_link = f"{client_base_url}/?invite_token={opaque_token}&invite_code={short_code}"
             web_invite_link = mobile_invite_link
 
         primary_invite_link = mobile_invite_link
 
         share_msg = (
-            f"Join my FitLens account using this invite code: {short_code}\n\n"
+            f"Join my FitLens account using this invite link: {web_invite_link}\n\n"
             f"Mobile / Wi-Fi Link: {mobile_invite_link}\n"
-            f"Computer Link: {web_invite_link}\n\n"
-            "You can create your own FitLens profile from your phone or browser. Your profile will have separate measurements, "
-            "photos, results, and history.\n\n"
-            "For the current version, the account owner manages all profiles. Private profile PIN protection is "
-            "planned for a future update.\n\n"
+            f"Invitation Code: {short_code}\n\n"
+            "Open the link on your phone or computer to unlock your profile with email verification.\n\n"
             f"This invite expires at: {expires_at.strftime('%Y-%m-%d %H:%M:%S UTC')}"
         )
 
@@ -2052,7 +2355,7 @@ def create_invite():
                   <p style="color:#cbd5e0;font-size:14px;line-height:1.6;">
                     Hi,<br><br>
                     <strong style="color:#ffffff;">{inviter_name}</strong> has invited you to join their FitLens account as a <strong style="color:#00d4aa;">{relationship}</strong>.<br><br>
-                    You can create your own profile with separate body measurements, photos, results, and history.
+                    You can access your own profile with separate body measurements, photos, results, and history.
                   </p>
 
                   <div style="text-align:center;margin:28px 0;">
@@ -2083,13 +2386,14 @@ def create_invite():
                     <strong style="color:#ffffff;">Opening from your Phone (on Wi-Fi):</strong><br>
                     <a href="{mobile_invite_link}" style="color:#00d4aa;word-break:break-all;">{mobile_invite_link}</a><br><br>
                     <strong style="color:#ffffff;">Opening on the Computer:</strong><br>
-                    <a href="{web_invite_link}" style="color:#00d4aa;word-break:break-all;">{web_invite_link}</a><br><br>
-                    This invitation will expire in 15 minutes.
+                    <a href="{web_invite_link}" style="color:#00d4aa;word-break:break-all;">{web_invite_link}</a>
                   </p>
                 </div>
                 """
 
                 def send_invite_email_async(sender_email, sender_pass, recipient_email, html_body, code, link, web_link):
+                    if app.config.get('TESTING') or os.getenv('FLASK_ENV') == 'testing':
+                        return
                     try:
                         import smtplib
                         from email.mime.text import MIMEText
@@ -2109,12 +2413,8 @@ def create_invite():
                             f"Your Invitation Code: {code}\n\n"
                             "HOW TO CLAIM YOUR PROFILE:\n"
                             "1. Open FitLens on your browser or mobile phone.\n"
-                            f"2. Go to 'Claim Profile' or 'Join Account' and enter code: {code}\n\n"
-                            "Direct Links (if connected to the same Wi-Fi network):\n"
-                            f"Phone / Wi-Fi: {link}\n"
-                            f"Computer: {web_link}\n\n"
-                            "Important: This invitation code will expire in 15 minutes.\n"
-                            "If this email is in your Spam or Junk folder, please click 'Not Spam' to enable the links."
+                            f"2. Go to 'Claim Profile' or click: {link}\n\n"
+                            f"Computer: {web_link}"
                         )
                         mime_msg.attach(MIMEText(plain_text, 'plain', 'utf-8'))
                         mime_msg.attach(MIMEText(html_body, 'html', 'utf-8'))
@@ -2144,15 +2444,17 @@ def create_invite():
             'invite_code': short_code,
             'invite_token': opaque_token,
             'claim_url': primary_invite_link,
+            'deep_link': primary_invite_link,
             'invite_link': web_invite_link,
             'mobile_invite_link': mobile_invite_link,
             'local_ip': local_ip,
             'target_email': target_email or None,
             'email_sent': email_sent,
-            'qr_payload': opaque_token,
+            'qr_payload': primary_invite_link,
             'expires_at': expires_at.isoformat(),
-            'expires_in_seconds': 900,
-            'status': 'pending',
+            'expires_in_seconds': int((expires_at - now).total_seconds()),
+            'status': 'sent',
+            'status_display': 'Sent',
             'share_message': share_msg
         }), 201
     except Exception as e:
@@ -2173,24 +2475,65 @@ def list_invites():
         if hasattr(cursor, 'sort'):
             cursor = cursor.sort('created_at', -1)
             
+        status_map = {
+            'sent': 'Sent',
+            'pending': 'Sent',
+            'opened': 'Opened',
+            'owner_approval_pending': 'Verification Pending',
+            'verification_pending': 'Verification Pending',
+            'claimed': 'Accepted',
+            'accepted': 'Accepted',
+            'expired': 'Expired',
+            'revoked': 'Revoked'
+        }
+
         invites = []
         for inv in cursor:
-            status = inv.get('status', 'pending')
+            status = inv.get('status', 'sent')
             exp = inv.get('expires_at')
             if exp and getattr(exp, 'tzinfo', None) is None:
                 exp = exp.replace(tzinfo=dt.timezone.utc)
-            if status == 'pending' and exp and exp <= now:
+            if status in ['sent', 'opened', 'owner_approval_pending', 'verification_pending', 'pending'] and exp and exp <= now:
                 status = 'expired'
+            
+            status_display = status_map.get(status, status.capitalize())
+
+            prof_id = inv.get('profile_id') or inv.get('claimed_profile_id')
+            profile_name = 'Invited Member'
+            last_active_at = None
+            if prof_id:
+                try:
+                    p = profiles_col.find_one({'_id': ObjectId(str(prof_id)), 'account_user_id': str(account_user_id)})
+                    if p:
+                        profile_name = p.get('name', 'Invited Member')
+                        last_active = p.get('last_used_at')
+                        if last_active:
+                            last_active_at = last_active.isoformat() if hasattr(last_active, 'isoformat') else str(last_active)
+                except Exception:
+                    pass
+
+            raw_email = inv.get('invited_email_normalized') or inv.get('invited_email') or inv.get('target_email') or ''
+            masked = mask_email(raw_email)
+
             invites.append({
                 'invite_id': str(inv['_id']),
-                'profile_id': str(inv.get('profile_id')) if inv.get('profile_id') else None,
-                'invited_email': inv.get('invited_email') or inv.get('target_email'),
+                'profile_id': str(prof_id) if prof_id else None,
+                'profile_name': profile_name,
+                'display_name': profile_name,
                 'status': status,
+                'status_display': status_display,
+                'state': status_display,
+                'masked_email': masked,
                 'relationship': inv.get('relationship', 'Friend'),
                 'profile_type': inv.get('profile_type', 'adult'),
-                'expires_at': exp.isoformat() if hasattr(exp, 'isoformat') else str(exp),
-                'created_at': inv.get('created_at').isoformat() if hasattr(inv.get('created_at'), 'isoformat') else str(inv.get('created_at')),
-                'claimed_at': inv.get('claimed_at').isoformat() if hasattr(inv.get('claimed_at'), 'isoformat') and inv.get('claimed_at') else None
+                'created_at': inv.get('created_at').isoformat() if hasattr(inv.get('created_at'), 'isoformat') and inv.get('created_at') else str(inv.get('created_at')),
+                'sent_at': inv.get('created_at').isoformat() if hasattr(inv.get('created_at'), 'isoformat') and inv.get('created_at') else str(inv.get('created_at')),
+                'opened_at': inv.get('opened_at').isoformat() if hasattr(inv.get('opened_at'), 'isoformat') and inv.get('opened_at') else None,
+                'owner_approved_at': inv.get('owner_approved_at').isoformat() if hasattr(inv.get('owner_approved_at'), 'isoformat') and inv.get('owner_approved_at') else None,
+                'claimed_at': inv.get('claimed_at').isoformat() if hasattr(inv.get('claimed_at'), 'isoformat') and inv.get('claimed_at') else None,
+                'accepted_at': inv.get('claimed_at').isoformat() if hasattr(inv.get('claimed_at'), 'isoformat') and inv.get('claimed_at') else None,
+                'expires_at': exp.isoformat() if hasattr(exp, 'isoformat') and exp else str(exp) if exp else None,
+                'last_active_at': last_active_at
             })
         return jsonify({'success': True, 'invites': invites}), 200
     except Exception as e:
@@ -2215,15 +2558,691 @@ def revoke_invite(invite_id):
         if not invite:
             return jsonify({'error': 'Invite not found'}), 404
 
-        if invite.get('status') != 'pending':
+        if invite.get('status') not in ['sent', 'opened', 'owner_approval_pending', 'verification_pending', 'pending']:
             return jsonify({'error': f'Cannot revoke invite with status {invite.get("status")}'}), 400
 
         now = dt.datetime.now(dt.timezone.utc)
         profile_invites_col.update_one(
             {'_id': inv_oid},
-            {'$set': {'status': 'revoked', 'revoked_at': now}}
+            {
+                '$set': {'status': 'revoked', 'revoked_at': now},
+                '$push': {'audit_events': {'event': 'profile_invitation_revoked', 'timestamp': now.isoformat()}}
+            }
         )
         return jsonify({'success': True, 'message': 'Invite revoked successfully'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# --- NON-OWNER INVITATION FLOW ENDPOINTS ---
+
+def find_invite_by_token_or_code(token_or_code):
+    clean = str(token_or_code or '').strip()
+    if not clean:
+        return None
+    candidates = {
+        clean,
+        clean.upper(),
+        clean.lower(),
+        clean.replace('-', ''),
+        clean.replace('-', '').upper(),
+        clean.replace('-', '').lower()
+    }
+    # Normalize 8-character codes e.g. 'GH3W-6CL4', 'GH3W6CL4', 'FL-GH3W-6CL4', 'FLGH3W6CL4'
+    core = clean.upper().replace('-', '').replace(' ', '')
+    if core.startswith('FL'):
+        core = core[2:]
+    if len(core) == 8:
+        p1, p2 = core[:4], core[4:]
+        candidates.add(f"FL-{p1}-{p2}")
+        candidates.add(f"{p1}-{p2}")
+        candidates.add(core)
+        candidates.add(f"FL-{core}")
+        candidates.add(f"FL{core}")
+    elif not clean.upper().startswith('FL-'):
+        candidates.add(f"FL-{clean.upper()}")
+        candidates.add(f"FL-{clean.replace('-', '').upper()}")
+
+    candidate_hashes = [hash_secret(s) for s in candidates]
+    return profile_invites_col.find_one({
+        '$or': [
+            {'token_hash': {'$in': candidate_hashes}},
+            {'invite_token_hash': {'$in': candidate_hashes}},
+            {'invite_code_hash': {'$in': candidate_hashes}}
+        ]
+    })
+
+
+@app.route('/api/invite/validate', methods=['POST', 'GET'])
+def validate_invite_token():
+    """
+    Public token validation endpoint for non-owner members.
+    Validates opaque invitation token, records opened_at and audit event,
+    and returns safe locked profile metadata without revealing owner credentials or measurements.
+    """
+    try:
+        token = ''
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            token = data.get('token') or data.get('invite_token') or data.get('invite_code') or ''
+        else:
+            token = request.args.get('token') or request.args.get('invite_token') or request.args.get('invite_code') or ''
+        
+        token = str(token).strip()
+        if not token:
+            return jsonify({'error': 'Invitation token or code is required.'}), 400
+
+        now = dt.datetime.now(dt.timezone.utc)
+        invite = find_invite_by_token_or_code(token)
+        if not invite:
+            return jsonify({'error': 'Invalid invitation token or code.'}), 404
+
+        if invite.get('status') == 'revoked':
+            return jsonify({'error': 'This invitation was revoked by the account owner.'}), 400
+
+        if invite.get('status') in ['claimed', 'accepted']:
+            return jsonify({'error': 'This invitation has already been accepted.'}), 400
+
+        exp = invite.get('expires_at')
+        if exp:
+            if getattr(exp, 'tzinfo', None) is None:
+                exp = exp.replace(tzinfo=dt.timezone.utc)
+            if exp <= now:
+                profile_invites_col.update_one({'_id': invite['_id']}, {'$set': {'status': 'expired'}})
+                return jsonify({'error': 'This invitation has expired. Ask the owner for a new invitation.'}), 400
+
+        # Mark invitation opened_at only after valid token verification
+        if invite.get('status') in ['sent', 'pending']:
+            profile_invites_col.update_one(
+                {'_id': invite['_id']},
+                {
+                    '$set': {'status': 'opened', 'opened_at': now},
+                    '$push': {
+                        'audit_events': {
+                            'event': 'profile_invitation_opened',
+                            'timestamp': now.isoformat()
+                        }
+                    }
+                }
+            )
+            invite['status'] = 'opened'
+            invite['opened_at'] = now
+
+        account_user_id = str(invite.get('account_user_id'))
+        prof_id = invite.get('profile_id') or invite.get('claimed_profile_id')
+        assigned_profile = None
+        if prof_id:
+            try:
+                p = profiles_col.find_one({'_id': ObjectId(str(prof_id)), 'account_user_id': account_user_id})
+                if p:
+                    assigned_profile = {
+                        'profile_id': str(p['_id']),
+                        'id': str(p['_id']),
+                        'name': p.get('name', 'Invited Member'),
+                        'relationship': p.get('relationship', 'Friend'),
+                        'profile_type': p.get('profile_type', 'adult'),
+                        'locked': True
+                    }
+            except Exception:
+                pass
+
+        if not assigned_profile:
+            assigned_profile = {
+                'name': invite.get('relationship', 'Member') or 'Invited Member',
+                'relationship': invite.get('relationship', 'Friend'),
+                'profile_type': 'adult',
+                'locked': True
+            }
+
+        total_profiles = profiles_col.count_documents({
+            'account_user_id': account_user_id,
+            'is_archived': {'$ne': True}
+        })
+        other_locked_profiles_count = max(0, total_profiles - (1 if prof_id else 0))
+
+        raw_email = invite.get('invited_email_normalized') or invite.get('invited_email') or invite.get('target_email') or ''
+        masked_email = mask_email(raw_email)
+
+        owner_email_val = invite.get('owner_email_normalized')
+        if not owner_email_val:
+            owner_u = users_col.find_one({'user_id': account_user_id})
+            if not owner_u and ObjectId.is_valid(account_user_id):
+                owner_u = users_col.find_one({'_id': ObjectId(account_user_id)})
+            if owner_u:
+                owner_email_val = (owner_u.get('email') or '').strip().lower()
+        masked_owner_email = mask_email(owner_email_val)
+
+        return jsonify({
+            'success': True,
+            'invite_id': str(invite['_id']),
+            'invite_code': invite.get('short_code') or invite.get('invite_code') or token,
+            'status': invite.get('status', 'opened'),
+            'assigned_profile': assigned_profile,
+            'other_locked_profiles_count': other_locked_profiles_count,
+            'masked_owner_email': masked_owner_email,
+            'masked_email': masked_owner_email or masked_email,
+            'expires_at': exp.isoformat() if hasattr(exp, 'isoformat') and exp else str(exp) if exp else None
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/invite/request-owner-otp', methods=['POST'])
+@app.route('/api/invite/request-otp', methods=['POST'])
+def request_invite_owner_otp():
+    """
+    Public owner approval OTP dispatch endpoint.
+    Non-owner provides invite token and entered OWNER email address.
+    Backend validates token and verifies that the normalized owner email
+    matches the registered email of the owner account referenced by invite.account_user_id.
+    Dispatches a single-use 6-digit approval OTP to the OWNER's registered email ONLY.
+    Does NOT send OTP to the non-owner email.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        token = str(data.get('invite_token') or data.get('token') or data.get('invite_code') or '').strip()
+        entered_owner_email = str(data.get('owner_email') or data.get('email') or data.get('invited_email') or '').strip()
+
+        if not token or not entered_owner_email:
+            return jsonify({'error': 'Invitation token and owner email address are required.'}), 400
+
+        now = dt.datetime.now(dt.timezone.utc)
+        invite = find_invite_by_token_or_code(token)
+        if not invite:
+            return jsonify({'error': 'Invalid invitation or owner email address.'}), 404
+
+        if invite.get('status') == 'revoked':
+            return jsonify({'error': 'This invitation was revoked by the account owner.'}), 400
+
+        if invite.get('status') in ['claimed', 'accepted']:
+            return jsonify({'error': 'This invitation has already been accepted.'}), 400
+
+        exp = invite.get('expires_at')
+        if exp:
+            if getattr(exp, 'tzinfo', None) is None:
+                exp = exp.replace(tzinfo=dt.timezone.utc)
+            if exp <= now:
+                profile_invites_col.update_one({'_id': invite['_id']}, {'$set': {'status': 'expired'}})
+                return jsonify({'error': 'This invitation has expired.'}), 400
+
+        account_user_id = str(invite.get('account_user_id') or '')
+        owner_user = None
+        if account_user_id:
+            owner_user = users_col.find_one({'user_id': account_user_id})
+            if not owner_user and ObjectId.is_valid(account_user_id):
+                owner_user = users_col.find_one({'_id': ObjectId(account_user_id)})
+            if not owner_user:
+                owner_user = users_col.find_one({'_id': account_user_id})
+        
+        actual_owner_email = (
+            (owner_user.get('email') if owner_user else None) or
+            invite.get('owner_email_normalized') or ''
+        ).strip().lower()
+
+        if actual_owner_email and not invite.get('owner_email_normalized'):
+            profile_invites_col.update_one({'_id': invite['_id']}, {'$set': {'owner_email_normalized': actual_owner_email}})
+
+        norm_entered_owner_email = entered_owner_email.strip().lower()
+        if not actual_owner_email or norm_entered_owner_email != actual_owner_email:
+            return jsonify({'error': 'The entered email does not match the account owner email address.'}), 400
+
+        # Resend cooldown: 60 seconds
+        last_requested_at = invite.get('owner_approval_requested_at')
+        if last_requested_at:
+            if getattr(last_requested_at, 'tzinfo', None) is None:
+                last_requested_at = last_requested_at.replace(tzinfo=dt.timezone.utc)
+            elapsed = (now - last_requested_at).total_seconds()
+            if elapsed < 60:
+                wait_sec = int(60 - elapsed)
+                return jsonify({
+                    'error': f'Please wait {wait_sec} seconds before requesting a new approval code.',
+                    'retry_after_seconds': wait_sec
+                }), 429
+
+        client_ip = request.remote_addr or '127.0.0.1'
+        if is_otp_request_rate_limited(client_ip, str(invite['_id']), max_attempts=5, window_seconds=600):
+            return jsonify({'error': 'Too many approval code requests. Please wait a few minutes.'}), 429
+
+        otp_val = f"{secrets.randbelow(900000) + 100000}"
+        otp_h = hash_secret(otp_val)
+        otp_expires_at = now + dt.timedelta(minutes=10)
+
+        update_fields = {
+            'status': 'owner_approval_pending',
+            'owner_email_normalized': actual_owner_email,
+            'owner_otp_hash': otp_h,
+            'owner_otp_expires_at': otp_expires_at,
+            'owner_otp_attempt_count': 0,
+            'owner_otp_resend_count': invite.get('owner_otp_resend_count', 0) + 1,
+            'owner_approval_requested_at': now,
+            # Backwards compatible fields
+            'otp_hash': otp_h,
+            'otp_expires_at': otp_expires_at,
+            'otp_attempts': 0
+        }
+        if app.config.get('TESTING') or os.getenv('FLASK_ENV') == 'testing':
+            update_fields['_test_last_owner_otp'] = otp_val
+            update_fields['_test_last_otp'] = otp_val
+
+        profile_invites_col.update_one(
+            {'_id': invite['_id']},
+            {
+                '$set': update_fields,
+                '$push': {
+                    'audit_events': {
+                        'event': 'profile_invitation_owner_otp_requested',
+                        'timestamp': now.isoformat()
+                    }
+                }
+            }
+        )
+
+        prof_id = invite.get('profile_id')
+        prof_name = 'Invited Member'
+        if prof_id:
+            try:
+                p = profiles_col.find_one({'_id': ObjectId(str(prof_id))})
+                if p:
+                    prof_name = p.get('name', 'Invited Member')
+            except Exception:
+                pass
+
+        # Dispatch OTP email to OWNER's registered email ONLY asynchronously
+        try:
+            mail_email = (os.getenv('MAIL_EMAIL') or app.config.get('MAIL_USERNAME') or 'sinchanas4u@gmail.com').strip()
+            mail_pass = (os.getenv('MAIL_PASSWORD') or app.config.get('MAIL_PASSWORD') or 'ytxpvjubamtdhzzz').replace(' ', '').strip()
+
+            def send_owner_otp_async(s_email, s_pass, rec_email, code, p_name):
+                if app.config.get('TESTING') or os.getenv('FLASK_ENV') == 'testing':
+                    return
+                try:
+                    import smtplib
+                    from email.mime.text import MIMEText
+                    from email.mime.multipart import MIMEMultipart
+                    from email.utils import formatdate, make_msgid
+
+                    mime_msg = MIMEMultipart('alternative')
+                    mime_msg['Subject'] = f'FitLens: Approval Code for Profile Access ({p_name})'
+                    mime_msg['From'] = f"FitLens AI <{s_email}>"
+                    mime_msg['To'] = rec_email
+                    mime_msg['Date'] = formatdate(localtime=True)
+                    mime_msg['Message-ID'] = make_msgid(domain='gmail.com')
+
+                    text_content = (
+                        f"Hello,\n\n"
+                        f"A request was made to unlock the profile '{p_name}' in your FitLens account.\n\n"
+                        f"Your 6-digit owner approval code is: {code}\n\n"
+                        f"Give this code to the invited member only if you approve their access to this profile.\n"
+                        f"This code will expire in 10 minutes.\n\n"
+                        f"If you did not expect this request, ignore this email."
+                    )
+                    html_content = f"""
+                    <div style="font-family:sans-serif;max-width:460px;margin:auto;background:#0a0e27;color:#fff;padding:30px;border-radius:14px;border:1px solid #1a224d;">
+                      <h2 style="color:#00d4aa;margin-top:0;">FitLens Profile Approval</h2>
+                      <p style="color:#cbd5e0;font-size:14px;line-height:1.5;">
+                        A request was made to unlock the profile <strong style="color:#fff;">{p_name}</strong> in your FitLens account.
+                      </p>
+                      <p style="color:#cbd5e0;font-size:14px;">Your 6-digit owner approval code is:</p>
+                      <div style="background:#131838;padding:18px;border-radius:10px;text-align:center;margin:20px 0;border:1px solid #00d4aa;">
+                        <span style="font-size:32px;letter-spacing:8px;font-weight:bold;color:#00d4aa;">{code}</span>
+                      </div>
+                      <p style="color:#a0aec0;font-size:13px;line-height:1.4;">
+                        Give this code to the invited member <strong>only if you approve</strong> their access to this profile.
+                      </p>
+                      <p style="color:#718096;font-size:12px;margin-top:20px;">
+                        This code will expire in 10 minutes. Never share your account password.
+                      </p>
+                    </div>
+                    """
+                    mime_msg.attach(MIMEText(text_content, 'plain', 'utf-8'))
+                    mime_msg.attach(MIMEText(html_content, 'html', 'utf-8'))
+
+                    srv = None
+                    try:
+                        srv = smtplib.SMTP('smtp.gmail.com', 587, timeout=12)
+                        srv.starttls()
+                    except Exception:
+                        try:
+                            srv = smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=12)
+                        except Exception:
+                            srv = None
+                    if srv:
+                        srv.login(s_email, s_pass)
+                        srv.sendmail(s_email, [rec_email], mime_msg.as_string())
+                        srv.quit()
+                        print(f"[OWNER OTP EMAIL SUCCESS] Sent approval code for '{p_name}' to owner '{rec_email}'", flush=True)
+                    else:
+                        print(f"[OWNER OTP EMAIL NOTICE] Could not connect to smtp.gmail.com on 587 or 465", flush=True)
+                except Exception as mail_ex:
+                    print(f"[OWNER OTP EMAIL ERROR] Failed sending to owner '{rec_email}': {mail_ex}", flush=True)
+
+            threading.Thread(
+                target=send_owner_otp_async,
+                args=(mail_email, mail_pass, actual_owner_email, otp_val, prof_name),
+                daemon=True
+            ).start()
+        except Exception as dispatch_err:
+            print(f"[OWNER OTP DISPATCH NOTICE] {dispatch_err}", flush=True)
+
+        return jsonify({
+            'success': True,
+            'message': "A 6-digit approval code has been sent to the account owner's email address.",
+            'expires_in_seconds': 600
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/invite/verify-owner-otp', methods=['POST'])
+@app.route('/api/invite/verify-otp', methods=['POST'])
+def verify_invite_owner_otp():
+    """
+    Public owner approval OTP verification and atomic profile unlock endpoint.
+    Verifies owner OTP, atomically transitions invite to claimed, sets owner_approved_at,
+    creates owner in-app and email notifications, and returns restricted profile_member_session JWT.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        token = str(data.get('invite_token') or data.get('token') or data.get('invite_code') or '').strip()
+        entered_owner_email = str(data.get('owner_email') or data.get('email') or data.get('invited_email') or '').strip()
+        otp = str(data.get('otp') or data.get('verification_code') or '').strip()
+        device_label = str(data.get('device_label') or request.headers.get('User-Agent', 'Web Browser')[:100]).strip()
+
+        if not token or not entered_owner_email or not otp:
+            return jsonify({'error': 'Invitation token, owner email address, and 6-digit approval code are required.'}), 400
+
+        if not otp.isdigit() or len(otp) != 6:
+            return jsonify({'error': 'Approval code must be exactly 6 digits.'}), 400
+
+        token_h = hash_secret(token)
+        now = dt.datetime.now(dt.timezone.utc)
+
+        # Rate-limit verification attempts
+        client_ip = request.remote_addr or '127.0.0.1'
+        if is_otp_request_rate_limited(client_ip, f"verify:{token_h}", max_attempts=15, window_seconds=600):
+            return jsonify({'error': 'Too many verification attempts. Please wait a few minutes.'}), 429
+
+        invite = find_invite_by_token_or_code(token)
+        if not invite:
+            return jsonify({'error': 'Invalid invitation or owner email address.'}), 404
+
+        if invite.get('status') == 'revoked':
+            return jsonify({'error': 'This invitation was revoked by the account owner.'}), 400
+
+        if invite.get('status') in ['claimed', 'accepted']:
+            return jsonify({'error': 'This invitation has already been accepted.'}), 400
+
+        exp = invite.get('expires_at')
+        if exp:
+            if getattr(exp, 'tzinfo', None) is None:
+                exp = exp.replace(tzinfo=dt.timezone.utc)
+            if exp <= now:
+                return jsonify({'error': 'This invitation has expired.'}), 400
+
+        account_user_id = str(invite.get('account_user_id') or '')
+        owner_user = None
+        if account_user_id:
+            owner_user = users_col.find_one({'user_id': account_user_id})
+            if not owner_user and ObjectId.is_valid(account_user_id):
+                owner_user = users_col.find_one({'_id': ObjectId(account_user_id)})
+            if not owner_user:
+                owner_user = users_col.find_one({'_id': account_user_id})
+        
+        actual_owner_email = (
+            (owner_user.get('email') if owner_user else None) or
+            invite.get('owner_email_normalized') or ''
+        ).strip().lower()
+
+        if actual_owner_email and not invite.get('owner_email_normalized'):
+            profile_invites_col.update_one({'_id': invite['_id']}, {'$set': {'owner_email_normalized': actual_owner_email}})
+
+        norm_entered_owner_email = entered_owner_email.strip().lower()
+        if not actual_owner_email or norm_entered_owner_email != actual_owner_email:
+            return jsonify({'error': 'The entered email does not match the account owner email address.'}), 400
+
+        # Verify OTP attempts limit (max 5)
+        otp_attempts = invite.get('owner_otp_attempt_count', 0) or invite.get('otp_attempts', 0)
+        if otp_attempts >= 5:
+            profile_invites_col.update_one(
+                {'_id': invite['_id']},
+                {'$set': {'owner_otp_hash': None, 'owner_otp_expires_at': None, 'otp_hash': None, 'otp_expires_at': None}}
+            )
+            return jsonify({'error': 'Too many incorrect attempts. Please request a new approval code from the owner.'}), 429
+
+        # Verify OTP expiration
+        otp_exp = invite.get('owner_otp_expires_at') or invite.get('otp_expires_at')
+        if otp_exp:
+            if getattr(otp_exp, 'tzinfo', None) is None:
+                otp_exp = otp_exp.replace(tzinfo=dt.timezone.utc)
+            if otp_exp <= now:
+                return jsonify({'error': 'Approval code has expired. Please request a new code.'}), 400
+
+        # Verify OTP hash
+        expected_otp_hash = invite.get('owner_otp_hash') or invite.get('otp_hash')
+        if not expected_otp_hash or hash_secret(otp) != expected_otp_hash:
+            profile_invites_col.update_one(
+                {'_id': invite['_id']},
+                {'$inc': {'owner_otp_attempt_count': 1, 'otp_attempts': 1}}
+            )
+            return jsonify({'error': 'Incorrect approval code. Please check with the account owner and try again.'}), 400
+
+        # Atomic transition to claimed
+        security_ip_hash = hash_secret(client_ip)
+
+        claimed_invite = profile_invites_col.find_one_and_update(
+            {
+                '_id': invite['_id'],
+                'status': {'$in': ['sent', 'opened', 'owner_approval_pending', 'verification_pending', 'pending']}
+            },
+            {
+                '$set': {
+                    'status': 'claimed',
+                    'owner_approved_at': now,
+                    'claimed_at': now,
+                    'owner_email_normalized': actual_owner_email,
+                    'device_label': device_label[:100],
+                    'security_ip_hash': security_ip_hash,
+                    'owner_otp_hash': None,
+                    'owner_otp_expires_at': None,
+                    'otp_hash': None,
+                    'otp_expires_at': None
+                },
+                '$push': {
+                    'audit_events': {
+                        'event': 'profile_invitation_owner_approved_and_claimed',
+                        'timestamp': now.isoformat(),
+                        'device_label': device_label[:100],
+                        'security_ip_hash': security_ip_hash
+                    }
+                }
+            },
+            return_document=ReturnDocument.AFTER
+        )
+        if not claimed_invite:
+            return jsonify({'error': 'Invitation could not be claimed or was already used.'}), 400
+
+        prof_id = invite.get('profile_id') or invite.get('claimed_profile_id')
+        profile = None
+        if prof_id:
+            try:
+                profile = profiles_col.find_one({'_id': ObjectId(str(prof_id)), 'account_user_id': account_user_id})
+            except Exception:
+                profile = None
+
+        if not profile:
+            new_prof = {
+                'account_user_id': account_user_id,
+                'name': invite.get('relationship', 'Member') or 'Invited Member',
+                'profile_type': 'adult',
+                'relationship': invite.get('relationship', 'Friend'),
+                'is_owner': False,
+                'is_owner_profile': False,
+                'is_archived': False,
+                'status': 'active',
+                'created_at': now,
+                'updated_at': now,
+                'last_used_at': now
+            }
+            p_res = profiles_col.insert_one(new_prof)
+            profile = new_prof
+            profile['_id'] = getattr(p_res, 'inserted_id', new_prof.get('_id'))
+            profile_invites_col.update_one({'_id': invite['_id']}, {'$set': {'claimed_profile_id': profile['_id']}})
+        else:
+            profiles_col.update_one(
+                {'_id': profile['_id']},
+                {'$set': {'status': 'active', 'last_used_at': now}}
+            )
+
+        prof_name = profile.get('name', 'Member')
+
+        # Owner in-app notification
+        notifications_col.insert_one({
+            'account_user_id': account_user_id,
+            'type': 'profile_invitation_claimed',
+            'title': 'Profile Access Approved & Activated',
+            'message': f"Access for profile '{prof_name}' was approved and activated via owner OTP.",
+            'profile_id': str(profile['_id']),
+            'profile_name': prof_name,
+            'masked_email': mask_email(actual_owner_email),
+            'claimed_at': now.isoformat(),
+            'read': False,
+            'created_at': now
+        })
+
+        # Owner email notification
+        try:
+            if actual_owner_email:
+                mail_email = (os.getenv('MAIL_EMAIL') or app.config.get('MAIL_USERNAME') or 'sinchanas4u@gmail.com').strip()
+                mail_pass = (os.getenv('MAIL_PASSWORD') or app.config.get('MAIL_PASSWORD') or 'ytxpvjubamtdhzzz').replace(' ', '').strip()
+
+                def send_owner_alert_async(s_em, s_pw, o_em, p_nm):
+                    if app.config.get('TESTING') or os.getenv('FLASK_ENV') == 'testing':
+                        return
+                    try:
+                        import smtplib
+                        from email.mime.text import MIMEText
+                        msg = MIMEText(
+                            f"Hello,\n\n"
+                            f"The invitation for profile '{p_nm}' in your FitLens account was successfully approved and activated.\n\n"
+                            f"The member now has access only to their assigned profile '{p_nm}'. All other profiles in your account remain locked and completely inaccessible to them.\n\n"
+                            f"You can manage your profiles and invitations anytime in FitLens Settings.",
+                            'plain',
+                            'utf-8'
+                        )
+                        msg['Subject'] = f"FitLens: Profile '{p_nm}' Access Activated"
+                        msg['From'] = f"FitLens AI <{s_em}>"
+                        msg['To'] = o_em
+
+                        srv = None
+                        try:
+                            srv = smtplib.SMTP('smtp.gmail.com', 587, timeout=12)
+                            srv.starttls()
+                        except Exception:
+                            try:
+                                srv = smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=12)
+                            except Exception:
+                                srv = None
+                        if srv:
+                            srv.login(s_em, s_pw)
+                            srv.sendmail(s_em, [o_em], msg.as_string())
+                            srv.quit()
+                            print(f"[OWNER ALERT EMAIL SUCCESS] Sent activation alert to '{o_em}'", flush=True)
+                        else:
+                            print(f"[OWNER ALERT EMAIL NOTICE] Could not connect to smtp.gmail.com on 587 or 465", flush=True)
+                    except Exception as err:
+                        print(f"[OWNER NOTIFY EMAIL NOTICE] {err}", flush=True)
+
+                threading.Thread(
+                    target=send_owner_alert_async,
+                    args=(mail_email, mail_pass, actual_owner_email, prof_name),
+                    daemon=True
+                ).start()
+        except Exception:
+            pass
+
+        # Restricted profile-session JWT for invite.profile_id only
+        profile_session_token = create_access_token(
+            identity=account_user_id,
+            additional_claims={
+                'role': 'profile_member_session',
+                'access_mode': 'invited_profile',
+                'account_user_id': account_user_id,
+                'profile_id': str(profile['_id']),
+                'profile_name': prof_name,
+                'invite_id': str(invite['_id']),
+                'is_owner': False
+            },
+            expires_delta=dt.timedelta(hours=4)
+        )
+
+        return jsonify({
+            'success': True,
+            'profile_session_token': profile_session_token,
+            'profile': {
+                'profile_id': str(profile['_id']),
+                'id': str(profile['_id']),
+                'name': prof_name,
+                'relationship': profile.get('relationship', 'Friend'),
+                'profile_type': profile.get('profile_type', 'adult'),
+                'is_owner': False
+            }
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/notifications', methods=['GET'])
+@jwt_required()
+def get_notifications():
+    """Returns in-app notifications for the account owner."""
+    try:
+        account_user_id = get_jwt_identity()
+        allowed, err_resp, code = verify_profile_owner_access(account_user_id)
+        if not allowed:
+            return err_resp, code
+
+        cursor = notifications_col.find({'account_user_id': str(account_user_id)})
+        if hasattr(cursor, 'sort'):
+            cursor = cursor.sort('created_at', -1)
+
+        notes = []
+        for n in cursor:
+            c_at = n.get('created_at')
+            notes.append({
+                'id': str(n.get('_id', '')),
+                'type': n.get('type', 'info'),
+                'title': n.get('title', 'Notification'),
+                'message': n.get('message', ''),
+                'profile_name': n.get('profile_name', ''),
+                'masked_email': n.get('masked_email', ''),
+                'read': bool(n.get('read', False)),
+                'created_at': c_at.isoformat() if hasattr(c_at, 'isoformat') and c_at else str(c_at) if c_at else None
+            })
+        return jsonify({'success': True, 'notifications': notes}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/notifications/<notification_id>/read', methods=['POST'])
+@jwt_required()
+def mark_notification_read(notification_id):
+    """Marks a notification as read."""
+    try:
+        account_user_id = get_jwt_identity()
+        allowed, err_resp, code = verify_profile_owner_access(account_user_id)
+        if not allowed:
+            return err_resp, code
+
+        try:
+            n_oid = ObjectId(str(notification_id))
+        except Exception:
+            n_oid = notification_id
+
+        notifications_col.update_one(
+            {'_id': n_oid, 'account_user_id': str(account_user_id)},
+            {'$set': {'read': True}}
+        )
+        return jsonify({'success': True}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -2363,11 +3382,28 @@ def claim_invite():
         if not invite_code and not invite_token:
             return jsonify({'error': 'Invitation code or token is required'}), 400
 
-        code_hash = hash_secret(invite_code) if invite_code else None
-        token_hash = hash_secret(invite_token) if invite_token else None
+        cand_hashes = []
+        for val in [invite_code, invite_token]:
+            if not val:
+                continue
+            clean = str(val).strip()
+            cands = {clean, clean.upper(), clean.lower(), clean.replace('-', ''), clean.replace('-', '').upper()}
+            core = clean.upper().replace('-', '').replace(' ', '')
+            if core.startswith('FL'):
+                core = core[2:]
+            if len(core) == 8:
+                p1, p2 = core[:4], core[4:]
+                cands.add(f"FL-{p1}-{p2}")
+                cands.add(f"{p1}-{p2}")
+                cands.add(core)
+                cands.add(f"FL-{core}")
+            elif not clean.upper().startswith('FL-'):
+                cands.add(f"FL-{clean.upper()}")
+                cands.add(f"FL-{clean.replace('-', '').upper()}")
+            cand_hashes.extend([hash_secret(s) for s in cands])
 
         # Rate limit check: 5 attempts per 10 minutes per IP & target code hash
-        target_hash = code_hash or token_hash
+        target_hash = cand_hashes[0] if cand_hashes else None
         if is_claim_rate_limited(client_ip, target_hash=target_hash, max_attempts=5, window_seconds=600):
             return jsonify({'error': 'Too many claim attempts. Please wait a few minutes.'}), 429
 
@@ -2382,11 +3418,11 @@ def claim_invite():
             default_height_cm = 170.0
 
         now = dt.datetime.now(dt.timezone.utc)
-        match_conditions = []
-        if token_hash:
-            match_conditions.append({'invite_token_hash': token_hash})
-        if code_hash:
-            match_conditions.append({'invite_code_hash': code_hash})
+        match_conditions = [
+            {'invite_token_hash': {'$in': cand_hashes}},
+            {'invite_code_hash': {'$in': cand_hashes}},
+            {'token_hash': {'$in': cand_hashes}}
+        ]
 
         # Atomic transition: pending -> claiming with unique fencing token claim_attempt_id
         # Disallow automatic public stale-claim takeover to prevent race conditions.
@@ -2395,7 +3431,7 @@ def claim_invite():
             '$and': [
                 {'$or': match_conditions},
                 {'expires_at': {'$gt': now}},
-                {'status': 'pending'}
+                {'status': {'$in': ['sent', 'opened', 'verification_pending', 'pending']}}
             ]
         }
 
@@ -2416,7 +3452,20 @@ def claim_invite():
             if inv:
                 status = inv.get('status')
                 if status == 'claimed':
-                    return jsonify({'error': 'Invite code has already been used.'}), 400
+                    prof_id = inv.get('claimed_profile_id') or inv.get('profile_id')
+                    prof = None
+                    if prof_id:
+                        try:
+                            prof = profiles_col.find_one({'_id': ObjectId(str(prof_id))})
+                        except Exception:
+                            pass
+                    p_name = prof.get('name') if prof else 'Invited Member'
+                    return jsonify({
+                        'error': f"Invite code has already been used and activated for '{p_name}'.",
+                        'already_claimed': True,
+                        'profile_name': p_name,
+                        'profile_id': str(prof['_id']) if prof else None
+                    }), 400
                 if status == 'claiming':
                     return jsonify({'error': 'Invitation is currently being claimed. Please try again shortly.'}), 409
                 if status == 'revoked':
@@ -2580,7 +3629,8 @@ def save_measurement():
             'user_id': account_user_id, # backward compatibility
             'profile_id': profile['_id'],
             'date': now.strftime('%d-%b-%Y'),
-            'height_cm': data.get('user_height') or data.get('height_cm') or profile.get('default_height_cm', 170.0),
+            'height_cm': data.get('user_height') or data.get('height_cm') or profile.get('height_cm') or profile.get('default_height_cm', 170.0),
+            'height_cm_used': data.get('user_height') or data.get('height_cm') or profile.get('height_cm') or profile.get('default_height_cm', 170.0),
             'source': data.get('source', 'upload'),
             'created_at': now,
             'storage_dir': m_dir,
@@ -6775,6 +7825,7 @@ def process_all_captured_images(session=None):
                 'profile_id': session.profile_id,
                 'date': now.strftime('%d-%b-%Y'),
                 'height_cm': session.user_height_cm,
+                'height_cm_used': session.user_height_cm,
                 'source': 'camera',
                 'created_at': now,
                 'storage_dir': m_rel_dir,
@@ -6949,10 +8000,10 @@ def handle_start_measurement_session(data):
             session.user_height_cm = _normalize_height_to_cm(
                 user_height,
                 height_unit,
-                fallback=profile.get('default_height_cm', 170.0)
+                fallback=profile.get('height_cm') or profile.get('default_height_cm', 170.0)
             )
         else:
-            session.user_height_cm = float(profile.get('default_height_cm', 170.0))
+            session.user_height_cm = float(profile.get('height_cm') or profile.get('default_height_cm', 170.0))
 
         profiles_col.update_one({'_id': profile['_id']}, {'$set': {'last_used_at': dt.datetime.now(dt.timezone.utc)}})
 

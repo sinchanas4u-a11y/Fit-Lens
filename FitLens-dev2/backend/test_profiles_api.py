@@ -17,11 +17,12 @@ import shutil
 import datetime as dt
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
+from werkzeug.security import generate_password_hash
 from backend.app import (
     app, socketio, db, users_col, profiles_col, profile_invites_col,
-    measurements_col, get_or_create_owner_profile, get_measurement_dir,
+    notifications_col, measurements_col, get_or_create_owner_profile, get_measurement_dir,
     claim_ip_rate_limits, claim_target_rate_limits, ACCOUNTS_DIR, DATA_ROOT,
-    recover_stale_claiming_invites
+    recover_stale_claiming_invites, hash_secret
 )
 import bcrypt
 from flask_jwt_extended import create_access_token, decode_token
@@ -573,7 +574,7 @@ class MultiProfileTestCase(unittest.TestCase):
         now = dt.datetime.now(dt.timezone.utc)
         claim_attempt_id = "test-attempt-uuid-001"
         profile_invites_col.update_one(
-            {'_id': invite_id, 'status': 'pending'},
+            {'_id': invite_id, 'status': {'$in': ['sent', 'pending']}},
             {'$set': {'status': 'claiming', 'claiming_at': now, 'claim_attempt_id': claim_attempt_id}}
         )
 
@@ -1158,7 +1159,8 @@ class MultiProfileTestCase(unittest.TestCase):
         # 5. Verify list_profiles returns the email associated with sister's profile
         list_res = self.app.get('/api/profiles', headers=self.headers_a).get_json()
         sister_card = next(p for p in list_res['profiles'] if p['id'] == sister_profile_id)
-        self.assertEqual(sister_card['email'], 'sinchanas3u@gmail.com')
+        self.assertIn(sister_card['email'], ['s***@gmail.com', 'sinchanas3u@gmail.com'])
+        self.assertEqual(sister_card.get('masked_email'), 's***@gmail.com')
 
     def test_30_invite_response_shape_and_security_on_list(self):
         """Item 30: POST returns invite_code, claim_url, expires_at, status; GET never returns raw tokens/urls"""
@@ -1173,7 +1175,7 @@ class MultiProfileTestCase(unittest.TestCase):
         self.assertIn('invite_code', data)
         self.assertIn('claim_url', data)
         self.assertIn('expires_at', data)
-        self.assertEqual(data.get('status'), 'pending')
+        self.assertIn(data.get('status'), ['sent', 'pending'])
         # Check claim_url contains only the invite_code and no sensitive data
         self.assertIn(data['invite_code'], data['claim_url'])
         self.assertNotIn('password', data['claim_url'])
@@ -1549,6 +1551,813 @@ class OwnerCredentialMultiProfileFlowTestCase(unittest.TestCase):
         self.assertEqual(claims.get('profile_id'), p1)
         switch_attempt = self.app.get(f'/api/profiles', headers={'Authorization': f'Bearer {token}'})
         self.assertEqual(switch_attempt.status_code, 403)
+
+
+
+class NonOwnerInvitationFlowTestCase(unittest.TestCase):
+    """
+    Comprehensive test suite for the non-owner member invitation flow:
+    - Opaque token generation and hash storage
+    - Validation and audit on open
+    - Email verification with single-use OTP
+    - Atomic transition to claimed
+    - Privacy-safe hashed IP and owner notifications
+    - Restricted profile-session JWT isolation
+    - Owner dashboard status and audit display
+    """
+
+    def setUp(self):
+        self.app = app.test_client()
+        self.app.testing = True
+        app.config['TESTING'] = True
+        self.ctx = app.app_context()
+        self.ctx.push()
+
+        self._cleanup()
+
+        # Create owner user
+        owner_doc = {
+            'user_id': 'owner_inv_test_user',
+            'name': 'Account Owner',
+            'email': 'owner@fitlens.com',
+            'password_hash': generate_password_hash('OwnerPass123'),
+            'created_at': dt.datetime.now(dt.timezone.utc)
+        }
+        users_col.insert_one(owner_doc)
+        self.owner_headers = {
+            'Authorization': f"Bearer {create_access_token(identity='owner_inv_test_user')}",
+            'Content-Type': 'application/json'
+        }
+
+        # Create owner profile
+        owner_prof = {
+            'account_user_id': 'owner_inv_test_user',
+            'name': 'Account Owner',
+            'profile_type': 'owner',
+            'is_owner': True,
+            'is_owner_profile': True,
+            'status': 'active',
+            'created_at': dt.datetime.now(dt.timezone.utc)
+        }
+        profiles_col.insert_one(owner_prof)
+
+        # Create a non-owner profile
+        member_prof = {
+            'account_user_id': 'owner_inv_test_user',
+            'name': 'Harshitha',
+            'relationship': 'Sister',
+            'profile_type': 'adult',
+            'is_owner': False,
+            'is_owner_profile': False,
+            'status': 'active',
+            'created_at': dt.datetime.now(dt.timezone.utc)
+        }
+        m_res = profiles_col.insert_one(member_prof)
+        self.member_profile_id = str(m_res.inserted_id)
+
+    def tearDown(self):
+        self._cleanup()
+        self.ctx.pop()
+
+    def _cleanup(self):
+        profiles_col.delete_many({'account_user_id': 'owner_inv_test_user'})
+        profile_invites_col.delete_many({'account_user_id': 'owner_inv_test_user'})
+        users_col.delete_many({'user_id': 'owner_inv_test_user'})
+        notifications_col.delete_many({'account_user_id': 'owner_inv_test_user'})
+
+    def test_01_owner_creates_invitation_with_opaque_token_and_hash_storage(self):
+        """Owner creates one-time invite; only token hash is stored, never plain token."""
+        res = self.app.post('/api/profile-invites', headers=self.owner_headers, json={
+            'profile_id': self.member_profile_id,
+            'invited_email': 'harshitha@example.com',
+            'relationship': 'Sister'
+        })
+        self.assertEqual(res.status_code, 201)
+        data = res.get_json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['status'], 'sent')
+        self.assertEqual(data['status_display'], 'Sent')
+        self.assertIn('invite_token', data)
+        self.assertIn('claim_url', data)
+        self.assertIn('deep_link', data)
+        self.assertIn(data['invite_token'], data['claim_url'])
+
+        # Verify database doc: plain invite_token is NOT stored; token_hash IS stored
+        invite_doc = profile_invites_col.find_one({'_id': ObjectId(data['invite_id'])})
+        self.assertIsNotNone(invite_doc)
+        self.assertNotIn('invite_token', invite_doc)
+        self.assertIn('token_hash', invite_doc)
+        self.assertEqual(invite_doc['token_hash'], hash_secret(data['invite_token']))
+        self.assertEqual(invite_doc['status'], 'sent')
+        self.assertEqual(invite_doc['owner_email_normalized'], 'owner@fitlens.com')
+        self.assertIsNone(invite_doc['owner_otp_hash'])
+        self.assertIsNone(invite_doc['opened_at'])
+        self.assertIsNone(invite_doc['owner_approved_at'])
+        self.assertIsNone(invite_doc['claimed_at'])
+
+        # Audit events initialized
+        audit = invite_doc.get('audit_events', [])
+        self.assertTrue(any(a['event'] == 'profile_invitation_created' for a in audit))
+
+    def test_02_non_owner_validates_opaque_token_and_audit(self):
+        """Non-owner opens invite link; token is validated and opened_at is recorded."""
+        c_res = self.app.post('/api/profile-invites', headers=self.owner_headers, json={
+            'profile_id': self.member_profile_id,
+            'invited_email': 'harshitha@example.com'
+        }).get_json()
+        token = c_res['invite_token']
+
+        # Public validation without any credentials
+        v_res = self.app.post('/api/invite/validate', json={'token': token})
+        self.assertEqual(v_res.status_code, 200)
+        v_data = v_res.get_json()
+        self.assertTrue(v_data['success'])
+        self.assertEqual(v_data['status'], 'opened')
+        self.assertEqual(v_data['masked_owner_email'], 'o***@fitlens.com')
+        self.assertEqual(v_data['assigned_profile']['name'], 'Harshitha')
+        self.assertTrue(v_data['assigned_profile']['locked'])
+
+        # Does NOT expose owner password, measurements, or raw token
+        self.assertNotIn('password', str(v_data).lower())
+        self.assertNotIn('measurements', v_data['assigned_profile'])
+        self.assertNotIn('height', v_data['assigned_profile'])
+        self.assertNotIn('token', v_data)
+
+        # Check DB updated opened_at and audit event
+        invite_doc = profile_invites_col.find_one({'_id': ObjectId(c_res['invite_id'])})
+        self.assertIsNotNone(invite_doc['opened_at'])
+        self.assertEqual(invite_doc['status'], 'opened')
+        audit = invite_doc.get('audit_events', [])
+        self.assertTrue(any(a['event'] == 'profile_invitation_opened' for a in audit))
+
+    def test_03_non_owner_otp_request_mismatched_owner_email_rejected(self):
+        """Entering incorrect owner email returns generic error without leaking account details."""
+        c_res = self.app.post('/api/profile-invites', headers=self.owner_headers, json={
+            'profile_id': self.member_profile_id,
+            'invited_email': 'harshitha@example.com'
+        }).get_json()
+        token = c_res['invite_token']
+
+        # Request OTP with wrong owner email
+        res = self.app.post('/api/invite/request-owner-otp', json={
+            'invite_token': token,
+            'owner_email': 'intruder@otherdomain.com'
+        })
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('does not match', res.get_json()['error'])
+
+    def test_04_non_owner_otp_request_sets_owner_approval_pending(self):
+        """Matching owner email dispatches single-use OTP and sets owner_approval_pending."""
+        c_res = self.app.post('/api/profile-invites', headers=self.owner_headers, json={
+            'profile_id': self.member_profile_id,
+            'invited_email': 'harshitha@example.com'
+        }).get_json()
+        token = c_res['invite_token']
+
+        res = self.app.post('/api/invite/request-owner-otp', json={
+            'invite_token': token,
+            'owner_email': 'Owner@FitLens.com'  # Tests email normalization
+        })
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.get_json()['success'])
+        # Plaintext OTP is NEVER returned in response
+        self.assertNotIn('otp', res.get_json())
+        self.assertNotIn('code', res.get_json())
+
+        # DB has owner_approval_pending, owner_otp_hash, owner_otp_expires_at
+        invite_doc = profile_invites_col.find_one({'_id': ObjectId(c_res['invite_id'])})
+        self.assertEqual(invite_doc['status'], 'owner_approval_pending')
+        self.assertIsNotNone(invite_doc['owner_otp_hash'])
+        self.assertIsNotNone(invite_doc['owner_otp_expires_at'])
+        self.assertIsNotNone(invite_doc['owner_approval_requested_at'])
+        audit = invite_doc.get('audit_events', [])
+        self.assertTrue(any(a['event'] == 'profile_invitation_owner_otp_requested' for a in audit))
+
+    def test_05_non_owner_otp_verification_and_atomic_claim(self):
+        """Validating owner OTP atomically transitions invite to claimed, sets owner_approved_at, and creates owner notification."""
+        c_res = self.app.post('/api/profile-invites', headers=self.owner_headers, json={
+            'profile_id': self.member_profile_id,
+            'invited_email': 'harshitha@example.com'
+        }).get_json()
+        token = c_res['invite_token']
+
+        self.app.post('/api/invite/request-owner-otp', json={
+            'invite_token': token,
+            'owner_email': 'owner@fitlens.com'
+        })
+
+        invite_doc = profile_invites_col.find_one({'_id': ObjectId(c_res['invite_id'])})
+        test_otp = invite_doc.get('_test_last_owner_otp') or invite_doc.get('_test_last_otp')
+        self.assertIsNotNone(test_otp)
+
+        # Invalid OTP failure
+        bad_res = self.app.post('/api/invite/verify-owner-otp', json={
+            'invite_token': token,
+            'owner_email': 'owner@fitlens.com',
+            'otp': '000000'
+        })
+        self.assertEqual(bad_res.status_code, 400)
+
+        # Correct OTP verification
+        verify_res = self.app.post('/api/invite/verify-owner-otp', json={
+            'invite_token': token,
+            'owner_email': 'owner@fitlens.com',
+            'otp': test_otp,
+            'device_label': 'Chrome on Windows 11'
+        })
+        self.assertEqual(verify_res.status_code, 200)
+        v_data = verify_res.get_json()
+        self.assertTrue(v_data['success'])
+        self.assertIn('profile_session_token', v_data)
+        self.assertEqual(v_data['profile']['name'], 'Harshitha')
+        self.assertFalse(v_data['profile']['is_owner'])
+
+        # Verify DB transition to claimed
+        claimed_doc = profile_invites_col.find_one({'_id': ObjectId(c_res['invite_id'])})
+        self.assertEqual(claimed_doc['status'], 'claimed')
+        self.assertIsNotNone(claimed_doc['claimed_at'])
+        self.assertIsNotNone(claimed_doc['owner_approved_at'])
+        self.assertEqual(claimed_doc['owner_email_normalized'], 'owner@fitlens.com')
+        self.assertEqual(claimed_doc['device_label'], 'Chrome on Windows 11')
+        self.assertIsNotNone(claimed_doc['security_ip_hash'])
+        self.assertIsNone(claimed_doc['owner_otp_hash'])
+
+        # Audit events includes profile_invitation_owner_approved_and_claimed
+        audit = claimed_doc.get('audit_events', [])
+        self.assertTrue(any(a['event'] == 'profile_invitation_owner_approved_and_claimed' for a in audit))
+
+        # In-app notification created for owner
+        notif = notifications_col.find_one({
+            'account_user_id': 'owner_inv_test_user',
+            'type': 'profile_invitation_claimed'
+        })
+        self.assertIsNotNone(notif)
+        self.assertEqual(notif['masked_email'], 'o***@fitlens.com')
+        self.assertEqual(notif['profile_name'], 'Harshitha')
+        self.assertFalse(notif['read'])
+
+    def test_06_restricted_profile_session_jwt_isolation(self):
+        """Restricted profile session JWT contains restricted claims and cannot access owner actions."""
+        c_res = self.app.post('/api/profile-invites', headers=self.owner_headers, json={
+            'profile_id': self.member_profile_id,
+            'invited_email': 'harshitha@example.com'
+        }).get_json()
+        token = c_res['invite_token']
+
+        self.app.post('/api/invite/request-owner-otp', json={'invite_token': token, 'owner_email': 'owner@fitlens.com'})
+        inv = profile_invites_col.find_one({'_id': ObjectId(c_res['invite_id'])})
+        verify_res = self.app.post('/api/invite/verify-owner-otp', json={
+            'invite_token': token,
+            'owner_email': 'owner@fitlens.com',
+            'otp': inv['_test_last_owner_otp']
+        }).get_json()
+
+        member_jwt = verify_res['profile_session_token']
+        claims = decode_token(member_jwt)
+        self.assertEqual(claims['role'], 'profile_member_session')
+        self.assertEqual(claims['access_mode'], 'invited_profile')
+        self.assertEqual(claims['account_user_id'], 'owner_inv_test_user')
+        self.assertEqual(claims['profile_id'], self.member_profile_id)
+        self.assertEqual(claims['invite_id'], c_res['invite_id'])
+        self.assertFalse(claims.get('is_owner', False))
+
+        m_headers = {'Authorization': f'Bearer {member_jwt}', 'Content-Type': 'application/json'}
+
+        # 1. /api/auth/me returns safe member user profile, NOT owner
+        me_res = self.app.get('/api/auth/me', headers=m_headers)
+        self.assertEqual(me_res.status_code, 200)
+        me_user = me_res.get_json()['user']
+        self.assertEqual(me_user['name'], 'Harshitha')
+        self.assertEqual(me_user['role'], 'profile_member_session')
+        self.assertEqual(me_user['access_mode'], 'invited_profile')
+        self.assertFalse(me_user['is_owner'])
+
+        # 2. Member CANNOT manage profiles (create, delete, list owner profiles)
+        cant_manage = self.app.get('/api/profiles', headers=m_headers)
+        self.assertEqual(cant_manage.status_code, 403)
+
+        cant_invite = self.app.post('/api/profile-invites', headers=m_headers, json={'relationship': 'Friend'})
+        self.assertEqual(cant_invite.status_code, 403)
+
+        # 3. /api/profiles/available returns ONLY their assigned profile, unlocked
+        avail_res = self.app.get('/api/profiles/available', headers=m_headers)
+        self.assertEqual(avail_res.status_code, 200)
+        avail_profiles = avail_res.get_json()['profiles']
+        self.assertEqual(len(avail_profiles), 1)
+        self.assertEqual(avail_profiles[0]['id'], self.member_profile_id)
+        self.assertFalse(avail_profiles[0]['locked'])
+
+    def test_07_owner_dashboard_displays_invitation_audit_and_masked_email(self):
+        """Owner dashboard displays invitation status, audit timestamps, and masked email."""
+        c_res = self.app.post('/api/profile-invites', headers=self.owner_headers, json={
+            'profile_id': self.member_profile_id,
+            'invited_email': 'harshitha@example.com'
+        }).get_json()
+        token = c_res['invite_token']
+
+        # Open token
+        self.app.post('/api/invite/validate', json={'token': token})
+
+        # Claim invite
+        self.app.post('/api/invite/request-owner-otp', json={'invite_token': token, 'owner_email': 'owner@fitlens.com'})
+        inv = profile_invites_col.find_one({'_id': ObjectId(c_res['invite_id'])})
+        self.app.post('/api/invite/verify-owner-otp', json={
+            'invite_token': token,
+            'owner_email': 'owner@fitlens.com',
+            'otp': inv['_test_last_owner_otp']
+        })
+
+        # Owner lists invites
+        list_res = self.app.get('/api/profile-invites', headers=self.owner_headers)
+        self.assertEqual(list_res.status_code, 200)
+        invites = list_res.get_json()['invites']
+        self.assertTrue(len(invites) >= 1)
+
+        target_inv = next(i for i in invites if i['invite_id'] == c_res['invite_id'])
+        self.assertEqual(target_inv['display_name'], 'Harshitha')
+        self.assertEqual(target_inv['status_display'], 'Accepted')
+        self.assertEqual(target_inv['masked_email'], 'h***@example.com')
+        self.assertIsNotNone(target_inv['sent_at'])
+        self.assertIsNotNone(target_inv['opened_at'])
+        self.assertIsNotNone(target_inv['owner_approved_at'])
+        self.assertIsNotNone(target_inv['claimed_at'])
+
+        # Does NOT expose raw token, OTP, or non-owner measurements
+        self.assertNotIn('token', target_inv)
+        self.assertNotIn('otp', target_inv)
+        self.assertNotIn('measurements', target_inv)
+        self.assertNotIn('raw_ip', target_inv)
+
+        # Owner checks notifications
+        notif_res = self.app.get('/api/notifications', headers=self.owner_headers)
+        self.assertEqual(notif_res.status_code, 200)
+        notifs = notif_res.get_json()['notifications']
+        self.assertTrue(len(notifs) >= 1)
+        self.assertEqual(notifs[0]['type'], 'profile_invitation_claimed')
+        self.assertFalse(notifs[0]['read'])
+
+        # Mark read
+        read_res = self.app.post(f"/api/notifications/{notifs[0]['id']}/read", headers=self.owner_headers)
+        self.assertEqual(read_res.status_code, 200)
+
+    def test_08_owner_can_revoke_invitation(self):
+        """Owner revokes invite; status becomes revoked and invite can no longer be used."""
+        c_res = self.app.post('/api/profile-invites', headers=self.owner_headers, json={
+            'profile_id': self.member_profile_id,
+            'invited_email': 'harshitha@example.com'
+        }).get_json()
+        inv_id = c_res['invite_id']
+        token = c_res['invite_token']
+
+        # Owner revokes
+        rev_res = self.app.delete(f'/api/profile-invites/{inv_id}', headers=self.owner_headers)
+        self.assertEqual(rev_res.status_code, 200)
+
+        # Non-owner attempt to validate returns error
+        v_res = self.app.post('/api/invite/validate', json={'token': token})
+        self.assertEqual(v_res.status_code, 400)
+        self.assertIn('revoked', v_res.get_json()['error'])
+
+    def test_09_resend_cooldown_and_max_attempt_limit(self):
+        """Resend cooldown enforces 60s wait; 5 failed OTP attempts locks out the OTP."""
+        c_res = self.app.post('/api/profile-invites', headers=self.owner_headers, json={
+            'profile_id': self.member_profile_id,
+            'invited_email': 'harshitha@example.com'
+        }).get_json()
+        token = c_res['invite_token']
+
+        # Initial request succeeds
+        res1 = self.app.post('/api/invite/request-owner-otp', json={
+            'invite_token': token,
+            'owner_email': 'owner@fitlens.com'
+        })
+        self.assertEqual(res1.status_code, 200)
+
+        # Immediate second request fails with 429 cooldown error
+        res2 = self.app.post('/api/invite/request-owner-otp', json={
+            'invite_token': token,
+            'owner_email': 'owner@fitlens.com'
+        })
+        self.assertEqual(res2.status_code, 429)
+        self.assertIn('seconds before requesting a new approval code', res2.get_json()['error'])
+
+        # Attempt 5 wrong OTPs
+        for _ in range(5):
+            self.app.post('/api/invite/verify-owner-otp', json={
+                'invite_token': token,
+                'owner_email': 'owner@fitlens.com',
+                'otp': '999999'
+            })
+
+        # 6th attempt should be blocked with 429
+        fail_res = self.app.post('/api/invite/verify-owner-otp', json={
+            'invite_token': token,
+            'owner_email': 'owner@fitlens.com',
+            'otp': '999999'
+        })
+        self.assertEqual(fail_res.status_code, 429)
+        self.assertIn('Too many incorrect attempts', fail_res.get_json()['error'])
+
+
+class NonOwnerSelfServiceEditTestCase(unittest.TestCase):
+    """
+    Test suite verifying FitLens restricted non-owner profile self-service editing:
+    1. Member can update own display_name.
+    2. Member can update own height_cm.
+    3. Member cannot send profile_id in body to update another profile (HTTP 403).
+    4. Member cannot update relationship/profile_type/status/account_user_id/role (HTTP 403).
+    5. Member cannot update archived/deleted profile (HTTP 403).
+    6. Owner management route behavior remains unchanged.
+    7. Historical measurement height_cm_used is unchanged after profile height update.
+    8. Direct access to Settings/Profile Management remains blocked for invited sessions.
+    """
+
+    def setUp(self):
+        self.app = app.test_client()
+        self.app.testing = True
+        self.ctx = app.app_context()
+        self.ctx.push()
+
+        self.user_id = 'test_owner_self_edit_user'
+
+        # Clean test database
+        users_col.delete_many({'user_id': self.user_id})
+        profiles_col.delete_many({'account_user_id': self.user_id})
+        profile_invites_col.delete_many({'account_user_id': self.user_id})
+        measurements_col.delete_many({'account_user_id': self.user_id})
+        try:
+            db['audit_logs'].delete_many({'actor_role': 'profile_member_session'})
+        except Exception:
+            pass
+
+        # Create owner user
+        self.owner_email = 'owner_self_edit@fitlens.com'
+        users_col.insert_one({
+            'user_id': self.user_id,
+            'email': self.owner_email,
+            'name': 'Owner User',
+            'password_hash': bcrypt.hashpw(b'OwnerPassword123', bcrypt.gensalt()).decode()
+        })
+
+        # Ensure default owner profile
+        self.owner_profile = get_or_create_owner_profile(self.user_id)
+        self.owner_profile_id = str(self.owner_profile['_id'])
+
+        now = dt.datetime.now(dt.timezone.utc)
+        # Create invited member profile
+        member_doc = {
+            'account_user_id': self.user_id,
+            'name': 'Original Member Name',
+            'display_name': 'Original Member Name',
+            'relationship': 'Family',
+            'profile_type': 'adult',
+            'is_owner': False,
+            'is_owner_profile': False,
+            'status': 'active',
+            'is_archived': False,
+            'default_height_cm': 165.0,
+            'height_cm': 165.0,
+            'created_at': now,
+            'updated_at': now
+        }
+        res = profiles_col.insert_one(member_doc)
+        self.member_profile_id = str(res.inserted_id)
+
+        # Create another member profile to test cross-profile isolation
+        another_doc = {
+            'account_user_id': self.user_id,
+            'name': 'Another Member',
+            'display_name': 'Another Member',
+            'relationship': 'Friend',
+            'profile_type': 'adult',
+            'is_owner': False,
+            'is_owner_profile': False,
+            'status': 'active',
+            'is_archived': False,
+            'default_height_cm': 175.0,
+            'height_cm': 175.0,
+            'created_at': now,
+            'updated_at': now
+        }
+        res2 = profiles_col.insert_one(another_doc)
+        self.another_profile_id = str(res2.inserted_id)
+
+        # Generate restricted profile session JWT
+        self.member_jwt = create_access_token(
+            identity=self.user_id,
+            additional_claims={
+                'role': 'profile_member_session',
+                'access_mode': 'invited_profile',
+                'account_user_id': self.user_id,
+                'profile_id': self.member_profile_id
+            }
+        )
+        self.member_headers = {
+            'Authorization': f'Bearer {self.member_jwt}',
+            'Content-Type': 'application/json'
+        }
+
+        # Generate owner session token
+        self.owner_jwt = create_access_token(
+            identity=self.user_id,
+            additional_claims={
+                'role': 'owner_profile_session',
+                'access_mode': 'owner_profile',
+                'account_user_id': self.user_id,
+                'profile_id': self.owner_profile_id
+            }
+        )
+        self.owner_headers = {
+            'Authorization': f'Bearer {self.owner_jwt}',
+            'Content-Type': 'application/json'
+        }
+
+    def tearDown(self):
+        try:
+            self.ctx.pop()
+        except Exception:
+            pass
+
+    def test_01_member_can_update_own_display_name(self):
+        """1. Member can update own display_name and audit event is recorded without measurements."""
+        res = self.app.patch(
+            '/api/profiles/me/personal-details',
+            headers=self.member_headers,
+            json={'display_name': 'Updated Member Name'}
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data.get('success'))
+        self.assertEqual(data['profile']['display_name'], 'Updated Member Name')
+        self.assertEqual(data['profile']['name'], 'Updated Member Name')
+
+        # Verify DB document
+        profile = profiles_col.find_one({'_id': ObjectId(self.member_profile_id)})
+        self.assertEqual(profile['name'], 'Updated Member Name')
+        self.assertEqual(profile['display_name'], 'Updated Member Name')
+
+        # Verify audit event in profile document
+        audit_events = profile.get('audit_events', [])
+        self.assertTrue(any(e.get('event') == 'profile_personal_details_updated' for e in audit_events))
+        evt = next(e for e in audit_events if e.get('event') == 'profile_personal_details_updated')
+        self.assertEqual(evt['profile_id'], self.member_profile_id)
+        self.assertEqual(evt['actor_role'], 'profile_member_session')
+        self.assertEqual(evt['fields_updated'], ['display_name'])
+        self.assertIn('timestamp', evt)
+        # Ensure audit log does not store previous/new body measurement data
+        for forbidden in ['measurements', 'measurement', 'chest', 'waist', 'hips', 'height_cm_used', 'values']:
+            self.assertNotIn(forbidden, evt)
+
+        # GET /api/profiles/me/personal-details returns updated info
+        get_res = self.app.get('/api/profiles/me/personal-details', headers=self.member_headers)
+        self.assertEqual(get_res.status_code, 200)
+        self.assertEqual(get_res.get_json()['profile']['display_name'], 'Updated Member Name')
+
+    def test_02_member_can_update_own_height_cm(self):
+        """2. Member can update own height_cm with server-side validation."""
+        # Valid height update
+        res = self.app.patch(
+            '/api/profiles/me/personal-details',
+            headers=self.member_headers,
+            json={'height_cm': 172.5}
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data.get('success'))
+        self.assertEqual(data['profile']['height_cm'], 172.5)
+
+        # Verify DB document
+        profile = profiles_col.find_one({'_id': ObjectId(self.member_profile_id)})
+        self.assertEqual(profile['height_cm'], 172.5)
+        self.assertEqual(profile['default_height_cm'], 172.5)
+
+        # Invalid height validation: below 100 cm
+        err_low = self.app.patch(
+            '/api/profiles/me/personal-details',
+            headers=self.member_headers,
+            json={'height_cm': 95}
+        )
+        self.assertEqual(err_low.status_code, 400)
+
+        # Invalid height validation: above 250 cm
+        err_high = self.app.patch(
+            '/api/profiles/me/personal-details',
+            headers=self.member_headers,
+            json={'height_cm': 280}
+        )
+        self.assertEqual(err_high.status_code, 400)
+
+        # Invalid non-numeric height
+        err_str = self.app.patch(
+            '/api/profiles/me/personal-details',
+            headers=self.member_headers,
+            json={'height_cm': 'tall'}
+        )
+        self.assertEqual(err_str.status_code, 400)
+
+    def test_03_member_cannot_send_profile_id_in_body_to_update_another_profile(self):
+        """3. Member cannot send profile_id in body to update another profile (HTTP 403)."""
+        res = self.app.patch(
+            '/api/profiles/me/personal-details',
+            headers=self.member_headers,
+            json={
+                'display_name': 'Attacker Name',
+                'profile_id': self.another_profile_id
+            }
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertIn('Forbidden', res.get_json().get('error', ''))
+
+        # Even sending own profile_id in body is rejected with 403 because profile_id is not allowed
+        res_own = self.app.patch(
+            '/api/profiles/me/personal-details',
+            headers=self.member_headers,
+            json={
+                'display_name': 'Attacker Name',
+                'profile_id': self.member_profile_id
+            }
+        )
+        self.assertEqual(res_own.status_code, 403)
+
+        # Verify target profile was unchanged
+        another = profiles_col.find_one({'_id': ObjectId(self.another_profile_id)})
+        self.assertEqual(another['name'], 'Another Member')
+
+    def test_04_member_cannot_update_relationship_profile_type_status_account_user_id_role(self):
+        """4. Member cannot update relationship, profile_type, status, account_user_id, role, or other protected fields (HTTP 403)."""
+        protected_tests = [
+            {'relationship': 'Owner'},
+            {'profile_type': 'owner'},
+            {'status': 'deleted'},
+            {'account_user_id': 'malicious_account'},
+            {'role': 'owner_profile_session'},
+            {'access_mode': 'owner_profile'},
+            {'is_owner': True},
+            {'is_archived': True},
+            {'owner_email': 'hacker@example.com'},
+            {'created_by': 'attacker'}
+        ]
+
+        for payload in protected_tests:
+            res = self.app.patch(
+                '/api/profiles/me/personal-details',
+                headers=self.member_headers,
+                json=payload
+            )
+            self.assertEqual(
+                res.status_code, 403,
+                f"Payload {payload} should have been rejected with 403 Forbidden, but got {res.status_code}"
+            )
+
+        # Verify DB document is completely unmodified
+        member = profiles_col.find_one({'_id': ObjectId(self.member_profile_id)})
+        self.assertEqual(member['relationship'], 'Family')
+        self.assertEqual(member['profile_type'], 'adult')
+        self.assertEqual(member['status'], 'active')
+        self.assertEqual(member['account_user_id'], self.user_id)
+        self.assertFalse(member.get('is_owner', False))
+
+    def test_05_member_cannot_update_archived_or_deleted_profile(self):
+        """5. Member cannot update an archived or deleted profile (HTTP 403)."""
+        # Archive profile
+        profiles_col.update_one(
+            {'_id': ObjectId(self.member_profile_id)},
+            {'$set': {'is_archived': True, 'status': 'archived'}}
+        )
+
+        res_archived = self.app.patch(
+            '/api/profiles/me/personal-details',
+            headers=self.member_headers,
+            json={'display_name': 'Try Arch Update'}
+        )
+        self.assertEqual(res_archived.status_code, 403)
+
+        # Mark as deleted
+        profiles_col.update_one(
+            {'_id': ObjectId(self.member_profile_id)},
+            {'$set': {'is_archived': False, 'status': 'deleted'}}
+        )
+
+        res_deleted = self.app.patch(
+            '/api/profiles/me/personal-details',
+            headers=self.member_headers,
+            json={'display_name': 'Try Del Update'}
+        )
+        self.assertEqual(res_deleted.status_code, 403)
+
+    def test_06_owner_management_route_behavior_remains_unchanged(self):
+        """6. Owner management route behavior remains completely blocked with 403 for restricted sessions."""
+        # Owner can list profiles
+        owner_list = self.app.get('/api/profiles', headers=self.owner_headers)
+        self.assertEqual(owner_list.status_code, 200)
+
+        # Member is DENIED on all owner management routes:
+        # 1. Profile listing
+        self.assertEqual(self.app.get('/api/profiles', headers=self.member_headers).status_code, 403)
+        # 2. Profile creation
+        self.assertEqual(self.app.post('/api/profiles', headers=self.member_headers, json={'name': 'New'}).status_code, 403)
+        # 3. Admin profile edit
+        self.assertEqual(self.app.patch(f'/api/profiles/{self.member_profile_id}', headers=self.member_headers, json={'name': 'New'}).status_code, 403)
+        # 4. Archive profile
+        self.assertEqual(self.app.post(f'/api/profiles/{self.member_profile_id}/archive', headers=self.member_headers).status_code, 403)
+        # 5. Delete profile
+        self.assertEqual(self.app.delete(f'/api/profiles/{self.member_profile_id}', headers=self.member_headers).status_code, 403)
+        # 6. Create invitation
+        self.assertEqual(self.app.post('/api/profile-invites', headers=self.member_headers, json={'relationship': 'Friend'}).status_code, 403)
+        # 7. List invitations
+        self.assertEqual(self.app.get('/api/profile-invites', headers=self.member_headers).status_code, 403)
+        # 8. Owner notifications
+        self.assertEqual(self.app.get('/api/notifications', headers=self.member_headers).status_code, 403)
+
+    def test_07_historical_measurement_height_cm_used_unchanged_after_profile_height_update(self):
+        """7. Historical measurement height_cm_used is unchanged after profile height update, while future measurements use updated height."""
+        now = dt.datetime.now(dt.timezone.utc)
+        # Insert a historical measurement for this member
+        hist_meas_id = ObjectId()
+        measurements_col.insert_one({
+            '_id': hist_meas_id,
+            'analysis_id': 'A_HIST_1234',
+            'account_user_id': self.user_id,
+            'profile_id': ObjectId(self.member_profile_id),
+            'height_cm': 165.0,
+            'height_cm_used': 165.0,
+            'source': 'upload',
+            'created_at': now - dt.timedelta(days=7),
+            'measurements': {'chest': 95.0, 'waist': 80.0}
+        })
+
+        # Member updates profile height from 165.0 to 182.0
+        update_res = self.app.patch(
+            '/api/profiles/me/personal-details',
+            headers=self.member_headers,
+            json={'height_cm': 182.0}
+        )
+        self.assertEqual(update_res.status_code, 200)
+
+        # Historical measurement retains its original height_cm and height_cm_used
+        hist_record = measurements_col.find_one({'_id': hist_meas_id})
+        self.assertEqual(hist_record['height_cm_used'], 165.0)
+        self.assertEqual(hist_record['height_cm'], 165.0)
+
+        # Simulate future measurement for updated profile: reads updated height
+        updated_profile = profiles_col.find_one({'_id': ObjectId(self.member_profile_id)})
+        future_height = updated_profile.get('height_cm') or updated_profile.get('default_height_cm')
+        self.assertEqual(future_height, 182.0)
+
+        future_meas_id = ObjectId()
+        measurements_col.insert_one({
+            '_id': future_meas_id,
+            'analysis_id': 'A_FUTURE_5678',
+            'account_user_id': self.user_id,
+            'profile_id': ObjectId(self.member_profile_id),
+            'height_cm': future_height,
+            'height_cm_used': future_height,
+            'source': 'upload',
+            'created_at': now,
+            'measurements': {'chest': 96.0, 'waist': 81.0}
+        })
+
+        future_record = measurements_col.find_one({'_id': future_meas_id})
+        self.assertEqual(future_record['height_cm_used'], 182.0)
+        self.assertEqual(future_record['height_cm'], 182.0)
+
+        # Historical record is still untouched
+        hist_check = measurements_col.find_one({'_id': hist_meas_id})
+        self.assertEqual(hist_check['height_cm_used'], 165.0)
+
+    def test_08_direct_access_to_settings_and_profile_management_blocked_for_invited_sessions(self):
+        """8. Direct access to account settings and profile management remains blocked with HTTP 403 for invited sessions."""
+        # 1. Change password blocked
+        res_pw = self.app.post('/api/auth/change-password', headers=self.member_headers, json={
+            'current_password': 'OwnerPassword123',
+            'new_password': 'NewPassword123!',
+            'confirm_password': 'NewPassword123!'
+        })
+        self.assertEqual(res_pw.status_code, 403)
+
+        # 2. Update account profile name blocked
+        res_prof = self.app.put('/api/auth/update-profile', headers=self.member_headers, json={
+            'name': 'Hacked Owner Name'
+        })
+        self.assertEqual(res_prof.status_code, 403)
+
+        # 3. Delete account blocked
+        res_del = self.app.delete('/api/auth/delete-account', headers=self.member_headers, json={
+            'password': 'OwnerPassword123'
+        })
+        self.assertEqual(res_del.status_code, 403)
+
+        # 4. Save face embedding blocked
+        res_face = self.app.post('/api/auth/save-face', headers=self.member_headers, json={
+            'front_image': 'data:image/jpeg;base64,fakeimage'
+        })
+        self.assertEqual(res_face.status_code, 403)
+
+        # 5. Unlock owner profile blocked
+        res_owner_unlock = self.app.post('/api/profiles/unlock-owner', headers=self.member_headers, json={
+            'password': 'OwnerPassword123'
+        })
+        self.assertEqual(res_owner_unlock.status_code, 403)
 
 
 if __name__ == '__main__':

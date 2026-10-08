@@ -36,7 +36,7 @@ export default function ProfileSelectionModal({
     }
   }, [isOpen, initialMemberEmail]);
 
-  if (!isOpen) return null;
+  if (!isOpen || getAccessMode() === 'invited_profile') return null;
 
   const handleUnlockByEmail = async (emailToUnlock) => {
     const trimmed = (emailToUnlock || memberEmail).trim().toLowerCase();
